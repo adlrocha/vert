@@ -1,0 +1,40 @@
+[package]
+name = "vert"
+version = "0.1.0"
+description = "Grok what your agents are building: a live, navigable terminal view of a git repo."
+license = "MIT"
+repository = "https://github.com/adlrocha/vert"
+readme = "README.md"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+crossterm = "0.29.0"
+git2 = "0.21.0"
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+ignore = "0.4.33"
+notify = "8"
+nucleo-matcher = "0.3.1"
+ratatui = "0.30.2"
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+thiserror = "2.0.21"
+unicode-width = "0.2.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
