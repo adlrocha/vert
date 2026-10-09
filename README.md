@@ -37,7 +37,8 @@ and contents, and see where change is concentrating.
 
 ## Install
 
-You need [Rust](https://rustup.rs) and git. Then:
+Works on Linux and macOS. You need [Rust](https://rustup.rs) and git; on macOS,
+`xcode-select --install` provides git and the C compiler the build needs. Then:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adlrocha/vert/main/install.sh | bash

@@ -34,11 +34,13 @@ impl Layout {
     ///
     /// # Errors
     /// Returns [`crate::git::GitError::Bare`] for bare repositories.
+    /// Paths are canonicalised because some watchers (`FSEvents` on macOS)
+    /// report fully resolved paths, e.g. `/private/var/…` for `/var/…`.
     pub fn of(repo: &git2::Repository) -> Result<Self, crate::git::GitError> {
         Ok(Self {
-            workdir: crate::git::workdir(repo)?,
-            git_dir: repo.path().to_path_buf(),
-            common_dir: repo.commondir().to_path_buf(),
+            workdir: canonical(&crate::git::workdir(repo)?),
+            git_dir: canonical(repo.path()),
+            common_dir: canonical(repo.commondir()),
         })
     }
 
@@ -55,6 +57,11 @@ impl Layout {
         }
         (!is_ignored(rel)).then_some(Change::Workdir)
     }
+}
+
+/// Resolves symlinks, keeping the path as given if it cannot be resolved.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn git_internal(rel: &Path) -> Option<Change> {
@@ -186,6 +193,27 @@ mod tests {
         ))));
         assert!(is_change(EventKind::Modify(ModifyKind::Any)));
         assert!(is_change(EventKind::Create(CreateKind::File)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn layout_resolves_symlinked_repo_paths() {
+        let t = crate::git::testutil::TestRepo::new();
+        let links = tempfile::tempdir().expect("tempdir");
+        let link = links.path().join("repo-link");
+        std::os::unix::fs::symlink(t.path(), &link).expect("symlink");
+        let repo = git2::Repository::open(&link).expect("open via symlink");
+        let layout = Layout::of(&repo).expect("layout");
+        let real = t.path().canonicalize().expect("canon");
+        assert_eq!(layout.workdir, real);
+        assert_eq!(layout.git_dir, real.join(".git"));
+        // A resolved event path is recognised as a working-tree change.
+        let event = real.join("src/main.rs");
+        assert_eq!(layout.classify(&event, |_| false), Some(Change::Workdir));
+        assert_eq!(
+            canonical(Path::new("/no/such/path")),
+            PathBuf::from("/no/such/path")
+        );
     }
 
     #[test]

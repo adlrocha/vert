@@ -73,7 +73,7 @@ resolve_source() {
         (cd "$SOURCE" && pwd)
         return
     fi
-    need git "Install it with your package manager."
+    need git "Install it with your package manager (on macOS: xcode-select --install)."
     if [ -d "$SRC_DIR/.git" ]; then
         say "Fetching $REF from $REPO_URL" >&2
         git -C "$SRC_DIR" remote set-url origin "$REPO_URL"
