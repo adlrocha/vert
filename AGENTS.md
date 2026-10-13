@@ -32,7 +32,16 @@ Done means `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo
 
 ## Commits and PRs
 
-Conventional commits, lowercase imperative subject, no trailing period: `feat:`, `fix:`, `perf:`, `refactor:`, `test:`, `docs:`, `ci:`, `build:`. Reviews come from the nibble-review action; resolve each finding by fixing it or replying with evidence why it does not apply, never silently ignoring one.
+Conventional commits, lowercase imperative subject, no trailing period: `feat:`, `fix:`, `perf:`, `refactor:`, `test:`, `docs:`, `ci:`, `build:`. Every PR follows the delivery loop below.
+
+## Delivery loop
+
+Every change lands through this loop, agent-authored changes included:
+
+1. One branch per change. Implement with tests; verify locally before pushing.
+2. Open the PR ready for review — drafts skip the review entirely.
+3. Iterate with the nibble-review action until it LGTMs the **current head** and the `review` check is green. On a ⚠️ or ⛔ verdict, read every finding and resolve each one by fixing it or replying with evidence why it does not apply; never silently ignore one. Push the resolution and wait for the re-review before concluding.
+4. Stop and hand off for merge. Report the verdict, CI state, and anything the user must decide. Do not merge, enable auto-merge, or push to `main`; merging is a human decision.
 
 ## Before yielding
 
