@@ -1,4 +1,4 @@
-//! vert: grok what your agents are building.
+//! vert: understand what your agents are building.
 //!
 //! A terminal UI that shows a live, labelled feed of a git repository's
 //! changes (including uncommitted work), syntax-highlighted diffs, fast

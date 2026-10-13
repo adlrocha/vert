@@ -1,4 +1,4 @@
-//! vert: a terminal UI to grok what your agents are building.
+//! vert: a terminal UI to understand what your agents are building.
 //!
 //! This binary is thin glue: terminal setup, the input thread, the event
 //! loop and the external editor. State lives in [`vert::app`] and I/O in

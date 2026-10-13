@@ -1,7 +1,7 @@
 [package]
 name = "vert"
 version = "0.1.0"
-description = "Grok what your agents are building: a live, navigable terminal view of a git repo."
+description = "Understand what your agents are building: a live, navigable terminal view of a git repo."
 license = "MIT"
 repository = "https://github.com/adlrocha/vert"
 readme = "README.md"

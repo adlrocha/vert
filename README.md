@@ -1,6 +1,6 @@
 # vert
 
-**Grok what your agents are building.** `vert` is a terminal UI that shows a
+**Understand what your agents are building.** `vert` is a terminal UI that shows a
 live, labelled feed of a git repository's changes, uncommitted work
 included. From the feed you can open syntax-highlighted diffs, search files
 and contents, and see where change is concentrating. The Branches tab lists

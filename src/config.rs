@@ -7,7 +7,7 @@ use clap::Parser;
 
 use crate::labels::{LabelError, Labeler};
 
-/// Grok what your agents are building: a live, navigable view of a git repo's changes.
+/// Understand what your agents are building: a live, navigable view of a git repo's changes.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "vert", version, about)]
 pub struct Config {
