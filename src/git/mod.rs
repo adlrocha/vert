@@ -1,5 +1,6 @@
 //! Reading changes out of a git repository.
 
+pub mod branches;
 pub mod diff;
 pub mod feed;
 
@@ -23,6 +24,9 @@ pub enum GitError {
     /// Bare repositories have no working tree to explore.
     #[error("bare repositories are not supported (no working tree)")]
     Bare,
+    /// The change is not stored locally (a pull request diff comes from GitHub).
+    #[error("this change has no local diff")]
+    NotLocal,
     /// A git operation failed.
     #[error("failed to {context}")]
     Op {
@@ -110,6 +114,16 @@ pub enum Target {
     WorkingTree,
     /// A commit relative to its first parent.
     Commit(Oid),
+    /// Everything `head` adds since `base` (a branch against the point where it
+    /// left the base branch). Without a base, `head` is compared to an empty tree.
+    Range {
+        /// Merge base, if the histories share one.
+        base: Option<Oid>,
+        /// Tip of the branch.
+        head: Oid,
+    },
+    /// An open pull request; its diff is fetched from GitHub.
+    PullRequest(u64),
 }
 
 /// The status of a changed file.
@@ -201,6 +215,19 @@ pub(crate) fn make_diff(repo: &Repository, target: Target) -> Result<Diff<'_>, G
             repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
                 .ctx("diff commit against its parent")?
         }
+        Target::Range { base, head } => {
+            let head_tree = repo
+                .find_commit(head)
+                .and_then(|c| c.tree())
+                .ctx("read branch tree")?;
+            let base_tree = base
+                .map(|oid| repo.find_commit(oid).and_then(|c| c.tree()))
+                .transpose()
+                .ctx("read base tree")?;
+            repo.diff_tree_to_tree(base_tree.as_ref(), Some(&head_tree), Some(&mut opts))
+                .ctx("diff branch against its base")?
+        }
+        Target::PullRequest(_) => return Err(GitError::NotLocal),
     };
     diff.find_similar(Some(DiffFindOptions::new().renames(true)))
         .ctx("detect renames")?;

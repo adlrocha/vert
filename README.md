@@ -1,13 +1,15 @@
 # vert
 
-**Grok what your agents are building.** `vert` is a terminal UI that shows a
+**Understand what your agents are building.** `vert` is a terminal UI that shows a
 live, labelled feed of a git repository's changes, uncommitted work
 included. From the feed you can open syntax-highlighted diffs, search files
-and contents, and see where change is concentrating.
+and contents, and see where change is concentrating. The Branches tab lists
+every worktree, branch and open pull request, so you can follow agents that
+work in parallel.
 
 ```
  ◆ vert │ nibble  ⎇ main                                              ✦ 2 new  ● live
-  1 Feed    2 Hotspots    3 Search
+  1 Feed    2 Hotspots    3 Search    4 Branches
 
 ╭ Changes 143 ─────────────────────────────────────────────────────────────────────────╮
 │▌   now  working  Uncommitted changes across 2 modules               +26  ■■■■■  1 file│
@@ -30,6 +32,14 @@ and contents, and see where change is concentrating.
   case, regex with literal fallback, respects `.gitignore`).
 - **Hotspots:** files or modules ranked by how often they change over 24h, 7d,
   30d or all loaded history. `⏎` filters the feed to that file or module.
+- **Branches, worktrees and pull requests:** one row per line of work. A
+  row shows the checkout it's in, uncommitted files (`●3`), commits ahead and
+  behind the base branch, its size, and the matching open pull request with
+  its CI checks (✓ passing, ✗ failing, ● running). Pull requests without a local branch get their own rows. `⏎` opens the most
+  relevant diff: uncommitted work first, then the branch against the point
+  where it left the base, then the pull request. `b` and `p` pick the branch
+  or pull request diff. Diffs of linked worktrees stay live, and files open
+  from the worktree they belong to.
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter. `e` opens `$VISUAL`/`$EDITOR` at that line
   (vim, nvim, helix, VS Code, Cursor, …).
@@ -73,11 +83,26 @@ Press `?` inside vert for all keys. The essentials:
 
 | Where     | Keys                                                                   |
 | --------- | ---------------------------------------------------------------------- |
-| Anywhere  | `1` `2` `3` / `tab` switch tab · `j` `k` move · `⏎` open · `esc` back · `q` quit |
+| Anywhere  | `1` `2` `3` `4` / `tab` switch tab · `j` `k` move · `⏎` open · `esc` back · `q` quit |
 | Feed      | `n` next new change · `esc` clear filter · `r` reload                   |
 | Hotspots  | `w` time window · `m` files/modules · `⏎` filter feed · `o`/`e` view/edit |
 | Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
+| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter · `r` refresh      |
+
+### Pull requests
+
+vert lists open pull requests when `origin` is on GitHub. It needs a token
+and looks for one in this order:
+
+1. `GH_TOKEN`
+2. `GITHUB_TOKEN`
+3. `gh auth token`, if the [GitHub CLI](https://cli.github.com) is logged in
+
+If no token is found, the Branches tab says so and shows everything else.
+vert only reads from GitHub: it lists open pull requests with their check
+status, and fetches a pull request's diff when you open it. It never fetches
+or writes to your repository. `--no-network` turns GitHub access off.
 
 ### Options
 
@@ -92,6 +117,14 @@ Press `?` inside vert for all keys. The essentials:
 | `--max-highlight-lines`  | 20000   | Longer files and diffs skip syntax colours      |
 | `--max-file-kb`          | 4096    | Largest file the viewer opens                   |
 | `--no-watch`             | off     | Disable live updates                            |
+| `--base`                 | auto    | Branch to compare against (`origin/HEAD`, else `main`/`master`) |
+| `--max-branches`         | 100     | Branches without a worktree to show, newest first |
+| `--branch-refresh-secs`  | 5       | Branches tab rescan interval                    |
+| `--pr-refresh-secs`      | 60      | Pull request refresh interval                   |
+| `--max-prs`              | 50      | Open pull requests to list (at most 100)        |
+| `--github-api`           | `https://api.github.com` | API URL; for GitHub Enterprise `https://HOST/api/v3` |
+| `--github-timeout-secs`  | 15      | GitHub request timeout                          |
+| `--no-network`           | off     | Never contact GitHub                            |
 
 ## Development
 
@@ -112,7 +145,8 @@ the event loop. This keeps all interaction logic testable without a terminal.
 
 | Module      | Responsibility                                                   |
 | ----------- | ---------------------------------------------------------------- |
-| `git`       | Feed entries (with a per-commit cache) and structured diffs       |
+| `git`       | Feed entries (with a per-commit cache), branches and worktrees, structured diffs |
+| `github`    | `origin` detection, token lookup, open pull requests and their diffs |
 | `labels`    | Size, breadth and revert classification                          |
 | `hotspots`  | Ranking by change frequency                                      |
 | `search`    | Fuzzy file names (nucleo) and content search (ripgrep crates)    |

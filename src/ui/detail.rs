@@ -10,6 +10,7 @@ use super::feed::{chips, file_row};
 use super::{Hints, empty_state, module_list, panel, plural, spans_width, stat_spans, truncate};
 use crate::age::ago;
 use crate::app::{DetailView, FileView, Focus};
+use crate::git::Target;
 use crate::git::diff::{FileDiff, LineKind};
 use crate::highlight::{Highlighter, sanitize};
 use crate::theme;
@@ -206,6 +207,16 @@ fn split_header(header: &str) -> (&str, &str) {
         })
 }
 
+/// Why a change has no files to show.
+fn empty_reason(target: Target) -> &'static str {
+    match target {
+        Target::WorkingTree => "the working tree matches HEAD",
+        Target::Commit(_) => "this commit changes no files",
+        Target::Range { .. } => "the branch has nothing its base lacks",
+        Target::PullRequest(_) => "this pull request changes no files",
+    }
+}
+
 /// Draws the detail view.
 pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i64) {
     let [summary, panes] =
@@ -249,7 +260,7 @@ pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i
         let block = panel(false);
         let inner = block.inner(diff_area);
         frame.render_widget(block, diff_area);
-        empty_state(frame, inner, "No changes", "the working tree matches HEAD");
+        empty_state(frame, inner, "No changes", empty_reason(d.entry.target));
         return;
     };
     let mut title = vec![Span::raw(format!(" {} ", file.stat.path))];
@@ -309,7 +320,7 @@ fn draw_summary(frame: &mut Frame<'_>, area: Rect, d: &DetailView, now: i64) {
     let chip_spans = chips(e);
     let chip_w = spans_width(&chip_spans);
     let title_w = usize::from(area.width).saturating_sub(chip_w + 4);
-    let title = if e.is_worktree() {
+    let title = if e.is_own_worktree() {
         "Uncommitted changes"
     } else {
         e.summary.as_str()
@@ -503,6 +514,22 @@ mod tests {
             100,
         );
         assert_eq!(text(&empty.code[0]), "No content changes");
+    }
+
+    #[test]
+    fn empty_reasons_match_the_change() {
+        use crate::git::Target;
+        let oid = git2::Oid::ZERO_SHA1;
+        assert!(empty_reason(Target::WorkingTree).contains("working tree"));
+        assert!(empty_reason(Target::Commit(oid)).contains("commit"));
+        assert!(
+            empty_reason(Target::Range {
+                base: None,
+                head: oid
+            })
+            .contains("branch")
+        );
+        assert!(empty_reason(Target::PullRequest(1)).contains("pull request"));
     }
 
     #[test]

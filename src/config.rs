@@ -7,7 +7,7 @@ use clap::Parser;
 
 use crate::labels::{LabelError, Labeler};
 
-/// Grok what your agents are building: a live, navigable view of a git repo's changes.
+/// Understand what your agents are building: a live, navigable view of a git repo's changes.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "vert", version, about)]
 pub struct Config {
@@ -58,6 +58,39 @@ pub struct Config {
     /// Disable live file watching.
     #[arg(long)]
     pub no_watch: bool,
+
+    /// Branch that other branches are compared against (default: the remote's
+    /// default branch, else main or master).
+    #[arg(long, value_name = "BRANCH")]
+    pub base: Option<String>,
+
+    /// Maximum branches without a worktree to show (most recent first).
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_branches: u32,
+
+    /// How often the Branches tab rescans branches and worktrees, in seconds.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..))]
+    pub branch_refresh_secs: u32,
+
+    /// How often the Branches tab refreshes open pull requests, in seconds.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..))]
+    pub pr_refresh_secs: u32,
+
+    /// Maximum open pull requests to list.
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+    pub max_prs: u16,
+
+    /// GitHub REST API base URL (for GitHub Enterprise: `https://HOST/api/v3`).
+    #[arg(long, default_value = "https://api.github.com", value_name = "URL")]
+    pub github_api: String,
+
+    /// Seconds before a GitHub request gives up.
+    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
+    pub github_timeout_secs: u64,
+
+    /// Never contact GitHub (pull requests are not shown).
+    #[arg(long)]
+    pub no_network: bool,
 }
 
 impl Config {
@@ -93,6 +126,31 @@ impl Config {
         self.max_file_kb.saturating_mul(1024)
     }
 
+    /// Branch cap as a `usize`.
+    #[must_use]
+    pub fn branch_limit(&self) -> usize {
+        usize::try_from(self.max_branches).unwrap_or(usize::MAX)
+    }
+
+    /// GitHub settings, or `None` when network access is off.
+    #[must_use]
+    pub fn github(&self) -> Option<crate::jobs::GitHub> {
+        (!self.no_network).then(|| crate::jobs::GitHub {
+            endpoint: crate::github::Endpoint::new(&self.github_api),
+            timeout: Duration::from_secs(self.github_timeout_secs),
+            max_prs: self.max_prs,
+        })
+    }
+
+    /// Refresh intervals for the Branches tab.
+    #[must_use]
+    pub fn refresh(&self) -> crate::app::Refresh {
+        crate::app::Refresh {
+            branches: Some(i64::from(self.branch_refresh_secs)),
+            pulls: (!self.no_network).then(|| i64::from(self.pr_refresh_secs)),
+        }
+    }
+
     /// Search-result cap as a `usize`.
     #[must_use]
     pub fn search_limit(&self) -> usize {
@@ -113,6 +171,23 @@ mod tests {
         assert_eq!(config.commit_limit(), 500);
         assert_eq!(config.search_limit(), 2000);
         assert_eq!(config.max_file_bytes(), 4096 * 1024);
+        assert_eq!(config.branch_limit(), 100);
+        assert_eq!(config.base, None);
+        let github = config.github().expect("network on by default");
+        assert_eq!(github.endpoint.web_host(), "github.com");
+        assert_eq!(github.timeout, Duration::from_secs(15));
+        assert_eq!(github.max_prs, 50);
+        let refresh = config.refresh();
+        assert_eq!((refresh.branches, refresh.pulls), (Some(5), Some(60)));
+    }
+
+    #[test]
+    fn no_network_turns_off_pull_requests() {
+        let config = Config::parse_from(["vert", "--no-network", "--base", "develop"]);
+        assert!(config.github().is_none());
+        assert_eq!(config.refresh().pulls, None);
+        assert_eq!(config.base.as_deref(), Some("develop"));
+        assert!(Config::try_parse_from(["vert", "--max-prs", "101"]).is_err());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The change feed: commits plus the live working tree, labelled.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use git2::{Oid, Repository, Sort};
@@ -14,9 +14,13 @@ use crate::labels::{Labeler, Size, reverted_target};
 pub struct Entry {
     /// What this entry describes.
     pub target: Target,
-    /// Stable identifier: full hash, or `"worktree"`.
+    /// Stable identifier: the full hash of a commit, `"worktree"` for vert's
+    /// own uncommitted changes, `"worktree:<path>"` for a linked worktree's,
+    /// `"branch:<name>"` for a branch, `"<base>..<head>"` for an unnamed
+    /// range, or `"pr:<number>"` for a pull request.
     pub id: String,
-    /// Short hash, or `"working"`.
+    /// Short label: a short hash (a range's is its head's), `"working"`, a
+    /// branch name or `"#<number>"`.
     pub short: String,
     /// First line of the message.
     pub summary: String,
@@ -42,24 +46,39 @@ pub struct Entry {
     pub reverted: bool,
     /// This commit is itself a revert.
     pub is_revert: bool,
+    /// The linked worktree whose files this change belongs to, or `None` for
+    /// vert's own working directory.
+    pub root: Option<PathBuf>,
 }
 
 /// The identifier used for the working-tree entry.
 pub const WORKTREE_ID: &str = "worktree";
 
 impl Entry {
-    fn build(target: Target, files: Vec<FileStat>, labeler: &Labeler) -> Self {
-        let added = files.iter().map(|f| f.added).sum();
-        let removed = files.iter().map(|f| f.removed).sum();
-        let modules: Vec<String> = files
-            .iter()
-            .map(|f| labeler.module_of(&f.path))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+    /// Builds an unnamed entry for `target` from its changed files, labelled
+    /// by `labeler`. Callers fill in the message, author and time.
+    #[must_use]
+    pub fn new(target: Target, files: Vec<FileStat>, labeler: &Labeler) -> Self {
+        let mut entry = Self::blank(target);
+        entry.relabel(files, labeler);
+        entry
+    }
+
+    /// An entry for `target` with no files or labels yet, for changes whose
+    /// files arrive later (a pull request's come with its diff).
+    #[must_use]
+    pub fn blank(target: Target) -> Self {
         let (id, short) = match target {
             Target::WorkingTree => (WORKTREE_ID.to_owned(), "working".to_owned()),
             Target::Commit(oid) => (oid.to_string(), short_id(oid)),
+            Target::Range { base, head } => (
+                format!(
+                    "{}..{head}",
+                    base.map(|b| b.to_string()).unwrap_or_default()
+                ),
+                short_id(head),
+            ),
+            Target::PullRequest(number) => (format!("pr:{number}"), format!("#{number}")),
         };
         Self {
             target,
@@ -69,21 +88,56 @@ impl Entry {
             body: String::new(),
             author: String::new(),
             time: 0,
-            size: labeler.size(added + removed),
-            wide: labeler.is_wide(modules.len()),
-            files,
-            added,
-            removed,
-            modules,
+            files: Vec::new(),
+            added: 0,
+            removed: 0,
+            modules: Vec::new(),
+            size: Size::Small,
+            wide: false,
             reverted: false,
             is_revert: false,
+            root: None,
         }
     }
 
-    /// Whether this is the uncommitted working-tree entry.
+    /// Drops every changed file and the labels derived from them, leaving the
+    /// entry as [`Entry::blank`] would label it.
+    pub fn clear_files(&mut self) {
+        let empty = Self::blank(self.target);
+        self.files = empty.files;
+        self.added = empty.added;
+        self.removed = empty.removed;
+        self.modules = empty.modules;
+        self.size = empty.size;
+        self.wide = empty.wide;
+    }
+
+    /// Replaces the changed files and recomputes the totals and labels.
+    pub fn relabel(&mut self, files: Vec<FileStat>, labeler: &Labeler) {
+        self.added = files.iter().map(|f| f.added).sum();
+        self.removed = files.iter().map(|f| f.removed).sum();
+        self.modules = files
+            .iter()
+            .map(|f| labeler.module_of(&f.path))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        self.size = labeler.size(self.added + self.removed);
+        self.wide = labeler.is_wide(self.modules.len());
+        self.files = files;
+    }
+
+    /// Whether this holds uncommitted changes of any checkout: vert's own or a
+    /// linked worktree (see [`Entry::root`]).
     #[must_use]
     pub fn is_worktree(&self) -> bool {
         self.target == Target::WorkingTree
+    }
+
+    /// Whether this holds the uncommitted changes of vert's own checkout.
+    #[must_use]
+    pub fn is_own_worktree(&self) -> bool {
+        self.is_worktree() && self.root.is_none()
     }
 
     /// Whether any changed file has `path`.
@@ -95,7 +149,7 @@ impl Entry {
     }
 }
 
-fn file_stats(repo: &Repository, target: Target) -> Result<Vec<FileStat>, GitError> {
+pub(crate) fn file_stats(repo: &Repository, target: Target) -> Result<Vec<FileStat>, GitError> {
     let diff = make_diff(repo, target)?;
     (0..diff.deltas().len())
         .map(|i| delta_stat(&diff, i).map(|o| o.map(|(stat, _)| stat)))
@@ -156,7 +210,7 @@ pub fn load_commits_cached(
         .iter()
         .filter_map(|e| match e.target {
             Target::Commit(oid) => Some((oid, e.clone())),
-            Target::WorkingTree => None,
+            _ => None,
         })
         .collect();
     Ok(entries)
@@ -165,7 +219,7 @@ pub fn load_commits_cached(
 fn commit_entry(repo: &Repository, oid: Oid, labeler: &Labeler) -> Result<Entry, GitError> {
     let commit = repo.find_commit(oid).ctx("read commit")?;
     let files = file_stats(repo, Target::Commit(oid))?;
-    let mut entry = Entry::build(Target::Commit(oid), files, labeler);
+    let mut entry = Entry::new(Target::Commit(oid), files, labeler);
     entry.summary = commit
         .summary_bytes()
         .map_or_else(|| "(no message)".to_owned(), lossy);
@@ -181,7 +235,7 @@ fn commit_entry(repo: &Repository, oid: Oid, labeler: &Labeler) -> Result<Entry,
     Ok(entry)
 }
 
-fn lossy(bytes: &[u8]) -> String {
+pub(crate) fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
@@ -214,7 +268,7 @@ pub fn load_worktree(
         return Ok(None);
     }
     let workdir = super::workdir(repo)?;
-    let mut entry = Entry::build(Target::WorkingTree, files, labeler);
+    let mut entry = Entry::new(Target::WorkingTree, files, labeler);
     "Uncommitted changes".clone_into(&mut entry.summary);
     entry.time = entry
         .files
@@ -370,6 +424,23 @@ mod tests {
         assert!(statuses.contains(&("gone.txt", FileStatus::Deleted)));
         assert!(statuses.contains(&("new/file.txt", FileStatus::Added)));
         assert!(statuses.contains(&("keep.txt", FileStatus::Modified)));
+
+        assert!(wt.is_own_worktree());
+        let mut linked = wt.clone();
+        linked.root = Some(PathBuf::from("/elsewhere"));
+        assert!(linked.is_worktree() && !linked.is_own_worktree());
+
+        linked.clear_files();
+        assert!(linked.files.is_empty() && linked.modules.is_empty());
+        assert_eq!((linked.added, linked.removed), (0, 0));
+        assert_eq!(linked.size, Size::Small);
+        assert!(!linked.wide);
+        assert_eq!(
+            linked.root,
+            Some(PathBuf::from("/elsewhere")),
+            "keeps its identity"
+        );
+        assert_eq!(linked.summary, wt.summary);
     }
 
     #[test]

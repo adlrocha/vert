@@ -1,6 +1,7 @@
 //! Rendering. Everything here is a pure function of [`App`] state, except
 //! that list offsets and viewport heights are written back for scrolling.
 
+mod branches;
 pub mod detail;
 mod feed;
 mod hotspots;
@@ -31,7 +32,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_header(frame, header, app);
     let hints = match app.views.last_mut() {
         Some(View::Detail(d)) => {
-            draw_crumbs(frame, tabs, &["Feed", &d.entry.short]);
+            draw_crumbs(frame, tabs, &[app.tab.title(), &d.entry.short]);
             detail::draw_detail(frame, body, d, app.now);
             detail::DETAIL_HINTS
         }
@@ -46,6 +47,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 Tab::Feed => feed::draw(frame, body, app),
                 Tab::Hotspots => hotspots::draw(frame, body, app),
                 Tab::Search => search::draw(frame, body, app),
+                Tab::Branches => branches::draw(frame, body, app),
             }
         }
     };
@@ -158,7 +160,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Everywhere",
         &[
-            ("1 2 3 / tab", "switch tab"),
+            ("1 2 3 4 / tab", "switch tab"),
             ("j k ↑ ↓", "move"),
             ("ctrl-d ctrl-u", "half page"),
             ("g G", "top / bottom"),
@@ -175,6 +177,15 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("m", "files / modules"),
             ("⏎", "filter feed"),
             ("o e", "view / edit file"),
+        ],
+    ),
+    (
+        "Branches",
+        &[
+            ("⏎", "uncommitted, else branch, else PR"),
+            ("b", "branch vs base"),
+            ("p", "pull request diff"),
+            ("f", "filter rows"),
         ],
     ),
     (
@@ -725,6 +736,7 @@ mod render_tests {
             content: Ok("fn main() {}\n\tlet x = 1;\n".to_owned()),
             line: 2,
             marks: BTreeSet::from([2]),
+            root: None,
         });
         for (w, h) in SIZES {
             screen(&mut app, w, h);
@@ -740,6 +752,7 @@ mod render_tests {
             content: Ok(String::new()),
             line: 1,
             marks: BTreeSet::new(),
+            root: None,
         });
         assert!(screen(&mut app, 100, 20).contains("Empty file"));
         press(&mut app, KeyCode::Esc);
@@ -748,6 +761,7 @@ mod render_tests {
             content: Err("It's a binary file.".to_owned()),
             line: 1,
             marks: BTreeSet::new(),
+            root: None,
         });
         assert!(screen(&mut app, 100, 20).contains("binary"));
         press(&mut app, KeyCode::Esc);
@@ -798,6 +812,7 @@ mod render_tests {
             wide: true,
             reverted,
             is_revert,
+            root: None,
         };
         let (mut app, _) = App::new(
             RepoInfo {
@@ -867,5 +882,173 @@ mod render_tests {
         assert!(screen(&mut app, 100, 20).contains("indexing"));
         app.update(Msg::Files(Vec::new()));
         assert!(screen(&mut app, 100, 20).contains("Find a file"));
+    }
+
+    /// A Branches tab with every kind of row: the current checkout, a dirty
+    /// linked worktree with a draft PR, a remote branch, a detached checkout
+    /// and a PR without a local branch.
+    fn branches_app() -> App {
+        use crate::app::{Refresh, pull_entry};
+        use crate::git::branches::{Branch, Branches, Worktree};
+        use crate::github::{Checks, PullRequest};
+        use crate::labels::Size;
+
+        let pr = |number: u64, head: &str, draft: bool, checks| PullRequest {
+            number,
+            title: format!("Pull request number {number}"),
+            author: "claude".to_owned(),
+            draft,
+            head: head.to_owned(),
+            fork: false,
+            updated: 2_500,
+            added: 9,
+            removed: 4,
+            checks,
+        };
+        let changes = |summary: &str, size| {
+            let mut e = pull_entry(&pr(0, "", false, None));
+            summary.clone_into(&mut e.summary);
+            e.size = size;
+            e.added = 120;
+            e.removed = 30;
+            e
+        };
+        let mk = |name: &str, ahead_behind, worktree: Option<Worktree>| Branch {
+            name: name.to_owned(),
+            branch: Some(name.to_owned()),
+            remote: name.starts_with("origin/"),
+            ahead_behind,
+            changes: Some(changes(&format!("work on {name}"), Size::Large)),
+            worktree,
+        };
+        let wt = |name: &str, current: bool, dirty: bool| Worktree {
+            name: name.to_owned(),
+            path: std::path::PathBuf::from(name),
+            current,
+            dirty: dirty.then(|| changes("dirty", Size::Small)),
+        };
+        let (mut app, _) = App::new(
+            RepoInfo {
+                name: "x".to_owned(),
+                branch: None,
+            },
+            1,
+            100,
+            3_000,
+        );
+        app.set_refresh(Refresh {
+            branches: Some(5),
+            pulls: Some(60),
+        });
+        press(&mut app, KeyCode::Char('4'));
+        assert!(screen(&mut app, 120, 20).contains("Scanning branches"));
+        assert!(screen(&mut app, 120, 20).contains("PRs loading"));
+        app.update(Msg::Branches(Ok(Branches {
+            base: Some("origin/main".to_owned()),
+            branches: vec![
+                mk("main", Some((0, 2)), Some(wt("main", true, false))),
+                mk(
+                    "agent/auth",
+                    Some((3, 1)),
+                    Some(wt("agent-wt", false, true)),
+                ),
+                mk("origin/feat", Some((2, 0)), None),
+                Branch {
+                    ahead_behind: None,
+                    changes: None,
+                    ..mk("detached", None, None)
+                },
+            ],
+        })));
+        app.update(Msg::Pulls(Ok((
+            "o/r".to_owned(),
+            vec![
+                pr(42, "agent/auth", true, Some(Checks::Failing)),
+                pr(43, "elsewhere", false, Some(Checks::Passing)),
+            ],
+        ))));
+        app
+    }
+
+    #[test]
+    fn branches_render() {
+        use crate::app::PullStatus;
+        use crate::git::branches::Branches;
+        use crate::github::PullsError;
+        use crate::labels::Size;
+
+        let mut app = branches_app();
+        let mut dirty = crate::app::pull_entry(&app.branches.pulls[0]);
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+        let s = screen(&mut app, 200, 20);
+        for needle in [
+            "Branches 5",
+            "● here",
+            "worktree",
+            "remote",
+            "pr ",
+            "merged",
+            "↑3 ↓1",
+            "↑2",
+            "●0",
+            "#42 ✗ draft",
+            "#43 ✓",
+            "Pull request number 43",
+            "work on origin/feat",
+            "▲ large",
+            "vs origin/main",
+            "2 open PRs on o/r",
+        ] {
+            assert!(s.contains(needle), "missing {needle}:\n{s}");
+        }
+
+        let statuses = [
+            (Err(PullsError::NoToken), "gh auth login"),
+            (
+                Err(PullsError::Unsupported(
+                    "origin is not on github.com".to_owned(),
+                )),
+                "No PRs: origin",
+            ),
+            (
+                Err(PullsError::Failed("rate limit".to_owned())),
+                "PRs: rate limit",
+            ),
+        ];
+        for (result, needle) in statuses {
+            app.update(Msg::Pulls(result));
+            let s = screen(&mut app, 160, 20);
+            assert!(s.contains(needle), "missing {needle}:\n{s}");
+        }
+        app.branches.pull_status = PullStatus::Off;
+        assert!(screen(&mut app, 160, 20).contains("PRs off"));
+
+        press(&mut app, KeyCode::Char('f'));
+        assert!(screen(&mut app, 160, 20).contains("· worktrees"));
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('f'));
+        assert!(screen(&mut app, 160, 20).contains("f changes the filter"));
+        press(&mut app, KeyCode::Char('f'));
+
+        app.update(Msg::Branches(Err("no repo".to_owned())));
+        assert!(screen(&mut app, 160, 20).contains("no repo"));
+        app.update(Msg::Branches(Ok(Branches::default())));
+        assert!(screen(&mut app, 160, 20).contains("Nothing to show"));
+
+        // A linked worktree's diff names the worktree and the tab.
+        "Uncommitted changes in agent-wt".clone_into(&mut dirty.summary);
+        dirty.size = Size::Small;
+        dirty.target = crate::git::Target::WorkingTree;
+        dirty.root = Some(std::path::PathBuf::from("/wt"));
+        app.update(Msg::Diff {
+            entry: Box::new(dirty),
+            result: Ok(Vec::new()),
+            refresh: false,
+        });
+        let s = screen(&mut app, 140, 20);
+        assert!(s.contains("Uncommitted changes in agent-wt"), "{s}");
+        assert!(s.contains("Branches  ›"), "{s}");
     }
 }

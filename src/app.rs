@@ -4,13 +4,20 @@
 //! returns the [`Effect`]s (I/O) the runtime should perform. This keeps all
 //! interaction logic testable without a terminal or repository.
 
+mod branches;
+
 use std::collections::{BTreeSet, HashSet};
+use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+pub use branches::{BranchesState, PullStatus, Refresh, Row, RowFilter, pull_entry};
+
 use crate::git::RepoInfo;
+use crate::git::branches::Branches;
 use crate::git::diff::{FileDiff, LineKind};
 use crate::git::feed::Entry;
+use crate::github::{PullRequest, PullsError};
 use crate::highlight::{Fragment, Highlighter};
 use crate::hotspots::{self, Grouping, Hotspot, Window};
 use crate::labels::module_of;
@@ -32,11 +39,13 @@ pub enum Tab {
     Hotspots,
     /// Search.
     Search,
+    /// Branches, worktrees and pull requests.
+    Branches,
 }
 
 impl Tab {
     /// All tabs in display order.
-    pub const ALL: [Self; 3] = [Self::Feed, Self::Hotspots, Self::Search];
+    pub const ALL: [Self; 4] = [Self::Feed, Self::Hotspots, Self::Search, Self::Branches];
 
     /// Display name.
     #[must_use]
@@ -45,6 +54,7 @@ impl Tab {
             Self::Feed => "Feed",
             Self::Hotspots => "Hotspots",
             Self::Search => "Search",
+            Self::Branches => "Branches",
         }
     }
 
@@ -52,15 +62,17 @@ impl Tab {
         match self {
             Self::Feed => Self::Hotspots,
             Self::Hotspots => Self::Search,
-            Self::Search => Self::Feed,
+            Self::Search => Self::Branches,
+            Self::Branches => Self::Feed,
         }
     }
 
     const fn prev(self) -> Self {
         match self {
-            Self::Feed => Self::Search,
+            Self::Feed => Self::Branches,
             Self::Hotspots => Self::Feed,
             Self::Search => Self::Hotspots,
+            Self::Branches => Self::Search,
         }
     }
 }
@@ -356,6 +368,8 @@ pub struct FileView {
     pub height: usize,
     /// Shown instead of content (binary, missing, unreadable).
     pub notice: Option<String>,
+    /// Linked worktree the file was read from, or `None` for vert's own.
+    pub root: Option<PathBuf>,
 }
 
 /// A view stacked above the tabs.
@@ -380,6 +394,10 @@ pub enum Msg {
     Worktree(Result<Option<Entry>, String>),
     /// The repository changed on disk.
     Changed(BTreeSet<Change>),
+    /// Branches and worktrees loaded.
+    Branches(Result<Branches, String>),
+    /// Open pull requests loaded: the repository and its pull requests.
+    Pulls(Result<(String, Vec<PullRequest>), PullsError>),
     /// The file list for search was built.
     Files(Vec<String>),
     /// A content search finished.
@@ -408,6 +426,8 @@ pub enum Msg {
         line: u32,
         /// Added lines to mark.
         marks: BTreeSet<u32>,
+        /// Linked worktree the file was read from.
+        root: Option<PathBuf>,
     },
     /// Something to tell the user.
     Notice(String),
@@ -424,6 +444,10 @@ pub enum Effect {
     LoadWorktree,
     /// List files for search.
     LoadFiles,
+    /// Reload branches and worktrees.
+    LoadBranches,
+    /// Reload open pull requests.
+    LoadPulls,
     /// Run a content search.
     SearchText {
         /// Query.
@@ -446,6 +470,8 @@ pub enum Effect {
         line: u32,
         /// Added lines to mark.
         marks: BTreeSet<u32>,
+        /// Linked worktree to read from, or `None` for vert's own.
+        root: Option<PathBuf>,
     },
     /// Open the user's editor.
     Edit {
@@ -453,6 +479,8 @@ pub enum Effect {
         path: String,
         /// Line to open at.
         line: u32,
+        /// Linked worktree the path is in, or `None` for vert's own.
+        root: Option<PathBuf>,
     },
 }
 
@@ -470,6 +498,10 @@ pub struct App {
     pub hotspots: HotspotState,
     /// Search state.
     pub search: SearchState,
+    /// Branches state.
+    pub branches: BranchesState,
+    /// Branches-tab reload intervals.
+    refresh: Refresh,
     /// Stacked views (detail, file); the last one is on screen.
     pub views: Vec<View>,
     /// Whether the help overlay is shown.
@@ -522,6 +554,8 @@ impl App {
                 generation: 0,
                 pos: ListPos::default(),
             },
+            branches: BranchesState::default(),
+            refresh: Refresh::default(),
             views: Vec::new(),
             help: false,
             watch: WatchStatus::Live,
@@ -568,8 +602,10 @@ impl App {
             Msg::Tick(now) => {
                 self.tick = self.tick.wrapping_add(1);
                 self.now = now;
-                Vec::new()
+                self.poll_branches()
             }
+            Msg::Branches(result) => self.on_branches(result),
+            Msg::Pulls(result) => self.on_pulls(result),
             Msg::Commits(result) => self.on_commits(result),
             Msg::Worktree(result) => self.on_worktree(result),
             Msg::Changed(changes) => self.on_changed(&changes),
@@ -600,7 +636,7 @@ impl App {
                 refresh,
             } => {
                 match result {
-                    Ok(files) if refresh => self.refresh_detail(files),
+                    Ok(files) if refresh => self.refresh_detail(*entry, files),
                     Ok(files) => self.open_detail(*entry, files),
                     Err(e) => self.notice = Some(format!("Could not load diff: {e}")),
                 }
@@ -611,8 +647,9 @@ impl App {
                 content,
                 line,
                 marks,
+                root,
             } => {
-                self.open_file(path, content, line, marks);
+                self.open_file(path, content, line, marks, root);
                 Vec::new()
             }
             Msg::Notice(text) => {
@@ -660,7 +697,7 @@ impl App {
                 self.reselect(selected.as_deref());
                 self.recompute_hotspots();
                 if let Some(View::Detail(d)) = self.views.last()
-                    && d.entry.is_worktree()
+                    && d.entry.is_own_worktree()
                     && let Some(wt) = &self.feed.worktree
                 {
                     effects.push(Effect::LoadDiff {
@@ -683,6 +720,9 @@ impl App {
             effects.extend(self.request_commits());
         }
         effects.extend(self.request_worktree());
+        if self.branches.loaded {
+            effects.extend(self.request_branches());
+        }
         if changes.contains(&Change::Workdir) && self.search.files.is_some() {
             self.search.files_stale = true;
             if self.tab == Tab::Search && self.search.mode == SearchMode::Files {
@@ -754,11 +794,11 @@ impl App {
         })));
     }
 
-    fn refresh_detail(&mut self, files: Vec<FileDiff>) {
+    /// Replaces the diff of the open detail view if it still shows `entry`.
+    fn refresh_detail(&mut self, entry: Entry, files: Vec<FileDiff>) {
         let max = self.max_highlight;
-        let wt = self.feed.worktree.clone();
         if let Some(View::Detail(d)) = self.views.last_mut()
-            && d.entry.is_worktree()
+            && d.entry.id == entry.id
         {
             let current = d.files.get(d.pos.selected).map(|f| f.stat.path.clone());
             d.pos.selected = current
@@ -772,9 +812,7 @@ impl App {
                 .map(|f| build_diff(f, max))
                 .unwrap_or_default();
             d.scroll = d.scroll.min(max_scroll(d.rendered.len(), d.height));
-            if let Some(wt) = wt {
-                d.entry = wt;
-            }
+            d.entry = entry;
         }
     }
 
@@ -784,6 +822,7 @@ impl App {
         content: Result<String, String>,
         line: u32,
         marks: BTreeSet<u32>,
+        root: Option<PathBuf>,
     ) {
         let h = Highlighter::global();
         let (lines, notice, language) = match content {
@@ -806,6 +845,7 @@ impl App {
             hscroll: 0,
             height: 0,
             notice,
+            root,
         })));
     }
 
@@ -833,16 +873,22 @@ impl App {
             KeyCode::Char('1') => self.tab = Tab::Feed,
             KeyCode::Char('2') => self.tab = Tab::Hotspots,
             KeyCode::Char('3' | '/') => return self.enter_search(),
+            KeyCode::Char('4') => return self.enter_branches(),
             KeyCode::Tab => return self.switch_tab(self.tab.next()),
             KeyCode::BackTab => return self.switch_tab(self.tab.prev()),
             KeyCode::Char('r') => {
                 let mut effects = self.request_commits();
                 effects.extend(self.request_worktree());
+                if self.tab == Tab::Branches {
+                    effects.extend(self.request_branches());
+                    effects.extend(self.request_pulls());
+                }
                 return effects;
             }
             _ => match self.tab {
                 Tab::Feed => return self.on_feed_key(&key),
                 Tab::Hotspots => return self.on_hotspots_key(&key),
+                Tab::Branches => return self.on_branches_key(&key),
                 Tab::Search => {}
             },
         }
@@ -850,11 +896,13 @@ impl App {
     }
 
     fn switch_tab(&mut self, tab: Tab) -> Vec<Effect> {
-        if tab == Tab::Search {
-            self.enter_search()
-        } else {
-            self.tab = tab;
-            Vec::new()
+        match tab {
+            Tab::Search => self.enter_search(),
+            Tab::Branches => self.enter_branches(),
+            Tab::Feed | Tab::Hotspots => {
+                self.tab = tab;
+                Vec::new()
+            }
         }
     }
 
@@ -954,12 +1002,17 @@ impl App {
                         path,
                         line: 1,
                         marks: BTreeSet::new(),
+                        root: None,
                     }];
                 }
             }
             KeyCode::Char('e') => {
                 if let Some(path) = selected {
-                    return vec![Effect::Edit { path, line: 1 }];
+                    return vec![Effect::Edit {
+                        path,
+                        line: 1,
+                        root: None,
+                    }];
                 }
             }
             _ => {}
@@ -997,13 +1050,20 @@ impl App {
                         path,
                         line,
                         marks: BTreeSet::new(),
+                        root: None,
                     }]
                 })
                 .unwrap_or_default(),
             KeyCode::Char('e') if ctrl => self
                 .search
                 .selected()
-                .map(|(path, line)| vec![Effect::Edit { path, line }])
+                .map(|(path, line)| {
+                    vec![Effect::Edit {
+                        path,
+                        line,
+                        root: None,
+                    }]
+                })
                 .unwrap_or_default(),
             KeyCode::Char('u') if ctrl => {
                 self.search.query.clear();
@@ -1137,13 +1197,20 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
             }
         }
         (KeyCode::Enter | KeyCode::Char('o'), _) => {
+            let root = d.entry.root.clone();
             return open_from_detail(d).map_or_else(Vec::new, |(path, line, marks)| {
-                vec![Effect::OpenFile { path, line, marks }]
+                vec![Effect::OpenFile {
+                    path,
+                    line,
+                    marks,
+                    root,
+                }]
             });
         }
         (KeyCode::Char('e'), _) => {
+            let root = d.entry.root.clone();
             return open_from_detail(d).map_or_else(Vec::new, |(path, line, _)| {
-                vec![Effect::Edit { path, line }]
+                vec![Effect::Edit { path, line, root }]
             });
         }
         (_, Focus::Files) => {
@@ -1231,6 +1298,7 @@ fn file_key(f: &mut FileView, key: &KeyEvent) -> Vec<Effect> {
             return vec![Effect::Edit {
                 path: f.path.clone(),
                 line,
+                root: f.root.clone(),
             }];
         }
         _ => {}
