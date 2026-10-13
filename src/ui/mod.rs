@@ -890,10 +890,10 @@ mod render_tests {
     fn branches_app() -> App {
         use crate::app::{Refresh, pull_entry};
         use crate::git::branches::{Branch, Branches, Worktree};
-        use crate::github::PullRequest;
+        use crate::github::{Checks, PullRequest};
         use crate::labels::Size;
 
-        let pr = |number: u64, head: &str, draft: bool| PullRequest {
+        let pr = |number: u64, head: &str, draft: bool, checks| PullRequest {
             number,
             title: format!("Pull request number {number}"),
             author: "claude".to_owned(),
@@ -904,9 +904,10 @@ mod render_tests {
             updated: 2_500,
             added: 9,
             removed: 4,
+            checks,
         };
         let changes = |summary: &str, size| {
-            let mut e = pull_entry(&pr(0, "", false));
+            let mut e = pull_entry(&pr(0, "", false, None));
             summary.clone_into(&mut e.summary);
             e.size = size;
             e.added = 120;
@@ -962,7 +963,10 @@ mod render_tests {
         })));
         app.update(Msg::Pulls(Ok((
             "o/r".to_owned(),
-            vec![pr(42, "agent/auth", true), pr(43, "elsewhere", false)],
+            vec![
+                pr(42, "agent/auth", true, Some(Checks::Failing)),
+                pr(43, "elsewhere", false, Some(Checks::Passing)),
+            ],
         ))));
         app
     }
@@ -990,8 +994,8 @@ mod render_tests {
             "↑3 ↓1",
             "↑2",
             "●0",
-            "#42",
-            "draft",
+            "#42 ✗ draft",
+            "#43 ✓",
             "Pull request number 43",
             "work on origin/feat",
             "▲ large",

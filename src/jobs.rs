@@ -602,6 +602,7 @@ mod tests {
             updated: 5,
             added: 1,
             removed: 0,
+            checks: None,
         };
         let load = |c: &Context| {
             let Some(Msg::Diff { entry, result, .. }) = run(

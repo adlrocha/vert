@@ -12,6 +12,7 @@ use super::{
 };
 use crate::age::relative;
 use crate::app::{App, PullStatus, Row, RowFilter};
+use crate::github::Checks;
 use crate::theme;
 
 const HINTS: Hints = &[
@@ -185,6 +186,15 @@ fn tracking(r: &Row<'_>) -> String {
     }
 }
 
+/// How a pull request's CI state is drawn: ✓ passing, ✗ failing, ● running.
+fn check_glyph(checks: Checks) -> (&'static str, ratatui::style::Color) {
+    match checks {
+        Checks::Passing => ("✓", theme::ADDED),
+        Checks::Failing => ("✗", theme::REMOVED),
+        Checks::Pending => ("●", theme::WARN),
+    }
+}
+
 fn counts(r: &Row<'_>) -> (u64, u64) {
     match (r.changes(), r.pull) {
         (Some(e), _) => (e.added, e.removed),
@@ -245,6 +255,13 @@ fn row(r: &Row<'_>, c: Columns, selected: bool, width_total: usize, now: i64) ->
             format!("#{} ", p.number),
             Style::default().fg(theme::HIGHLIGHT),
         ));
+        if let Some(checks) = p.checks {
+            let (glyph, colour) = check_glyph(checks);
+            desc.push(Span::styled(
+                format!("{glyph} "),
+                Style::default().fg(colour),
+            ));
+        }
         if p.draft {
             desc.push(Span::styled("draft ", theme::muted()));
         }
@@ -270,4 +287,16 @@ fn row(r: &Row<'_>, c: Columns, selected: bool, width_total: usize, now: i64) ->
     }
     spans.extend(right);
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_glyphs() {
+        assert_eq!(check_glyph(Checks::Passing), ("✓", theme::ADDED));
+        assert_eq!(check_glyph(Checks::Failing), ("✗", theme::REMOVED));
+        assert_eq!(check_glyph(Checks::Pending), ("●", theme::WARN));
+    }
 }

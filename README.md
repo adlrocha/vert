@@ -34,8 +34,8 @@ work in parallel.
   30d or all loaded history. `⏎` filters the feed to that file or module.
 - **Branches, worktrees and pull requests:** one row per line of work. A
   row shows the checkout it's in, uncommitted files (`●3`), commits ahead and
-  behind the base branch, its size, and the matching open pull request.
-  Pull requests without a local branch get their own rows. `⏎` opens the most
+  behind the base branch, its size, and the matching open pull request with
+  its CI checks (✓ passing, ✗ failing, ● running). Pull requests without a local branch get their own rows. `⏎` opens the most
   relevant diff: uncommitted work first, then the branch against the point
   where it left the base, then the pull request. `b` and `p` pick the branch
   or pull request diff. Diffs of linked worktrees stay live, and files open
@@ -100,9 +100,9 @@ and looks for one in this order:
 3. `gh auth token`, if the [GitHub CLI](https://cli.github.com) is logged in
 
 If no token is found, the Branches tab says so and shows everything else.
-vert only reads from GitHub: it lists open pull requests and fetches a pull
-request's diff when you open it. It never fetches or writes to your
-repository. `--no-network` turns GitHub access off.
+vert only reads from GitHub: it lists open pull requests with their check
+status, and fetches a pull request's diff when you open it. It never fetches
+or writes to your repository. `--no-network` turns GitHub access off.
 
 ### Options
 

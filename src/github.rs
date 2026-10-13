@@ -205,6 +205,30 @@ pub fn gh_token(program: &str, host: &str) -> Option<String> {
     (out.status.success() && !token.is_empty()).then_some(token)
 }
 
+/// The combined state of a pull request's CI checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checks {
+    /// Every check passed.
+    Passing,
+    /// A check failed or errored.
+    Failing,
+    /// Checks are still running or have not reported yet.
+    Pending,
+}
+
+impl Checks {
+    /// Maps a GitHub `StatusState`, or `None` for one vert does not know.
+    #[must_use]
+    pub fn from_state(state: &str) -> Option<Self> {
+        match state {
+            "SUCCESS" => Some(Self::Passing),
+            "FAILURE" | "ERROR" => Some(Self::Failing),
+            "PENDING" | "EXPECTED" => Some(Self::Pending),
+            _ => None,
+        }
+    }
+}
+
 /// An open pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
@@ -228,6 +252,8 @@ pub struct PullRequest {
     pub added: u64,
     /// Lines removed.
     pub removed: u64,
+    /// CI checks on the head commit, or `None` when none have run.
+    pub checks: Option<Checks>,
 }
 
 /// A GitHub API client for one endpoint and token.
@@ -245,6 +271,7 @@ const PULLS_QUERY: &str = "query($owner: String!, $name: String!, $first: Int!) 
         number title isDraft headRefName baseRefName isCrossRepository
         updatedAt additions deletions
         author { login }
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
       }
     }
   }
@@ -286,6 +313,30 @@ struct Node {
     additions: u64,
     deletions: u64,
     author: Option<Login>,
+    #[serde(default)]
+    commits: Commits,
+}
+
+/// The head commit, the only one asked for.
+#[derive(Deserialize, Default)]
+struct Commits {
+    nodes: Vec<CommitNode>,
+}
+
+#[derive(Deserialize)]
+struct CommitNode {
+    commit: Commit,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Commit {
+    status_check_rollup: Option<Rollup>,
+}
+
+#[derive(Deserialize)]
+struct Rollup {
+    state: String,
 }
 
 #[derive(Deserialize)]
@@ -345,6 +396,12 @@ impl Client {
             .nodes
             .into_iter()
             .map(|n| PullRequest {
+                checks: n
+                    .commits
+                    .nodes
+                    .last()
+                    .and_then(|c| c.commit.status_check_rollup.as_ref())
+                    .and_then(|r| Checks::from_state(&r.state)),
                 number: n.number,
                 title: n.title,
                 author: n.author.map(|a| a.login).unwrap_or_default(),
@@ -526,10 +583,11 @@ mod tests {
     const PULLS_JSON: &str = r#"{"data":{"repository":{"pullRequests":{"nodes":[
         {"number":7,"title":"Fix auth","isDraft":true,"headRefName":"agent/auth",
          "baseRefName":"main","isCrossRepository":false,"updatedAt":"2026-10-13T10:00:00Z",
-         "additions":12,"deletions":3,"author":{"login":"claude"}},
+         "additions":12,"deletions":3,"author":{"login":"claude"},
+         "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE"}}}]}},
         {"number":5,"title":"Ghost","isDraft":false,"headRefName":"x","baseRefName":"main",
          "isCrossRepository":true,"updatedAt":"bad","additions":0,"deletions":0,
-         "author":null}]}}}}"#;
+         "author":null,"commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}]}}}}"#;
 
     #[test]
     fn parses_remote_urls() {
@@ -622,6 +680,21 @@ mod tests {
     }
 
     #[test]
+    fn check_states() {
+        let cases = [
+            ("SUCCESS", Some(Checks::Passing)),
+            ("FAILURE", Some(Checks::Failing)),
+            ("ERROR", Some(Checks::Failing)),
+            ("PENDING", Some(Checks::Pending)),
+            ("EXPECTED", Some(Checks::Pending)),
+            ("SOMETHING_NEW", None),
+        ];
+        for (state, want) in cases {
+            assert_eq!(Checks::from_state(state), want, "{state}");
+        }
+    }
+
+    #[test]
     fn lists_open_pulls() {
         let (url, requests) = serve(vec![(200, vec![], PULLS_JSON.to_owned())]);
         let pulls = client(&url).open_pulls(&slug(), 20).expect("pulls");
@@ -640,6 +713,8 @@ mod tests {
         assert_eq!(pulls[1].author, "");
         assert!(pulls[1].fork);
         assert_eq!(pulls[1].updated, 0);
+        assert_eq!(first.checks, Some(Checks::Failing));
+        assert_eq!(pulls[1].checks, None, "no checks ran");
 
         let req = requests.recv().expect("request");
         assert!(req.starts_with("POST /graphql"), "{req}");
