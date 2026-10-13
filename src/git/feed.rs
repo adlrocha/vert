@@ -279,7 +279,7 @@ pub fn load_worktree(
     Ok(Some(entry))
 }
 
-pub(crate) fn modified_secs(path: &Path) -> Option<i64> {
+fn modified_secs(path: &Path) -> Option<i64> {
     let modified = path.metadata().ok()?.modified().ok()?;
     let secs = modified.duration_since(UNIX_EPOCH).ok()?.as_secs();
     i64::try_from(secs).ok()

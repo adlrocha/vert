@@ -7,7 +7,7 @@ use super::{App, Effect, ListPos, Loader, Tab, View};
 use crate::git::Target;
 use crate::git::branches::{Branch, Branches};
 use crate::git::feed::Entry;
-use crate::github::{PullRequest, PullsError};
+use crate::github::{ORIGIN, PullRequest, PullsError};
 
 /// How often the Branches tab reloads while on screen, in seconds.
 /// `None` turns that reload off; for pull requests it also means GitHub is
@@ -151,18 +151,27 @@ pub struct BranchesState {
 
 impl BranchesState {
     /// Rows shown under the current filter: checkouts first, then branches
-    /// and pull requests by latest activity.
+    /// and pull requests by latest activity. A pull request joins at most one
+    /// branch row: a local branch or an `origin` one with its head's name.
     #[must_use]
     pub fn rows(&self) -> Vec<Row<'_>> {
         let mut matched = vec![false; self.pulls.len()];
         let mut checkouts = Vec::new();
         let mut rest = Vec::new();
         for branch in &self.list.branches {
-            let pull = branch.branch.as_deref().and_then(|name| {
-                let i = self.pulls.iter().position(|p| !p.fork && p.head == name)?;
-                matched[i] = true;
-                Some(&self.pulls[i])
-            });
+            let pull = branch
+                .branch
+                .as_deref()
+                .filter(|name| !branch.remote || branch.name == format!("{ORIGIN}/{name}"))
+                .and_then(|name| {
+                    let i = self
+                        .pulls
+                        .iter()
+                        .zip(&matched)
+                        .position(|(p, m)| !m && !p.fork && p.head == name)?;
+                    matched[i] = true;
+                    Some(&self.pulls[i])
+                });
             let row = Row {
                 branch: Some(branch),
                 pull,
@@ -481,7 +490,6 @@ mod tests {
             draft: false,
             head: head.to_owned(),
             fork: false,
-            base: "main".to_owned(),
             updated,
             added: 4,
             removed: 2,
@@ -534,6 +542,46 @@ mod tests {
 
     fn keys(app: &App) -> Vec<String> {
         app.branches.rows().iter().map(Row::key).collect()
+    }
+
+    #[test]
+    fn a_pull_request_matches_one_branch_on_origin() {
+        let mut app = app(true);
+        let remote = |name: &str, time| {
+            let mut b = branch(name, time);
+            b.branch = name.split_once('/').map(|(_, n)| n.to_owned());
+            b.remote = true;
+            b
+        };
+        app.update(Msg::Branches(Ok(Branches {
+            base: None,
+            branches: vec![
+                branch("feat", 100),
+                remote("upstream/feat", 90),
+                remote("origin/x", 80),
+                remote("upstream/y", 70),
+            ],
+        })));
+        app.update(Msg::Pulls(Ok((
+            "o/r".to_owned(),
+            vec![pull(1, "feat", 10), pull(2, "x", 10), pull(3, "y", 10)],
+        ))));
+        let rows = app.branches.rows();
+        let pulls: Vec<_> = rows
+            .iter()
+            .map(|r| (r.key(), r.pull.map(|p| p.number)))
+            .collect();
+        assert_eq!(
+            pulls,
+            [
+                ("b:feat".to_owned(), Some(1)),
+                ("b:upstream/feat".to_owned(), None),
+                ("b:origin/x".to_owned(), Some(2)),
+                ("b:upstream/y".to_owned(), None),
+                ("p:3".to_owned(), Some(3)),
+            ],
+            "only local or origin branches carry a pull request, once"
+        );
     }
 
     #[test]

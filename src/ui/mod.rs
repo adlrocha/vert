@@ -900,7 +900,6 @@ mod render_tests {
             draft,
             head: head.to_owned(),
             fork: false,
-            base: "main".to_owned(),
             updated: 2_500,
             added: 9,
             removed: 4,

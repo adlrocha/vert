@@ -86,7 +86,7 @@ impl Context {
         })?;
         let host = gh.endpoint.web_host();
         let repo = git::open(&self.workdir).map_err(|e| PullsError::Failed(describe(&e)))?;
-        let remote = repo.find_remote("origin").map_err(|_| {
+        let remote = repo.find_remote(github::ORIGIN).map_err(|_| {
             PullsError::Unsupported("this repository has no origin remote".to_owned())
         })?;
         let slug = remote
@@ -598,7 +598,6 @@ mod tests {
             draft: false,
             head: "agent/n".to_owned(),
             fork: false,
-            base: "main".to_owned(),
             updated: 5,
             added: 1,
             removed: 0,

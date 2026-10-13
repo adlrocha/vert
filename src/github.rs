@@ -9,6 +9,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
+/// The remote whose GitHub repository vert lists pull requests for.
+pub const ORIGIN: &str = "origin";
+
 /// Environment variables checked for a token, in order.
 pub const TOKEN_VARS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
 
@@ -244,8 +247,6 @@ pub struct PullRequest {
     pub head: String,
     /// Whether the head branch lives in a fork.
     pub fork: bool,
-    /// Base branch name.
-    pub base: String,
     /// Last update (Unix seconds).
     pub updated: i64,
     /// Lines added.
@@ -268,7 +269,7 @@ const PULLS_QUERY: &str = "query($owner: String!, $name: String!, $first: Int!) 
   repository(owner: $owner, name: $name) {
     pullRequests(states: OPEN, first: $first, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes {
-        number title isDraft headRefName baseRefName isCrossRepository
+        number title isDraft headRefName isCrossRepository
         updatedAt additions deletions
         author { login }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
@@ -307,7 +308,6 @@ struct Node {
     title: String,
     is_draft: bool,
     head_ref_name: String,
-    base_ref_name: String,
     is_cross_repository: bool,
     updated_at: String,
     additions: u64,
@@ -358,6 +358,12 @@ impl Client {
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
             .user_agent(concat!("vert/", env!("CARGO_PKG_VERSION")))
+            // The OS trust store, like `gh`, so corporate CAs work.
+            .tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                    .build(),
+            )
             .build()
             .new_agent();
         Self {
@@ -408,7 +414,6 @@ impl Client {
                 draft: n.is_draft,
                 head: n.head_ref_name,
                 fork: n.is_cross_repository,
-                base: n.base_ref_name,
                 updated: parse_time(&n.updated_at).unwrap_or(0),
                 added: n.additions,
                 removed: n.deletions,
@@ -582,10 +587,10 @@ mod tests {
 
     const PULLS_JSON: &str = r#"{"data":{"repository":{"pullRequests":{"nodes":[
         {"number":7,"title":"Fix auth","isDraft":true,"headRefName":"agent/auth",
-         "baseRefName":"main","isCrossRepository":false,"updatedAt":"2026-10-13T10:00:00Z",
+         "isCrossRepository":false,"updatedAt":"2026-10-13T10:00:00Z",
          "additions":12,"deletions":3,"author":{"login":"claude"},
          "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE"}}}]}},
-        {"number":5,"title":"Ghost","isDraft":false,"headRefName":"x","baseRefName":"main",
+        {"number":5,"title":"Ghost","isDraft":false,"headRefName":"x",
          "isCrossRepository":true,"updatedAt":"bad","additions":0,"deletions":0,
          "author":null,"commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}]}}}}"#;
 
@@ -709,7 +714,6 @@ mod tests {
             parse_time("2026-10-13T10:00:00Z").expect("t")
         );
         assert_eq!(first.head, "agent/auth");
-        assert_eq!(first.base, "main");
         assert_eq!(pulls[1].author, "");
         assert!(pulls[1].fork);
         assert_eq!(pulls[1].updated, 0);
