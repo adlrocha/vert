@@ -14,9 +14,11 @@ use crate::labels::{Labeler, Size, reverted_target};
 pub struct Entry {
     /// What this entry describes.
     pub target: Target,
-    /// Stable identifier: full hash, or `"worktree"`.
+    /// Stable identifier: the full hash of a commit, `"worktree"` for vert's
+    /// own uncommitted changes, `"worktree:<path>"` for a linked worktree's,
+    /// `"branch:<name>"` for a branch, or `"pr:<number>"` for a pull request.
     pub id: String,
-    /// Short hash, or `"working"`.
+    /// Short label: a short hash, `"working"`, a branch name or `"#<number>"`.
     pub short: String,
     /// First line of the message.
     pub summary: String,
@@ -55,14 +57,15 @@ impl Entry {
     /// by `labeler`. Callers fill in the message, author and time.
     #[must_use]
     pub fn new(target: Target, files: Vec<FileStat>, labeler: &Labeler) -> Self {
-        let added = files.iter().map(|f| f.added).sum();
-        let removed = files.iter().map(|f| f.removed).sum();
-        let modules: Vec<String> = files
-            .iter()
-            .map(|f| labeler.module_of(&f.path))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let mut entry = Self::blank(target);
+        entry.relabel(files, labeler);
+        entry
+    }
+
+    /// An entry for `target` with no files or labels yet, for changes whose
+    /// files arrive later (a pull request's come with its diff).
+    #[must_use]
+    pub fn blank(target: Target) -> Self {
         let (id, short) = match target {
             Target::WorkingTree => (WORKTREE_ID.to_owned(), "working".to_owned()),
             Target::Commit(oid) => (oid.to_string(), short_id(oid)),
@@ -83,16 +86,31 @@ impl Entry {
             body: String::new(),
             author: String::new(),
             time: 0,
-            size: labeler.size(added + removed),
-            wide: labeler.is_wide(modules.len()),
-            files,
-            added,
-            removed,
-            modules,
+            files: Vec::new(),
+            added: 0,
+            removed: 0,
+            modules: Vec::new(),
+            size: Size::Small,
+            wide: false,
             reverted: false,
             is_revert: false,
             root: None,
         }
+    }
+
+    /// Replaces the changed files and recomputes the totals and labels.
+    pub fn relabel(&mut self, files: Vec<FileStat>, labeler: &Labeler) {
+        self.added = files.iter().map(|f| f.added).sum();
+        self.removed = files.iter().map(|f| f.removed).sum();
+        self.modules = files
+            .iter()
+            .map(|f| labeler.module_of(&f.path))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        self.size = labeler.size(self.added + self.removed);
+        self.wide = labeler.is_wide(self.modules.len());
+        self.files = files;
     }
 
     /// Whether this is the uncommitted working-tree entry.

@@ -264,7 +264,7 @@ fn load_diff(entry: &mut Entry, ctx: &Context) -> Result<Vec<git::diff::FileDiff
             e.to_string()
         })?;
         let files = git::diff::parse(&text).map_err(|e| describe(&e))?;
-        entry.files = files.iter().map(|f| f.stat.clone()).collect();
+        entry.relabel(files.iter().map(|f| f.stat.clone()).collect(), &ctx.labeler);
         return Ok(files);
     }
     git::open(ctx.dir(entry.root.as_deref()))
@@ -612,6 +612,8 @@ mod tests {
         let (entry, files) = load(&c);
         assert_eq!(files.expect("files")[0].stat.path, "n.txt");
         assert_eq!(entry.files.len(), 1, "entry gains the files");
+        assert_eq!(entry.modules, ["."], "and is labelled like any change");
+        assert_eq!((entry.added, entry.removed), (1, 0));
         assert_eq!(entry.short, "#3");
         let (_, rejected) = load(&c);
         assert!(rejected.expect_err("401").contains("rejected"));

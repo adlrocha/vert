@@ -8,7 +8,6 @@ use crate::git::Target;
 use crate::git::branches::{Branch, Branches};
 use crate::git::feed::Entry;
 use crate::github::{PullRequest, PullsError};
-use crate::labels::Size;
 
 /// How often the Branches tab reloads while on screen, in seconds.
 /// `None` turns that reload off; for pull requests it also means GitHub is
@@ -209,27 +208,17 @@ impl BranchesState {
     }
 }
 
-/// The entry describing pull request `p`; its files arrive with the diff.
+/// The entry describing pull request `p`; its files and labels arrive with
+/// the diff.
 #[must_use]
 pub fn pull_entry(p: &PullRequest) -> Entry {
-    Entry {
-        target: Target::PullRequest(p.number),
-        id: format!("pr:{}", p.number),
-        short: format!("#{}", p.number),
-        summary: p.title.clone(),
-        body: String::new(),
-        author: p.author.clone(),
-        time: p.updated,
-        files: Vec::new(),
-        added: p.added,
-        removed: p.removed,
-        modules: Vec::new(),
-        size: Size::Small,
-        wide: false,
-        reverted: false,
-        is_revert: false,
-        root: None,
-    }
+    let mut e = Entry::blank(Target::PullRequest(p.number));
+    e.summary.clone_from(&p.title);
+    e.author.clone_from(&p.author);
+    e.time = p.updated;
+    e.added = p.added;
+    e.removed = p.removed;
+    e
 }
 
 impl App {
@@ -266,7 +255,7 @@ impl App {
 
     /// Reloads whatever is due while the Branches tab is on screen.
     pub(super) fn poll_branches(&mut self) -> Vec<Effect> {
-        if self.tab != Tab::Branches || !self.views.is_empty() {
+        if self.tab != Tab::Branches {
             return Vec::new();
         }
         let now = self.now;
@@ -279,7 +268,9 @@ impl App {
         if due(self.branches.last_load, self.refresh.branches) {
             effects.extend(self.request_branches());
         }
-        if due(self.branches.last_pulls, self.refresh.pulls) {
+        // Linked worktrees are invisible to the file watcher, so branches keep
+        // polling behind an open view; pull requests wait until it closes.
+        if self.views.is_empty() && due(self.branches.last_pulls, self.refresh.pulls) {
             effects.extend(self.request_pulls());
         }
         effects
@@ -295,22 +286,7 @@ impl App {
                 self.branches.loaded = true;
                 self.branches.error = None;
                 self.branches.reselect(selected.as_deref());
-                // Keep an open linked-worktree diff live.
-                if let Some(View::Detail(d)) = self.views.last()
-                    && d.entry.is_worktree()
-                    && d.entry.root.is_some()
-                    && let Some(fresh) = self
-                        .branches
-                        .rows()
-                        .iter()
-                        .filter_map(Row::dirty)
-                        .find(|e| e.id == d.entry.id)
-                {
-                    effects.push(Effect::LoadDiff {
-                        entry: Box::new(fresh.clone()),
-                        refresh: true,
-                    });
-                }
+                effects.extend(self.refresh_open_worktree());
             }
             Err(e) => self.branches.error = Some(e),
         }
@@ -318,6 +294,36 @@ impl App {
             effects.push(Effect::LoadBranches);
         }
         effects
+    }
+
+    /// Reloads an open linked-worktree diff: with its latest changes, or
+    /// empty once the worktree is clean. A removed worktree is left alone.
+    fn refresh_open_worktree(&self) -> Option<Effect> {
+        let Some(View::Detail(d)) = self.views.last() else {
+            return None;
+        };
+        let root = d.entry.root.as_ref().filter(|_| d.entry.is_worktree())?;
+        let checkout = self
+            .branches
+            .list
+            .branches
+            .iter()
+            .filter_map(|b| b.worktree.as_ref())
+            .find(|w| &w.path == root)?;
+        let entry = checkout.dirty.clone().unwrap_or_else(|| {
+            let mut clean = d.entry.clone();
+            clean.files.clear();
+            clean.added = 0;
+            clean.removed = 0;
+            clean.modules.clear();
+            clean.size = crate::labels::Size::Small;
+            clean.wide = false;
+            clean
+        });
+        Some(Effect::LoadDiff {
+            entry: Box::new(entry),
+            refresh: true,
+        })
     }
 
     pub(super) fn on_pulls(
@@ -764,8 +770,9 @@ mod tests {
             result: Ok(vec![file("a.rs")]),
             refresh: false,
         });
-        // Polling pauses while a view is open, but watcher reloads still land.
-        assert!(app.update(Msg::Tick(9_999)).is_empty());
+        // The watcher can't see linked worktrees, so polling keeps going
+        // behind the open diff; pull requests wait until it closes.
+        assert_eq!(app.update(Msg::Tick(9_999)), [Effect::LoadBranches]);
         let reload = app.update(Msg::Branches(Ok(Branches {
             base: None,
             branches: vec![checkout("agent", false, true)],
@@ -799,12 +806,38 @@ mod tests {
         };
         assert_eq!(d.files.len(), 2);
 
-        // Once the worktree is clean there is nothing to refresh.
+        // Once the worktree is clean, the open diff is reloaded empty.
         let reload = app.update(Msg::Branches(Ok(Branches {
             base: None,
             branches: vec![checkout("agent", false, false)],
         })));
+        let [
+            Effect::LoadDiff {
+                entry: clean,
+                refresh: true,
+            },
+        ] = reload.as_slice()
+        else {
+            panic!("clean refresh expected: {reload:?}")
+        };
+        assert_eq!(clean.id, entry.id);
+        assert!(clean.files.is_empty() && clean.added == 0 && clean.removed == 0);
+
+        // A removed worktree has nothing left to diff.
+        let reload = app.update(Msg::Branches(Ok(Branches::default())));
         assert!(reload.is_empty());
+
+        // Diffs opened from other tabs don't poll branches.
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('1'));
+        app.update(Msg::File {
+            path: "a.rs".to_owned(),
+            content: Ok(String::new()),
+            line: 1,
+            marks: std::collections::BTreeSet::new(),
+            root: None,
+        });
+        assert!(app.update(Msg::Tick(99_999)).is_empty());
     }
 
     #[test]
