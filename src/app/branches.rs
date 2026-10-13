@@ -485,7 +485,6 @@ mod tests {
             updated,
             added: 4,
             removed: 2,
-            files: 1,
         }
     }
 

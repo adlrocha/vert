@@ -228,8 +228,6 @@ pub struct PullRequest {
     pub added: u64,
     /// Lines removed.
     pub removed: u64,
-    /// Files changed.
-    pub files: u64,
 }
 
 /// A GitHub API client for one endpoint and token.
@@ -245,7 +243,7 @@ const PULLS_QUERY: &str = "query($owner: String!, $name: String!, $first: Int!) 
     pullRequests(states: OPEN, first: $first, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes {
         number title isDraft headRefName baseRefName isCrossRepository
-        updatedAt additions deletions changedFiles
+        updatedAt additions deletions
         author { login }
       }
     }
@@ -287,7 +285,6 @@ struct Node {
     updated_at: String,
     additions: u64,
     deletions: u64,
-    changed_files: u64,
     author: Option<Login>,
 }
 
@@ -358,7 +355,6 @@ impl Client {
                 updated: parse_time(&n.updated_at).unwrap_or(0),
                 added: n.additions,
                 removed: n.deletions,
-                files: n.changed_files,
             })
             .collect())
     }
@@ -530,10 +526,10 @@ mod tests {
     const PULLS_JSON: &str = r#"{"data":{"repository":{"pullRequests":{"nodes":[
         {"number":7,"title":"Fix auth","isDraft":true,"headRefName":"agent/auth",
          "baseRefName":"main","isCrossRepository":false,"updatedAt":"2026-10-13T10:00:00Z",
-         "additions":12,"deletions":3,"changedFiles":2,"author":{"login":"claude"}},
+         "additions":12,"deletions":3,"author":{"login":"claude"}},
         {"number":5,"title":"Ghost","isDraft":false,"headRefName":"x","baseRefName":"main",
          "isCrossRepository":true,"updatedAt":"bad","additions":0,"deletions":0,
-         "changedFiles":0,"author":null}]}}}}"#;
+         "author":null}]}}}}"#;
 
     #[test]
     fn parses_remote_urls() {
@@ -634,7 +630,7 @@ mod tests {
         assert_eq!(first.number, 7);
         assert_eq!(first.author, "claude");
         assert!(first.draft && !first.fork);
-        assert_eq!((first.added, first.removed, first.files), (12, 3, 2));
+        assert_eq!((first.added, first.removed), (12, 3));
         assert_eq!(
             first.updated,
             parse_time("2026-10-13T10:00:00Z").expect("t")

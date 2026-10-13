@@ -904,7 +904,6 @@ mod render_tests {
             updated: 2_500,
             added: 9,
             removed: 4,
-            files: 2,
         };
         let changes = |summary: &str, size| {
             let mut e = pull_entry(&pr(0, "", false));

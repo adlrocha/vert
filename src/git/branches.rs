@@ -268,13 +268,20 @@ struct Candidate {
 /// Local and remote branches that are not checked out and are not the base.
 /// A remote branch is dropped when it is a local branch's upstream, or when an
 /// untracked local branch has the same name. A local branch counts as the base
-/// when it is the base, tracks it, or is an untracked branch of the same name.
+/// when it is the base, or has its name without the remote (`main` for
+/// `origin/main`); merely tracking the base keeps it listed.
 fn other_branches(
     repo: &Repository,
     checked_out: &HashSet<String>,
     base: Option<&str>,
 ) -> Result<Vec<Candidate>, GitError> {
-    let base_local = base.map(|b| b.split_once('/').map_or(b, |(_, rest)| rest));
+    let base_local = base.map(|b| {
+        let remote = repo.find_branch(b, BranchType::Remote).is_ok();
+        match b.split_once('/') {
+            Some((_, rest)) if remote => rest,
+            _ => b,
+        }
+    });
     let mut upstreams = HashSet::new();
     let mut untracked = HashSet::new();
     let mut out = Vec::new();
@@ -302,16 +309,11 @@ fn other_branches(
                     .upstream()
                     .ok()
                     .map(|u| String::from_utf8_lossy(u.get().shorthand_bytes()).into_owned());
-                let is_base = Some(plain.as_str()) == base
-                    || match &upstream {
-                        Some(u) => Some(u.as_str()) == base,
-                        None => Some(plain.as_str()) == base_local,
-                    };
                 match upstream {
                     Some(u) => upstreams.insert(u),
                     None => untracked.insert(plain.clone()),
                 };
-                is_base
+                Some(plain.as_str()) == base_local
             };
             let duplicate = remote && (upstreams.contains(&display) || untracked.contains(&plain));
             if is_base || duplicate || (!remote && checked_out.contains(&plain)) {
@@ -605,6 +607,38 @@ mod tests {
             names,
             ["main", "dev", "upstream/main"],
             "upstream/main is its own line of work; upstream/dev is dev's upstream"
+        );
+    }
+
+    #[test]
+    fn branches_tracking_the_base_keep_their_rows() {
+        let t = base_repo();
+        let tip = commit_on(&t, "main", "m.txt", "m\n", 2_000);
+        let r = &t.repo;
+        r.remote("origin", "https://example.com/o/r.git")
+            .expect("remote");
+        r.reference("refs/remotes/origin/main", tip, true, "t")
+            .expect("ref");
+        let nested = commit_on(&t, "agent/x", "x.txt", "x\n", 2_500);
+        r.reference("refs/remotes/origin/agent/x", nested, true, "t")
+            .expect("ref");
+        commit_on(&t, "feature", "f.txt", "f\n", 3_000);
+        r.find_branch("feature", BranchType::Local)
+            .expect("feature")
+            .set_upstream(Some("origin/main"))
+            .expect("track");
+        commit_on(&t, "x", "y.txt", "y\n", 3_500);
+
+        let l = labeler();
+        let b = load(r, opts(&l, Some("origin/main")), &mut RangeCache::new()).expect("load");
+        let names: Vec<_> = b.branches.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["main", "x", "feature", "agent/x"]);
+        assert_eq!(find(&b, "feature").ahead_behind, Some((1, 0)));
+
+        let b = load(r, opts(&l, Some("agent/x")), &mut RangeCache::new()).expect("load");
+        assert!(
+            b.branches.iter().any(|x| x.name == "x"),
+            "a local base is not stripped like a remote one"
         );
     }
 

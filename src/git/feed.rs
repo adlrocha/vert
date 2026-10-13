@@ -16,9 +16,11 @@ pub struct Entry {
     pub target: Target,
     /// Stable identifier: the full hash of a commit, `"worktree"` for vert's
     /// own uncommitted changes, `"worktree:<path>"` for a linked worktree's,
-    /// `"branch:<name>"` for a branch, or `"pr:<number>"` for a pull request.
+    /// `"branch:<name>"` for a branch, `"<base>..<head>"` for an unnamed
+    /// range, or `"pr:<number>"` for a pull request.
     pub id: String,
-    /// Short label: a short hash, `"working"`, a branch name or `"#<number>"`.
+    /// Short label: a short hash (a range's is its head's), `"working"`, a
+    /// branch name or `"#<number>"`.
     pub short: String,
     /// First line of the message.
     pub summary: String,
