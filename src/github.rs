@@ -105,15 +105,19 @@ impl Endpoint {
     /// ```
     #[must_use]
     pub fn web_host(&self) -> String {
-        let host = self
+        let after_scheme = self
             .rest
             .split_once("://")
-            .map_or(self.rest.as_str(), |(_, rest)| rest)
-            .split('/')
-            .next()
-            .unwrap_or_default();
+            .map_or(self.rest.as_str(), |(_, rest)| rest);
+        let (host, path) = after_scheme.split_once('/').unwrap_or((after_scheme, ""));
         let host = host.split(':').next().unwrap_or(host);
-        host.strip_prefix("api.").unwrap_or(host).to_owned()
+        // Enterprise Server serves its API under `/api/` on the web host itself;
+        // github.com and GHE.com serve it from an `api.` subdomain.
+        if path.starts_with("api/") {
+            host.to_owned()
+        } else {
+            host.strip_prefix("api.").unwrap_or(host).to_owned()
+        }
     }
 
     fn graphql(&self) -> String {
@@ -636,6 +640,16 @@ mod tests {
             "127.0.0.1"
         );
         assert_eq!(Endpoint::new("localhost:1").web_host(), "localhost");
+        assert_eq!(
+            Endpoint::new("https://api.corp.example/api/v3").web_host(),
+            "api.corp.example",
+            "Enterprise Server keeps a host that starts with api."
+        );
+        assert_eq!(
+            Endpoint::new("https://api.acme.ghe.com").web_host(),
+            "acme.ghe.com",
+            "GHE.com serves its API from an api. subdomain"
+        );
     }
 
     #[test]
