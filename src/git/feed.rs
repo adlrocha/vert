@@ -1,7 +1,7 @@
 //! The change feed: commits plus the live working tree, labelled.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use git2::{Oid, Repository, Sort};
@@ -42,13 +42,19 @@ pub struct Entry {
     pub reverted: bool,
     /// This commit is itself a revert.
     pub is_revert: bool,
+    /// The linked worktree whose files this change belongs to, or `None` for
+    /// vert's own working directory.
+    pub root: Option<PathBuf>,
 }
 
 /// The identifier used for the working-tree entry.
 pub const WORKTREE_ID: &str = "worktree";
 
 impl Entry {
-    fn build(target: Target, files: Vec<FileStat>, labeler: &Labeler) -> Self {
+    /// Builds an unnamed entry for `target` from its changed files, labelled
+    /// by `labeler`. Callers fill in the message, author and time.
+    #[must_use]
+    pub fn new(target: Target, files: Vec<FileStat>, labeler: &Labeler) -> Self {
         let added = files.iter().map(|f| f.added).sum();
         let removed = files.iter().map(|f| f.removed).sum();
         let modules: Vec<String> = files
@@ -60,6 +66,14 @@ impl Entry {
         let (id, short) = match target {
             Target::WorkingTree => (WORKTREE_ID.to_owned(), "working".to_owned()),
             Target::Commit(oid) => (oid.to_string(), short_id(oid)),
+            Target::Range { base, head } => (
+                format!(
+                    "{}..{head}",
+                    base.map(|b| b.to_string()).unwrap_or_default()
+                ),
+                short_id(head),
+            ),
+            Target::PullRequest(number) => (format!("pr:{number}"), format!("#{number}")),
         };
         Self {
             target,
@@ -77,6 +91,7 @@ impl Entry {
             modules,
             reverted: false,
             is_revert: false,
+            root: None,
         }
     }
 
@@ -95,7 +110,7 @@ impl Entry {
     }
 }
 
-fn file_stats(repo: &Repository, target: Target) -> Result<Vec<FileStat>, GitError> {
+pub(crate) fn file_stats(repo: &Repository, target: Target) -> Result<Vec<FileStat>, GitError> {
     let diff = make_diff(repo, target)?;
     (0..diff.deltas().len())
         .map(|i| delta_stat(&diff, i).map(|o| o.map(|(stat, _)| stat)))
@@ -156,7 +171,7 @@ pub fn load_commits_cached(
         .iter()
         .filter_map(|e| match e.target {
             Target::Commit(oid) => Some((oid, e.clone())),
-            Target::WorkingTree => None,
+            _ => None,
         })
         .collect();
     Ok(entries)
@@ -165,7 +180,7 @@ pub fn load_commits_cached(
 fn commit_entry(repo: &Repository, oid: Oid, labeler: &Labeler) -> Result<Entry, GitError> {
     let commit = repo.find_commit(oid).ctx("read commit")?;
     let files = file_stats(repo, Target::Commit(oid))?;
-    let mut entry = Entry::build(Target::Commit(oid), files, labeler);
+    let mut entry = Entry::new(Target::Commit(oid), files, labeler);
     entry.summary = commit
         .summary_bytes()
         .map_or_else(|| "(no message)".to_owned(), lossy);
@@ -181,7 +196,7 @@ fn commit_entry(repo: &Repository, oid: Oid, labeler: &Labeler) -> Result<Entry,
     Ok(entry)
 }
 
-fn lossy(bytes: &[u8]) -> String {
+pub(crate) fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
@@ -214,7 +229,7 @@ pub fn load_worktree(
         return Ok(None);
     }
     let workdir = super::workdir(repo)?;
-    let mut entry = Entry::build(Target::WorkingTree, files, labeler);
+    let mut entry = Entry::new(Target::WorkingTree, files, labeler);
     "Uncommitted changes".clone_into(&mut entry.summary);
     entry.time = entry
         .files
@@ -225,7 +240,7 @@ pub fn load_worktree(
     Ok(Some(entry))
 }
 
-fn modified_secs(path: &Path) -> Option<i64> {
+pub(crate) fn modified_secs(path: &Path) -> Option<i64> {
     let modified = path.metadata().ok()?.modified().ok()?;
     let secs = modified.duration_since(UNIX_EPOCH).ok()?.as_secs();
     i64::try_from(secs).ok()

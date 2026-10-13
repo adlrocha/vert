@@ -1,6 +1,6 @@
 //! Structured, line-level diffs for the detail view.
 
-use git2::Repository;
+use git2::{Diff, Repository};
 
 use super::{Context, FileStat, GitError, Target, delta_stat, make_diff};
 
@@ -65,10 +65,31 @@ impl FileDiff {
 /// # Errors
 /// Returns [`GitError`] if the diff cannot be computed.
 pub fn load(repo: &Repository, target: Target) -> Result<Vec<FileDiff>, GitError> {
-    let diff = make_diff(repo, target)?;
+    read_files(&make_diff(repo, target)?)
+}
+
+/// Parses a unified diff (as `git diff` or GitHub produce it).
+///
+/// ```
+/// let text = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n";
+/// let files = vert::git::diff::parse(text).unwrap();
+/// assert_eq!(files[0].stat.path, "a.txt");
+/// assert_eq!((files[0].stat.added, files[0].stat.removed), (1, 1));
+/// ```
+///
+/// # Errors
+/// Returns [`GitError`] if the text is not a valid diff.
+pub fn parse(text: &str) -> Result<Vec<FileDiff>, GitError> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    read_files(&Diff::from_buffer(text.as_bytes()).ctx("parse diff")?)
+}
+
+fn read_files(diff: &Diff<'_>) -> Result<Vec<FileDiff>, GitError> {
     let mut files = Vec::with_capacity(diff.deltas().len());
     for index in 0..diff.deltas().len() {
-        let Some((stat, patch)) = delta_stat(&diff, index)? else {
+        let Some((stat, patch)) = delta_stat(diff, index)? else {
             continue;
         };
         let hunks = match patch {
@@ -188,5 +209,43 @@ mod tests {
         assert!(bin.stat.binary);
         assert!(bin.hunks.is_empty());
         assert_eq!(bin.first_changed_line(), 1);
+    }
+
+    #[test]
+    fn parses_patch_text() {
+        assert!(parse("  \n").expect("empty").is_empty());
+        let text = "diff --git a/n.txt b/n.txt\nnew file mode 100644\nindex 0000000..92d5444\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+fresh\ndiff --git a/old.txt b/new.txt\nsimilarity index 76%\nrename from old.txt\nrename to new.txt\nindex 302c88e..ecaf925 100644\n--- a/old.txt\n+++ b/new.txt\n@@ -1,4 +1,4 @@\n keep\n-gone\n+here\n more\n lines\n";
+        let files = parse(text).expect("parse");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].stat.status, crate::git::FileStatus::Added);
+        assert_eq!(files[1].stat.path, "new.txt");
+        assert_eq!(files[1].stat.old_path.as_deref(), Some("old.txt"));
+        assert_eq!((files[1].stat.added, files[1].stat.removed), (1, 1));
+        assert_eq!(files[1].hunks[0].lines.len(), 5);
+        assert!(parse("diff --git a/x b/x\n@@ nonsense").is_err());
+    }
+
+    #[test]
+    fn ranges_and_pull_requests() {
+        let t = TestRepo::new();
+        t.write("a.txt", "a\n");
+        let base = t.commit("init");
+        t.write("b.txt", "b\n");
+        t.commit("one");
+        t.write("c.txt", "c\n");
+        let head = t.commit("two");
+        let range = load(
+            &t.repo,
+            Target::Range {
+                base: Some(base),
+                head,
+            },
+        )
+        .expect("range");
+        assert_eq!(range.len(), 2);
+        let all = load(&t.repo, Target::Range { base: None, head }).expect("all");
+        assert_eq!(all.len(), 3);
+        let err = load(&t.repo, Target::PullRequest(1)).expect_err("not local");
+        assert!(matches!(err, GitError::NotLocal));
     }
 }

@@ -189,6 +189,7 @@ mod tests {
             wide: false,
             reverted: false,
             is_revert: false,
+            root: None,
         }
     }
 

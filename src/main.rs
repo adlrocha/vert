@@ -4,6 +4,7 @@
 //! loop and the external editor. State lives in [`vert::app`] and I/O in
 //! [`vert::jobs`].
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -79,6 +80,7 @@ fn run() -> Result<()> {
         config.max_highlight_lines,
         age::now(),
     );
+    app.set_refresh(config.refresh());
     let _watch = if config.no_watch {
         app.watch = WatchStatus::Disabled;
         None
@@ -104,6 +106,12 @@ fn run() -> Result<()> {
             max_file_bytes: config.max_file_bytes(),
             search_generation: Arc::new(AtomicU64::new(0)),
             commit_cache: Arc::default(),
+            base: config.base.clone(),
+            branch_limit: config.branch_limit(),
+            branch_cache: Arc::default(),
+            github: config.github(),
+            tokens: jobs::TokenSource::default(),
+            token: Arc::default(),
         },
         tx: tx.clone(),
         gate: Arc::new(InputGate::default()),
@@ -153,8 +161,9 @@ fn event_loop(
         for effect in pending.drain(..) {
             match effect {
                 Effect::Quit => return Ok(()),
-                Effect::Edit { path, line } => {
-                    if let Err(e) = edit(terminal, rt, &path, line) {
+                Effect::Edit { path, line, root } => {
+                    let dir = root.unwrap_or_else(|| rt.jobs.workdir.clone());
+                    if let Err(e) = edit(terminal, rt, &dir, &path, line) {
                         app.update(Msg::Notice(format!("{e:#}")));
                     }
                 }
@@ -173,7 +182,13 @@ fn event_loop(
 }
 
 /// Suspends the UI, runs the editor, and restores the UI.
-fn edit(terminal: &mut DefaultTerminal, rt: &Runtime, path: &str, line: u32) -> Result<()> {
+fn edit(
+    terminal: &mut DefaultTerminal,
+    rt: &Runtime,
+    dir: &Path,
+    path: &str,
+    line: u32,
+) -> Result<()> {
     rt.gate.paused.store(true, Ordering::Release);
     let start = Instant::now();
     while !rt.gate.parked.load(Ordering::Acquire) && start.elapsed() < PARK_TIMEOUT {
@@ -181,8 +196,8 @@ fn edit(terminal: &mut DefaultTerminal, rt: &Runtime, path: &str, line: u32) -> 
     }
     ratatui::restore();
     let editor = editor::editor_from_env();
-    let status = editor::command(&editor, &rt.jobs.workdir.join(path), line)
-        .current_dir(&rt.jobs.workdir)
+    let status = editor::command(&editor, &dir.join(path), line)
+        .current_dir(dir)
         .status();
     let restored = (|| -> Result<()> {
         enable_raw_mode().context("failed to re-enter raw mode")?;

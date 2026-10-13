@@ -52,6 +52,7 @@ fn entry(id: &str, time: i64, paths: &[&str]) -> Entry {
         wide: false,
         reverted: false,
         is_revert: false,
+        root: None,
     }
 }
 
@@ -256,6 +257,12 @@ fn tabs_help_and_quit() {
     app.update(key(KeyCode::BackTab));
     assert_eq!(app.tab, Tab::Feed);
     app.update(key(KeyCode::BackTab));
+    assert_eq!(app.tab, Tab::Branches);
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.tab, Tab::Feed);
+    app.update(ch('4'));
+    assert_eq!(app.tab, Tab::Branches);
+    app.update(key(KeyCode::BackTab));
     assert_eq!(app.tab, Tab::Search);
     app.update(key(KeyCode::Esc));
     app.update(ch('1'));
@@ -272,7 +279,7 @@ fn tabs_help_and_quit() {
     );
     assert!(app.update(Msg::Key(release)).is_empty());
     let tab_names: Vec<_> = Tab::ALL.iter().map(|t| t.title()).collect();
-    assert_eq!(tab_names, ["Feed", "Hotspots", "Search"]);
+    assert_eq!(tab_names, ["Feed", "Hotspots", "Search", "Branches"]);
 }
 
 #[test]
@@ -289,14 +296,16 @@ fn hotspots_filter_feed_and_open_files() {
         [Effect::OpenFile {
             path: "src/a.rs".to_owned(),
             line: 1,
-            marks: BTreeSet::new()
+            marks: BTreeSet::new(),
+            root: None,
         }]
     );
     assert_eq!(
         app.update(ch('e')),
         [Effect::Edit {
             path: "src/a.rs".to_owned(),
-            line: 1
+            line: 1,
+            root: None,
         }]
     );
     app.update(key(KeyCode::Enter));
@@ -337,14 +346,16 @@ fn file_search_flow() {
         [Effect::OpenFile {
             path: "src/main.rs".to_owned(),
             line: 1,
-            marks: BTreeSet::new()
+            marks: BTreeSet::new(),
+            root: None,
         }]
     );
     assert_eq!(
         app.update(ctrl('e')),
         [Effect::Edit {
             path: "src/main.rs".to_owned(),
-            line: 1
+            line: 1,
+            root: None,
         }]
     );
     app.update(key(KeyCode::Backspace));
@@ -497,7 +508,8 @@ fn detail_view_navigation() {
         [Effect::OpenFile {
             path: "src/a.rs".to_owned(),
             line: 1,
-            marks
+            marks,
+            root: None,
         }]
     );
     app.update(ch('h'));
@@ -505,7 +517,8 @@ fn detail_view_navigation() {
         app.update(ch('e')),
         [Effect::Edit {
             path: "src/a.rs".to_owned(),
-            line: 2
+            line: 2,
+            root: None,
         }]
     );
     app.update(ch('?'));
@@ -544,6 +557,7 @@ fn file_view_navigation() {
         content: Ok(content),
         line: 30,
         marks: BTreeSet::from([10, 11, 50, 80]),
+        root: None,
     });
     let file = |app: &App| match app.views.last() {
         Some(View::File(f)) => (f.scroll, f.hscroll, f.lines.len()),
@@ -585,7 +599,8 @@ fn file_view_navigation() {
         app.update(ch('e')),
         [Effect::Edit {
             path: "src/a.rs".to_owned(),
-            line: 1
+            line: 1,
+            root: None,
         }]
     );
     app.update(ch('G'));
@@ -597,7 +612,8 @@ fn file_view_navigation() {
         app.update(ch('e')),
         [Effect::Edit {
             path: "src/a.rs".to_owned(),
-            line: 30
+            line: 30,
+            root: None,
         }],
         "target line is visible"
     );
@@ -613,6 +629,7 @@ fn unreadable_files_show_a_notice() {
         content: Err("binary".to_owned()),
         line: 0,
         marks: BTreeSet::new(),
+        root: None,
     });
     let Some(View::File(f)) = app.views.last() else {
         panic!("file view")
@@ -708,6 +725,7 @@ fn file_view_ignores_unbound_keys() {
         content: Ok("x\n".to_owned()),
         line: 1,
         marks: BTreeSet::new(),
+        root: None,
     });
     assert!(app.update(ch('z')).is_empty());
     app.views.push(View::File(Box::new(FileView {
@@ -720,6 +738,7 @@ fn file_view_ignores_unbound_keys() {
         hscroll: 0,
         height: 0,
         notice: None,
+        root: None,
     })));
     assert_eq!(app.views.len(), 2);
 }
