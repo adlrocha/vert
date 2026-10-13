@@ -75,7 +75,7 @@ pub struct Context {
     /// Where tokens come from.
     pub tokens: TokenSource,
     /// The last token that worked, so `gh` is not asked on every refresh.
-    pub token: Arc<Mutex<Option<String>>>,
+    pub token: Arc<Mutex<Option<github::Token>>>,
 }
 
 impl Context {
@@ -312,7 +312,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             max_prs: 10,
         });
-        *c.token.lock().expect("lock") = token.map(str::to_owned);
+        *c.token.lock().expect("lock") = token.map(github::Token::new);
         c
     }
 
@@ -561,7 +561,14 @@ mod tests {
         assert_eq!(repo, "o/r");
         assert!(pulls.is_empty());
         assert!(requests.recv().expect("req").contains("env-token"));
-        assert_eq!(c.token.lock().expect("lock").as_deref(), Some("env-token"));
+        assert_eq!(
+            c.token
+                .lock()
+                .expect("lock")
+                .as_ref()
+                .map(github::Token::expose),
+            Some("env-token")
+        );
 
         let Some(Msg::Pulls(Err(PullsError::Failed(why)))) = run(Effect::LoadPulls, &c) else {
             panic!("rejected")
@@ -617,7 +624,7 @@ mod tests {
         assert_eq!(entry.short, "#3");
         let (_, rejected) = load(&c);
         assert!(rejected.expect_err("401").contains("rejected"));
-        *c.token.lock().expect("lock") = Some("tok".to_owned());
+        *c.token.lock().expect("lock") = Some(github::Token::new("tok"));
         let (_, broken) = load(&c);
         assert!(broken.expect_err("bad diff").contains("parse diff"));
         *c.token.lock().expect("lock") = None;

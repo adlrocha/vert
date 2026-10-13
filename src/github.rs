@@ -153,19 +153,44 @@ pub fn parse_remote(url: &str, host: &str) -> Option<Slug> {
     })
 }
 
+/// A GitHub token. Its `Debug` output is redacted so it cannot reach logs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Token(String);
+
+impl Token {
+    /// Wraps a token string.
+    #[must_use]
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// The token itself, for the `Authorization` header.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(<redacted>)")
+    }
+}
+
 /// Finds a token: the first non-empty [`TOKEN_VARS`] entry from `env`, else
 /// whatever `gh` returns.
 #[must_use]
 pub fn resolve_token(
     env: impl Fn(&str) -> Option<String>,
     gh: impl FnOnce() -> Option<String>,
-) -> Option<String> {
+) -> Option<Token> {
     TOKEN_VARS
         .iter()
         .filter_map(|var| env(var))
         .map(|v| v.trim().to_owned())
         .find(|v| !v.is_empty())
         .or_else(gh)
+        .map(Token)
 }
 
 /// The token from `<program> auth token` (the GitHub CLI), if it is installed
@@ -212,7 +237,7 @@ pub struct PullRequest {
 pub struct Client {
     agent: ureq::Agent,
     endpoint: Endpoint,
-    token: String,
+    token: Token,
 }
 
 const PULLS_QUERY: &str = "query($owner: String!, $name: String!, $first: Int!) {
@@ -280,7 +305,7 @@ impl Client {
     /// A client for `endpoint` that authenticates with `token` and gives up
     /// on requests after `timeout`.
     #[must_use]
-    pub fn new(endpoint: Endpoint, token: String, timeout: Duration) -> Self {
+    pub fn new(endpoint: Endpoint, token: Token, timeout: Duration) -> Self {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
@@ -361,7 +386,7 @@ impl Client {
         slug: &Slug,
     ) -> Result<String, GhError> {
         let req = req
-            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Authorization", &format!("Bearer {}", self.token.expose()))
             .header("Accept", accept)
             .header("X-GitHub-Api-Version", "2022-11-28");
         let sent = match body {
@@ -495,7 +520,11 @@ mod tests {
     }
 
     fn client(url: &str) -> Client {
-        Client::new(Endpoint::new(url), "t0k".to_owned(), Duration::from_secs(5))
+        Client::new(
+            Endpoint::new(url),
+            Token::new("t0k"),
+            Duration::from_secs(5),
+        )
     }
 
     const PULLS_JSON: &str = r#"{"data":{"repository":{"pullRequests":{"nodes":[
@@ -562,11 +591,26 @@ mod tests {
         };
         let gh = || Some("from-gh".to_owned());
         let both = env(&[("GH_TOKEN", " a "), ("GITHUB_TOKEN", "b")]);
-        assert_eq!(resolve_token(both, gh).as_deref(), Some("a"));
+        assert_eq!(
+            resolve_token(both, gh).as_ref().map(Token::expose),
+            Some("a")
+        );
         let blank = env(&[("GH_TOKEN", "  "), ("GITHUB_TOKEN", "b")]);
-        assert_eq!(resolve_token(blank, gh).as_deref(), Some("b"));
-        assert_eq!(resolve_token(env(&[]), gh).as_deref(), Some("from-gh"));
+        assert_eq!(
+            resolve_token(blank, gh).as_ref().map(Token::expose),
+            Some("b")
+        );
+        assert_eq!(
+            resolve_token(env(&[]), gh).as_ref().map(Token::expose),
+            Some("from-gh")
+        );
         assert_eq!(resolve_token(env(&[]), || None), None);
+        let client = Client::new(
+            Endpoint::new("https://api.github.com"),
+            Token::new("s3cret"),
+            Duration::from_secs(1),
+        );
+        assert!(!format!("{client:?}").contains("s3cret"), "token redacted");
     }
 
     #[cfg(unix)]

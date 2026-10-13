@@ -320,7 +320,7 @@ fn draw_summary(frame: &mut Frame<'_>, area: Rect, d: &DetailView, now: i64) {
     let chip_spans = chips(e);
     let chip_w = spans_width(&chip_spans);
     let title_w = usize::from(area.width).saturating_sub(chip_w + 4);
-    let title = if e.is_worktree() && e.root.is_none() {
+    let title = if e.is_own_worktree() {
         "Uncommitted changes"
     } else {
         e.summary.as_str()

@@ -89,7 +89,8 @@ pub struct Options<'a> {
     pub limit: usize,
     /// Change labelling thresholds.
     pub labeler: &'a Labeler,
-    /// Current time, for the age of clean checkouts.
+    /// Current time, used as the fallback timestamp when a checkout's changed
+    /// files have no readable modification time.
     pub now: i64,
 }
 
@@ -265,14 +266,17 @@ struct Candidate {
 }
 
 /// Local and remote branches that are not checked out and are not the base.
-/// A remote branch is dropped when a local branch has the same name.
+/// A remote branch is dropped when it is a local branch's upstream, or when an
+/// untracked local branch has the same name. A local branch counts as the base
+/// when it is the base, tracks it, or is an untracked branch of the same name.
 fn other_branches(
     repo: &Repository,
     checked_out: &HashSet<String>,
     base: Option<&str>,
 ) -> Result<Vec<Candidate>, GitError> {
     let base_local = base.map(|b| b.split_once('/').map_or(b, |(_, rest)| rest));
-    let mut locals = HashSet::new();
+    let mut upstreams = HashSet::new();
+    let mut untracked = HashSet::new();
     let mut out = Vec::new();
     for kind in [BranchType::Local, BranchType::Remote] {
         for item in repo.branches(Some(kind)).ctx("list branches")? {
@@ -289,12 +293,28 @@ fn other_branches(
                     Some((_, rest)) => rest.to_owned(),
                 }
             } else {
-                locals.insert(display.clone());
                 display.clone()
             };
-            let is_base = Some(display.as_str()) == base || Some(plain.as_str()) == base_local;
-            let duplicate = remote && locals.contains(&plain);
-            if is_base || duplicate || checked_out.contains(&plain) {
+            let is_base = if remote {
+                Some(display.as_str()) == base
+            } else {
+                let upstream = branch
+                    .upstream()
+                    .ok()
+                    .map(|u| String::from_utf8_lossy(u.get().shorthand_bytes()).into_owned());
+                let is_base = Some(plain.as_str()) == base
+                    || match &upstream {
+                        Some(u) => Some(u.as_str()) == base,
+                        None => Some(plain.as_str()) == base_local,
+                    };
+                match upstream {
+                    Some(u) => upstreams.insert(u),
+                    None => untracked.insert(plain.clone()),
+                };
+                is_base
+            };
+            let duplicate = remote && (upstreams.contains(&display) || untracked.contains(&plain));
+            if is_base || duplicate || (!remote && checked_out.contains(&plain)) {
                 continue;
             }
             out.push(Candidate {
@@ -546,6 +566,46 @@ mod tests {
         assert!(remote.remote);
         assert_eq!(remote.branch.as_deref(), Some("agent/pr"));
         assert_eq!(remote.ahead_behind, Some((1, 0)));
+    }
+
+    #[test]
+    fn fork_remotes_keep_their_own_rows() {
+        let t = base_repo();
+        let tip = commit_on(&t, "main", "m.txt", "m\n", 2_000);
+        let r = &t.repo;
+        for name in ["origin", "upstream"] {
+            r.remote(name, &format!("https://example.com/{name}/r.git"))
+                .expect("remote");
+        }
+        r.reference("refs/remotes/origin/main", tip, true, "t")
+            .expect("ref");
+        r.find_branch("main", BranchType::Local)
+            .expect("main")
+            .set_upstream(Some("origin/main"))
+            .expect("track");
+        let theirs = commit_on(&t, "tmp", "u.txt", "u\n", 3_000);
+        r.reference("refs/remotes/upstream/main", theirs, true, "t")
+            .expect("ref");
+        let dev = commit_on(&t, "dev", "d.txt", "d\n", 4_000);
+        r.reference("refs/remotes/upstream/dev", dev, true, "t")
+            .expect("ref");
+        r.find_branch("dev", BranchType::Local)
+            .expect("dev")
+            .set_upstream(Some("upstream/dev"))
+            .expect("track");
+        r.find_branch("tmp", BranchType::Local)
+            .expect("tmp")
+            .delete()
+            .expect("delete");
+
+        let l = labeler();
+        let b = load(r, opts(&l, Some("origin/main")), &mut RangeCache::new()).expect("load");
+        let names: Vec<_> = b.branches.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["main", "dev", "upstream/main"],
+            "upstream/main is its own line of work; upstream/dev is dev's upstream"
+        );
     }
 
     #[test]

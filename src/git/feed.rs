@@ -98,6 +98,18 @@ impl Entry {
         }
     }
 
+    /// Drops every changed file and the labels derived from them, leaving the
+    /// entry as [`Entry::blank`] would label it.
+    pub fn clear_files(&mut self) {
+        let empty = Self::blank(self.target);
+        self.files = empty.files;
+        self.added = empty.added;
+        self.removed = empty.removed;
+        self.modules = empty.modules;
+        self.size = empty.size;
+        self.wide = empty.wide;
+    }
+
     /// Replaces the changed files and recomputes the totals and labels.
     pub fn relabel(&mut self, files: Vec<FileStat>, labeler: &Labeler) {
         self.added = files.iter().map(|f| f.added).sum();
@@ -113,10 +125,17 @@ impl Entry {
         self.files = files;
     }
 
-    /// Whether this is the uncommitted working-tree entry.
+    /// Whether this holds uncommitted changes of any checkout: vert's own or a
+    /// linked worktree (see [`Entry::root`]).
     #[must_use]
     pub fn is_worktree(&self) -> bool {
         self.target == Target::WorkingTree
+    }
+
+    /// Whether this holds the uncommitted changes of vert's own checkout.
+    #[must_use]
+    pub fn is_own_worktree(&self) -> bool {
+        self.is_worktree() && self.root.is_none()
     }
 
     /// Whether any changed file has `path`.
@@ -403,6 +422,23 @@ mod tests {
         assert!(statuses.contains(&("gone.txt", FileStatus::Deleted)));
         assert!(statuses.contains(&("new/file.txt", FileStatus::Added)));
         assert!(statuses.contains(&("keep.txt", FileStatus::Modified)));
+
+        assert!(wt.is_own_worktree());
+        let mut linked = wt.clone();
+        linked.root = Some(PathBuf::from("/elsewhere"));
+        assert!(linked.is_worktree() && !linked.is_own_worktree());
+
+        linked.clear_files();
+        assert!(linked.files.is_empty() && linked.modules.is_empty());
+        assert_eq!((linked.added, linked.removed), (0, 0));
+        assert_eq!(linked.size, Size::Small);
+        assert!(!linked.wide);
+        assert_eq!(
+            linked.root,
+            Some(PathBuf::from("/elsewhere")),
+            "keeps its identity"
+        );
+        assert_eq!(linked.summary, wt.summary);
     }
 
     #[test]

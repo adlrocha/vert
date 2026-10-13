@@ -16,7 +16,7 @@ pub use branches::{BranchesState, PullStatus, Refresh, Row, RowFilter, pull_entr
 use crate::git::RepoInfo;
 use crate::git::branches::Branches;
 use crate::git::diff::{FileDiff, LineKind};
-use crate::git::feed::{Entry, WORKTREE_ID};
+use crate::git::feed::Entry;
 use crate::github::{PullRequest, PullsError};
 use crate::highlight::{Fragment, Highlighter};
 use crate::hotspots::{self, Grouping, Hotspot, Window};
@@ -697,7 +697,7 @@ impl App {
                 self.reselect(selected.as_deref());
                 self.recompute_hotspots();
                 if let Some(View::Detail(d)) = self.views.last()
-                    && d.entry.id == WORKTREE_ID
+                    && d.entry.is_own_worktree()
                     && let Some(wt) = &self.feed.worktree
                 {
                     effects.push(Effect::LoadDiff {

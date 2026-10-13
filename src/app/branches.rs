@@ -312,12 +312,7 @@ impl App {
             .find(|w| &w.path == root)?;
         let entry = checkout.dirty.clone().unwrap_or_else(|| {
             let mut clean = d.entry.clone();
-            clean.files.clear();
-            clean.added = 0;
-            clean.removed = 0;
-            clean.modules.clear();
-            clean.size = crate::labels::Size::Small;
-            clean.wide = false;
+            clean.clear_files();
             clean
         });
         Some(Effect::LoadDiff {
