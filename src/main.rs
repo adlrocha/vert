@@ -79,6 +79,7 @@ fn run() -> Result<()> {
         usize::from(config.module_depth),
         config.max_highlight_lines,
         age::now(),
+        config.update_check(),
     );
     app.set_refresh(config.refresh());
     let _watch = if config.no_watch {
@@ -110,6 +111,7 @@ fn run() -> Result<()> {
             branch_limit: config.branch_limit(),
             branch_cache: Arc::default(),
             github: config.github(),
+            update: config.update(),
             tokens: jobs::TokenSource::default(),
             token: Arc::default(),
         },

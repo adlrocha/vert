@@ -89,9 +89,30 @@ fn info() -> RepoInfo {
     }
 }
 
+#[test]
+fn update_check_runs_once_at_start_when_enabled() {
+    let (mut app, effects) = App::new(info(), 1, 1000, 0, true);
+    assert!(effects.contains(&Effect::CheckUpdate));
+    assert_eq!(app.update, None);
+    app.update(Msg::Update(UpdateStatus::Available {
+        latest: "a1b2c3d".to_owned(),
+    }));
+    assert_eq!(
+        app.update,
+        Some(UpdateStatus::Available {
+            latest: "a1b2c3d".to_owned()
+        })
+    );
+    app.update(Msg::Update(UpdateStatus::Current));
+    assert_eq!(app.update, Some(UpdateStatus::Current));
+
+    let (_, effects) = App::new(info(), 1, 1000, 0, false);
+    assert!(!effects.contains(&Effect::CheckUpdate), "off");
+}
+
 /// An app with three commits loaded and no working-tree changes.
 fn loaded() -> App {
-    let (mut app, effects) = App::new(info(), 1, 1000, 10_000);
+    let (mut app, effects) = App::new(info(), 1, 1000, 10_000, false);
     assert_eq!(effects, [Effect::LoadCommits, Effect::LoadWorktree]);
     app.update(Msg::Commits(Ok(vec![
         entry("c3", 9_000, &["src/a.rs", "docs/x.md"]),
@@ -135,7 +156,7 @@ fn new_commits_are_fresh_until_opened() {
 
 #[test]
 fn loads_coalesce_while_in_flight() {
-    let (mut app, _) = App::new(info(), 1, 1000, 0);
+    let (mut app, _) = App::new(info(), 1, 1000, 0, false);
     let workdir = BTreeSet::from([Change::Workdir]);
     assert!(
         app.update(Msg::Changed(workdir.clone())).is_empty(),
@@ -164,7 +185,7 @@ fn loads_coalesce_while_in_flight() {
 
 #[test]
 fn load_errors_are_shown() {
-    let (mut app, _) = App::new(info(), 1, 1000, 0);
+    let (mut app, _) = App::new(info(), 1, 1000, 0, false);
     app.update(Msg::Commits(Err("boom".to_owned())));
     assert_eq!(app.feed.error.as_deref(), Some("boom"));
     app.update(Msg::Worktree(Err("bad".to_owned())));
@@ -678,7 +699,7 @@ fn tab_cycle_and_ctrl_navigation() {
 
 #[test]
 fn empty_lists_ignore_actions() {
-    let (mut app, _) = App::new(info(), 1, 1000, 0);
+    let (mut app, _) = App::new(info(), 1, 1000, 0, false);
     app.update(Msg::Commits(Ok(Vec::new())));
     app.update(Msg::Worktree(Ok(None)));
     assert!(app.update(key(KeyCode::Enter)).is_empty());

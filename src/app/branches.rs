@@ -686,6 +686,7 @@ mod tests {
             1,
             100,
             1_000,
+            false,
         );
         app.set_refresh(Refresh {
             branches: Some(5),
@@ -906,6 +907,7 @@ mod tests {
             1,
             100,
             0,
+            false,
         );
         assert_eq!(press(&mut bare, KeyCode::Char('4')), [Effect::LoadBranches]);
         bare.update(Msg::Branches(Ok(Branches::default())));

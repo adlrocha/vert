@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Tab, View, WatchStatus};
+use crate::app::{App, Tab, UpdateStatus, View, WatchStatus};
 use crate::theme;
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -75,6 +75,9 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         left.push(Span::styled(format!("  ⎇ {branch}"), theme::muted()));
     }
     let mut right = Vec::new();
+    if let Some(UpdateStatus::Available { .. }) = &app.update {
+        right.push(Span::styled("↑ update available  ", theme::muted()));
+    }
     if !app.feed.fresh.is_empty() {
         right.push(Span::styled(
             format!("✦ {} new  ", app.feed.fresh.len()),
@@ -554,6 +557,7 @@ mod render_tests {
             1,
             1000,
             3_000,
+            false,
         );
         app.update(Msg::Commits(
             git::feed::load_commits(&t.repo, 10, &labeler).map_err(|e| e.to_string()),
@@ -591,6 +595,7 @@ mod render_tests {
             1,
             100,
             0,
+            false,
         );
         assert!(screen(&mut app, 100, 20).contains("Reading history"));
         assert!(screen(&mut app, 100, 20).contains("syncing"));
@@ -827,6 +832,7 @@ mod render_tests {
             1,
             100,
             0,
+            false,
         );
         app.update(Msg::Commits(Ok(vec![
             mk("aaaaaaa", Size::Xl, true, false),
@@ -878,6 +884,26 @@ mod render_tests {
             refresh: false,
         });
         assert!(screen(&mut app, 140, 20).contains("Uncommitted changes"));
+    }
+
+    #[test]
+    fn the_header_reports_available_updates() {
+        let (mut app, _) = App::new(
+            RepoInfo {
+                name: "x".to_owned(),
+                branch: None,
+            },
+            1,
+            100,
+            0,
+            false,
+        );
+        app.update = Some(crate::app::UpdateStatus::Available {
+            latest: "a1b2c3d".to_owned(),
+        });
+        assert!(screen(&mut app, 100, 12).contains("update available"));
+        app.update = Some(crate::app::UpdateStatus::Current);
+        assert!(!screen(&mut app, 100, 12).contains("update available"));
     }
 
     #[test]
@@ -941,6 +967,7 @@ mod render_tests {
             1,
             100,
             3_000,
+            false,
         );
         app.set_refresh(Refresh {
             branches: Some(5),

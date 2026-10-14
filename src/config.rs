@@ -91,6 +91,10 @@ pub struct Config {
     /// Never contact GitHub (pull requests are not shown).
     #[arg(long)]
     pub no_network: bool,
+
+    /// Never ask GitHub whether a newer vert exists.
+    #[arg(long)]
+    pub no_update_check: bool,
 }
 
 impl Config {
@@ -151,6 +155,22 @@ impl Config {
         }
     }
 
+    /// Whether vert may ask GitHub about its own latest commit.
+    #[must_use]
+    pub const fn update_check(&self) -> bool {
+        !self.no_update_check && !self.no_network
+    }
+
+    /// How to check for a newer vert, or `None` when the check is off.
+    #[must_use]
+    pub fn update(&self) -> Option<crate::jobs::Update> {
+        self.update_check().then(|| crate::jobs::Update {
+            endpoint: crate::github::Endpoint::new("https://api.github.com"),
+            timeout: Duration::from_secs(self.github_timeout_secs),
+            cache: cache_dir().join("vert/update-check"),
+        })
+    }
+
     /// Search-result cap as a `usize`.
     #[must_use]
     pub fn search_limit(&self) -> usize {
@@ -158,9 +178,45 @@ impl Config {
     }
 }
 
+/// The user's cache directory: `XDG_CACHE_HOME`, else `~/.cache`.
+fn cache_dir() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|home| PathBuf::from(home).join(".cache"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_check_can_be_disabled() {
+        let on = Config::parse_from(["vert"]);
+        assert!(on.update_check());
+        let update = on.update().expect("update settings");
+        assert_eq!(
+            update.endpoint,
+            crate::github::Endpoint::new("https://api.github.com")
+        );
+        assert_eq!(update.timeout, Duration::from_secs(15));
+        assert!(
+            update.cache.ends_with("vert/update-check"),
+            "{:?}",
+            update.cache
+        );
+
+        for args in [["vert", "--no-update-check"], ["vert", "--no-network"]] {
+            let config = Config::parse_from(args);
+            assert!(!config.update_check(), "{args:?}");
+            assert!(config.update().is_none(), "{args:?}");
+        }
+    }
 
     #[test]
     fn defaults_are_valid() {

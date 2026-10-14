@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use crate::app::{Effect, Msg};
+use crate::app::{Effect, Msg, UpdateStatus};
 use crate::git::Target;
 use crate::git::feed::Entry;
 use crate::github::{self, Client, Endpoint, GhError, PullsError, Slug};
@@ -17,6 +17,12 @@ use crate::{age, editor, git, search};
 
 /// The GitHub CLI, asked for a token when none is in the environment.
 pub const GH_PROGRAM: &str = "gh";
+
+/// vert's own repository and branch, which the update check reads.
+const VERT_REPO: &str = "adlrocha/vert";
+const VERT_BRANCH: &str = "main";
+/// How often the update check actually talks to GitHub.
+const UPDATE_EVERY_SECS: i64 = 24 * 60 * 60;
 
 /// How to reach GitHub.
 #[derive(Debug, Clone)]
@@ -27,6 +33,17 @@ pub struct GitHub {
     pub timeout: Duration,
     /// Maximum pull requests to list.
     pub max_prs: u16,
+}
+
+/// How to check whether a newer vert exists.
+#[derive(Debug, Clone)]
+pub struct Update {
+    /// The GitHub API to ask about vert's own repository.
+    pub endpoint: Endpoint,
+    /// Request timeout.
+    pub timeout: Duration,
+    /// File remembering the last answer, so GitHub is asked at most daily.
+    pub cache: PathBuf,
 }
 
 /// Where a GitHub token comes from.
@@ -72,6 +89,8 @@ pub struct Context {
     pub branch_cache: Arc<Mutex<git::branches::RangeCache>>,
     /// GitHub access, or `None` when network access is off.
     pub github: Option<GitHub>,
+    /// How to check for a newer vert, or `None` when that is off.
+    pub update: Option<Update>,
     /// Where tokens come from.
     pub tokens: TokenSource,
     /// The last token that worked, so `gh` is not asked on every refresh.
@@ -157,8 +176,12 @@ pub fn begin(effect: &Effect, ctx: &Context) {
 #[must_use]
 pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
     let open = || git::open(&ctx.workdir);
+    // The update check may have nothing to say; every other effect answers.
+    if let Effect::CheckUpdate = effect {
+        return check_update(ctx);
+    }
     Some(match effect {
-        Effect::Quit | Effect::Edit { .. } => return None,
+        Effect::Quit | Effect::Edit { .. } | Effect::CheckUpdate => return None,
         Effect::LoadCommits => {
             // Loads are serialised by the app, so this lock is uncontended.
             let mut cache = ctx
@@ -221,15 +244,7 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
                     .map_err(|e| describe(&e)),
             )
         }
-        Effect::LoadPulls => Msg::Pulls(ctx.github().and_then(|(client, slug, gh)| {
-            client
-                .open_pulls(&slug, gh.max_prs)
-                .map(|pulls| (slug.to_string(), pulls))
-                .map_err(|e| {
-                    ctx.rejected(&e);
-                    e.into()
-                })
-        })),
+        Effect::LoadPulls => Msg::Pulls(open_pulls(ctx)),
         Effect::Remove { worktree, branch } => {
             let (removed, error) = remove(
                 open(),
@@ -293,6 +308,77 @@ fn remove(
     (removed, error)
 }
 
+/// The update check's answer, or `None` when there is nothing to say.
+fn check_update(ctx: &Context) -> Option<Msg> {
+    ctx.update
+        .as_ref()
+        .and_then(|update| update_status(update, age::now()))
+        .map(Msg::Update)
+}
+
+/// Open pull requests of the repository `origin` points at.
+fn open_pulls(ctx: &Context) -> Result<(String, Vec<crate::github::PullRequest>), PullsError> {
+    let (client, slug, gh) = ctx.github()?;
+    client
+        .open_pulls(&slug, gh.max_prs)
+        .map(|pulls| (slug.to_string(), pulls))
+        .map_err(|e| {
+            ctx.rejected(&e);
+            e.into()
+        })
+}
+
+/// What the latest commit of vert's own `main` means for this build. The
+/// answer is remembered for a day; a failure is `None`, silent, worth
+/// retrying on the next start.
+fn update_status(update: &Update, now: i64) -> Option<UpdateStatus> {
+    let sha = crate::BUILD_SHA?;
+    let built = crate::BUILD_TIME
+        .and_then(|t| t.parse::<i64>().ok())
+        .unwrap_or(0);
+    if let Some((checked, tip)) = read_update_cache(&update.cache)
+        && now - checked < UPDATE_EVERY_SECS
+    {
+        return Some(classify(sha, built, &tip));
+    }
+    let tip = Client::anonymous(update.endpoint.clone(), update.timeout)
+        .tip(VERT_REPO, VERT_BRANCH)
+        .ok()?;
+    write_update_cache(&update.cache, now, &tip);
+    Some(classify(sha, built, &tip))
+}
+
+/// Whether `tip` is past the commit this build was made from: a different
+/// commit that is not older, so a local build ahead of `main` is not an
+/// update.
+fn classify(built_sha: &str, built_time: i64, tip: &github::Tip) -> UpdateStatus {
+    if tip.sha != built_sha && tip.time >= built_time {
+        UpdateStatus::Available {
+            latest: tip.sha.clone(),
+        }
+    } else {
+        UpdateStatus::Current
+    }
+}
+
+/// The cached answer: when it was fetched, and the tip it named.
+fn read_update_cache(path: &Path) -> Option<(i64, github::Tip)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut fields = text.split_whitespace();
+    let checked = fields.next()?.parse().ok()?;
+    let sha = fields.next()?.to_owned();
+    let time = fields.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+    Some((checked, github::Tip { sha, time }))
+}
+
+/// Remembers `tip` for the next day; a failure just means asking again.
+fn write_update_cache(path: &Path, now: i64, tip: &github::Tip) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, format!("{} {} {}", now, tip.sha, tip.time));
+}
+
 /// Loads the diff of `entry`: from git, or from GitHub for a pull request,
 /// whose entry then gains the changed files.
 fn load_diff(entry: &mut Entry, ctx: &Context) -> Result<Vec<git::diff::FileDiff>, String> {
@@ -327,6 +413,7 @@ mod tests {
     fn ctx(t: &TestRepo) -> Context {
         Context {
             workdir: t.path().to_path_buf(),
+            update: None,
             labeler: Labeler::new(5, 20, 100, 2, 1).expect("labeler"),
             commit_limit: 10,
             search_limit: 100,
@@ -792,6 +879,99 @@ mod tests {
         t.repo
             .commit(Some(&reference), &sig, &sig, "c", &tree, &[&parent])
             .expect("commit");
+    }
+
+    #[test]
+    fn classifies_tips_against_the_build() {
+        let tip = |sha: &str, time: i64| github::Tip {
+            sha: sha.to_owned(),
+            time,
+        };
+        assert_eq!(
+            classify("old", 100, &tip("new", 200)),
+            UpdateStatus::Available {
+                latest: "new".to_owned()
+            }
+        );
+        assert_eq!(
+            classify("same", 100, &tip("same", 200)),
+            UpdateStatus::Current,
+            "the commit this build is from"
+        );
+        assert_eq!(
+            classify("ahead", 300, &tip("behind", 200)),
+            UpdateStatus::Current,
+            "a local build past main is not an update"
+        );
+        assert_eq!(
+            classify("equal", 200, &tip("other", 200)),
+            UpdateStatus::Available {
+                latest: "other".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn remembers_the_update_answer_for_a_day() {
+        if crate::BUILD_SHA.is_none() {
+            return; // built without git; the check would not run at all
+        }
+        let update_at = |url: &str, cache: PathBuf| Update {
+            endpoint: Endpoint::new(url),
+            timeout: Duration::from_secs(5),
+            cache,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        // GitHub names the very commit this build is from: still current.
+        let same = format!(
+            r#"{{"sha":"{}","commit":{{"committer":{{"date":"2030-01-01T00:00:00Z"}}}}}}"#,
+            crate::BUILD_SHA.expect("sha")
+        );
+        let (url, requests) = serve(vec![(200, vec![], same)]);
+        let mut c = ctx(&repo());
+        c.update = Some(update_at(&url, dir.path().join("update")));
+        assert!(matches!(
+            run(Effect::CheckUpdate, &c),
+            Some(Msg::Update(UpdateStatus::Current))
+        ));
+        assert!(requests.recv().expect("asked").contains("commits/main"));
+        // The answer is remembered: no second request (none is left to serve).
+        assert!(matches!(
+            run(Effect::CheckUpdate, &c),
+            Some(Msg::Update(UpdateStatus::Current))
+        ));
+        assert!(requests.try_recv().is_err(), "no second request");
+
+        // A newer tip on main is an update, fresh or cached.
+        let (url, _) = serve(vec![(
+            200,
+            vec![],
+            r#"{"sha":"newer","commit":{"committer":{"date":"2031-01-01T00:00:00Z"}}}"#.to_owned(),
+        )]);
+        let mut c = ctx(&repo());
+        c.update = Some(update_at(&url, dir.path().join("stale")));
+        std::fs::write(dir.path().join("stale"), "0 whatever 0").expect("stale");
+        assert!(matches!(
+            run(Effect::CheckUpdate, &c),
+            Some(Msg::Update(UpdateStatus::Available { .. }))
+        ));
+        std::fs::write(
+            dir.path().join("fresh"),
+            format!("{} newer 1900000000", age::now() - 60),
+        )
+        .expect("fresh");
+        c.update = Some(update_at("http://127.0.0.1:9", dir.path().join("fresh")));
+        assert!(
+            matches!(
+                run(Effect::CheckUpdate, &c),
+                Some(Msg::Update(UpdateStatus::Available { .. }))
+            ),
+            "answered without a reachable server"
+        );
+
+        // Off, or nothing to compare: silent.
+        c.update = None;
+        assert!(run(Effect::CheckUpdate, &c).is_none());
     }
 
     #[test]

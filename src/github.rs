@@ -261,12 +261,21 @@ pub struct PullRequest {
     pub checks: Option<Checks>,
 }
 
-/// A GitHub API client for one endpoint and token.
+/// The head commit of a branch, as the update check reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tip {
+    /// Commit id.
+    pub sha: String,
+    /// Commit time (Unix seconds).
+    pub time: i64,
+}
+
+/// A GitHub API client for one endpoint, with or without a token.
 #[derive(Debug, Clone)]
 pub struct Client {
     agent: ureq::Agent,
     endpoint: Endpoint,
-    token: Token,
+    token: Option<Token>,
 }
 
 const PULLS_QUERY: &str = "query($owner: String!, $name: String!, $first: Int!) {
@@ -353,11 +362,38 @@ struct Message {
     message: String,
 }
 
+/// A commit as the commits endpoint returns it.
+#[derive(Deserialize)]
+struct TipJson {
+    sha: String,
+    commit: TipCommit,
+}
+
+#[derive(Deserialize)]
+struct TipCommit {
+    committer: Option<Dated>,
+}
+
+#[derive(Deserialize)]
+struct Dated {
+    date: String,
+}
+
 impl Client {
     /// A client for `endpoint` that authenticates with `token` and gives up
     /// on requests after `timeout`.
     #[must_use]
     pub fn new(endpoint: Endpoint, token: Token, timeout: Duration) -> Self {
+        Self::build(endpoint, timeout).with_token(token)
+    }
+
+    /// A client that sends no token, for reading public repositories.
+    #[must_use]
+    pub fn anonymous(endpoint: Endpoint, timeout: Duration) -> Self {
+        Self::build(endpoint, timeout)
+    }
+
+    fn build(endpoint: Endpoint, timeout: Duration) -> Self {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
@@ -373,8 +409,13 @@ impl Client {
         Self {
             agent,
             endpoint,
-            token,
+            token: None,
         }
+    }
+
+    fn with_token(mut self, token: Token) -> Self {
+        self.token = Some(token);
+        self
     }
 
     /// Up to `limit` open pull requests of `slug`, most recently updated first.
@@ -390,7 +431,7 @@ impl Client {
             self.agent.post(self.endpoint.graphql()),
             Some(&body),
             JSON_MEDIA_TYPE,
-            slug,
+            &slug.to_string(),
         )?;
         let reply: GraphQl =
             serde_json::from_str(&text).map_err(|e| GhError::Decode(e.to_string()))?;
@@ -436,8 +477,33 @@ impl Client {
             self.agent.get(url).force_send_body(),
             None,
             DIFF_MEDIA_TYPE,
-            slug,
+            &slug.to_string(),
         )
+    }
+
+    /// The head commit of `repo`'s `branch`, readable without a token when
+    /// the repository is public: vert's update check about itself.
+    ///
+    /// # Errors
+    /// Returns [`GhError`] when the request fails or GitHub refuses it.
+    pub fn tip(&self, repo: &str, branch: &str) -> Result<Tip, GhError> {
+        let url = format!("{}/repos/{repo}/commits/{branch}", self.endpoint.rest);
+        let text = self.request(
+            self.agent.get(url).force_send_body(),
+            None,
+            JSON_MEDIA_TYPE,
+            repo,
+        )?;
+        let json: TipJson =
+            serde_json::from_str(&text).map_err(|e| GhError::Decode(e.to_string()))?;
+        Ok(Tip {
+            sha: json.sha,
+            time: json
+                .commit
+                .committer
+                .and_then(|c| parse_time(&c.date))
+                .unwrap_or(0),
+        })
     }
 
     fn request(
@@ -445,12 +511,14 @@ impl Client {
         req: ureq::RequestBuilder<ureq::typestate::WithBody>,
         body: Option<&serde_json::Value>,
         accept: &str,
-        slug: &Slug,
+        name: &str,
     ) -> Result<String, GhError> {
-        let req = req
-            .header("Authorization", &format!("Bearer {}", self.token.expose()))
-            .header("Accept", accept)
-            .header("X-GitHub-Api-Version", "2022-11-28");
+        let req = match &self.token {
+            Some(token) => req.header("Authorization", &format!("Bearer {}", token.expose())),
+            None => req,
+        }
+        .header("Accept", accept)
+        .header("X-GitHub-Api-Version", "2022-11-28");
         let sent = match body {
             Some(json) => req
                 .header("Content-Type", "application/json")
@@ -471,7 +539,7 @@ impl Client {
             200..=299 => Ok(text),
             401 => Err(GhError::Unauthorized),
             403 | 429 if exhausted || status == 429 => Err(GhError::RateLimited),
-            404 => Err(GhError::NotFound(slug.to_string())),
+            404 => Err(GhError::NotFound(name.to_owned())),
             _ => Err(GhError::Status {
                 status,
                 message: serde_json::from_str::<Message>(&text)
@@ -828,6 +896,30 @@ mod tests {
             .expect_err("closed port");
         assert!(matches!(err, GhError::Network(_)), "{err:?}");
         assert!(err.to_string().starts_with("couldn't reach GitHub"));
+    }
+
+    #[test]
+    fn tips_of_public_branches_need_no_token() {
+        let (url, requests) = serve(vec![
+            (
+                200,
+                vec![],
+                r#"{"sha":"a1b2c3d","commit":{"committer":{"date":"2026-10-14T10:00:00Z"}}}"#
+                    .to_owned(),
+            ),
+            (404, vec![], r#"{"message":"Not Found"}"#.to_owned()),
+        ]);
+        let client = Client::anonymous(Endpoint::new(&url), Duration::from_secs(5));
+        let tip = client.tip("adlrocha/vert", "main").expect("tip");
+        assert_eq!(tip.sha, "a1b2c3d");
+        assert_eq!(tip.time, parse_time("2026-10-14T10:00:00Z").expect("time"));
+        let request = requests.recv().expect("request");
+        assert!(
+            request.starts_with("GET /repos/adlrocha/vert/commits/main"),
+            "{request}"
+        );
+        assert!(!request.contains("Authorization"), "no token sent");
+        assert!(client.tip("adlrocha/vert", "nope").is_err());
     }
 
     #[test]

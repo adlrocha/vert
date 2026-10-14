@@ -440,6 +440,8 @@ pub enum Msg {
         /// Why the removal stopped, naming what had already gone.
         error: Option<String>,
     },
+    /// The update check answered.
+    Update(UpdateStatus),
 }
 
 /// Side effects requested by [`App::update`].
@@ -498,6 +500,20 @@ pub enum Effect {
         /// The local branch to delete, with the tip it must still point at.
         branch: Option<BranchRemoval>,
     },
+    /// Ask GitHub whether a newer vert exists.
+    CheckUpdate,
+}
+
+/// What the once-a-day update check found out about vert itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// This build is at or past `main`.
+    Current,
+    /// `main` has commits past this build: its tip's commit id.
+    Available {
+        /// The short id to show, if ever needed.
+        latest: String,
+    },
 }
 
 /// Whole-application state.
@@ -524,6 +540,8 @@ pub struct App {
     pub help: bool,
     /// Live-watch status.
     pub watch: WatchStatus,
+    /// What the update check found, once it answered.
+    pub update: Option<UpdateStatus>,
     /// Transient message for the footer.
     pub notice: Option<String>,
     /// Animation counter.
@@ -538,13 +556,15 @@ pub struct App {
 
 impl App {
     /// Creates the application in its initial (loading) state, returning the
-    /// effects that kick off loading.
+    /// effects that kick off loading. `updates` asks GitHub (at most once a
+    /// day) whether a newer vert exists.
     #[must_use]
     pub fn new(
         repo: RepoInfo,
         depth: usize,
         max_highlight: usize,
         now: i64,
+        updates: bool,
     ) -> (Self, Vec<Effect>) {
         let mut app = Self {
             repo,
@@ -575,6 +595,7 @@ impl App {
             views: Vec::new(),
             help: false,
             watch: WatchStatus::Live,
+            update: None,
             notice: None,
             tick: 0,
             now,
@@ -583,6 +604,9 @@ impl App {
         };
         let mut effects = app.request_commits();
         effects.extend(app.request_worktree());
+        if updates && crate::BUILD_SHA.is_some() {
+            effects.push(Effect::CheckUpdate);
+        }
         (app, effects)
     }
 
@@ -670,6 +694,10 @@ impl App {
             }
             Msg::Notice(text) => {
                 self.notice = Some(text);
+                Vec::new()
+            }
+            Msg::Update(status) => {
+                self.update = Some(status);
                 Vec::new()
             }
             Msg::Removed { removed, error } => {
