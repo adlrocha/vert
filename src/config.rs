@@ -65,7 +65,7 @@ pub struct Config {
     pub base: Option<String>,
 
     /// Maximum branches without a worktree to show (most recent first).
-    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
     pub max_branches: u32,
 
     /// How often the Branches tab rescans branches and worktrees, in seconds.
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(config.commit_limit(), 500);
         assert_eq!(config.search_limit(), 2000);
         assert_eq!(config.max_file_bytes(), 4096 * 1024);
-        assert_eq!(config.branch_limit(), 100);
+        assert_eq!(config.branch_limit(), 30);
         assert_eq!(config.base, None);
         let github = config.github().expect("network on by default");
         assert_eq!(github.endpoint.web_host(), "github.com");

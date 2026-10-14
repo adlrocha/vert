@@ -123,7 +123,7 @@ or writes to your repository. `--no-network` turns GitHub access off.
 | `--max-file-kb`          | 4096    | Largest file the viewer opens                   |
 | `--no-watch`             | off     | Disable live updates                            |
 | `--base`                 | auto    | Branch to compare against (`origin/HEAD`, else `main`/`master`) |
-| `--max-branches`         | 100     | Branches without a worktree to show, newest first |
+| `--max-branches`         | 30      | Branches without a worktree to show, newest first |
 | `--branch-refresh-secs`  | 5       | Branches tab rescan interval                    |
 | `--pr-refresh-secs`      | 60      | Pull request refresh interval                   |
 | `--max-prs`              | 50      | Open pull requests to list (at most 100)        |
