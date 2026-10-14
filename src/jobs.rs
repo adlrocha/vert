@@ -230,6 +230,10 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
                     e.into()
                 })
         })),
+        Effect::Remove { worktree, branch } => {
+            let (removed, error) = remove(open(), worktree.as_ref(), branch.as_deref());
+            Msg::Removed { removed, error }
+        }
         Effect::OpenFile {
             path,
             line,
@@ -247,6 +251,36 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
             }
         }
     })
+}
+
+/// Performs a confirmed removal: the worktree first, then the branch. Returns
+/// what went, named for the user, and the failure that stopped the rest,
+/// phrased to acknowledge what had already gone.
+fn remove(
+    repo: Result<git2::Repository, git::GitError>,
+    worktree: Option<&(String, PathBuf)>,
+    branch: Option<&str>,
+) -> (Vec<String>, Option<String>) {
+    let mut removed = Vec::new();
+    let outcome = repo.and_then(|repo| {
+        if let Some((name, path)) = worktree {
+            git::branches::remove_worktree(&repo, name, path)?;
+            removed.push(format!("worktree {name}"));
+        }
+        if let Some(branch) = branch {
+            git::branches::delete_branch(&repo, branch)?;
+            removed.push(format!("branch {branch}"));
+        }
+        Ok(())
+    });
+    let error = outcome.err().map(|e| {
+        if removed.is_empty() {
+            describe(&e)
+        } else {
+            format!("removed {}, but {}", removed.join(" and "), describe(&e))
+        }
+    });
+    (removed, error)
 }
 
 /// Loads the diff of `entry`: from git, or from GitHub for a pull request,
@@ -631,6 +665,73 @@ mod tests {
         assert!(no_token.expect_err("no token").contains("gh auth login"));
         let (_, off) = load(&ctx(&t));
         assert!(off.expect_err("off").contains("--no-network"));
+    }
+
+    #[test]
+    fn removes_worktrees_and_branches() {
+        let t = repo();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent");
+        t.repo.worktree("agent", &path, None).expect("worktree");
+        let c = ctx(&t);
+        let Some(Msg::Removed {
+            removed,
+            error: None,
+        }) = run(
+            Effect::Remove {
+                worktree: Some(("agent".to_owned(), path.clone())),
+                branch: Some("agent".to_owned()),
+            },
+            &c,
+        )
+        else {
+            panic!("removed")
+        };
+        assert_eq!(removed, ["worktree agent", "branch agent"]);
+        assert!(!path.exists(), "the checkout directory is gone");
+        assert!(
+            t.repo
+                .find_branch("agent", git2::BranchType::Local)
+                .is_err(),
+            "and so is the branch"
+        );
+
+        // What fails is reported, naming the step.
+        let Some(Msg::Removed {
+            removed,
+            error: Some(e),
+        }) = run(
+            Effect::Remove {
+                worktree: None,
+                branch: Some("missing".to_owned()),
+            },
+            &c,
+        )
+        else {
+            panic!("error")
+        };
+        assert!(removed.is_empty(), "{removed:?}");
+        assert!(e.contains("failed to delete the branch"), "{e}");
+
+        // A partial removal names what already went.
+        let second = dir.path().join("second");
+        t.repo.worktree("second", &second, None).expect("worktree");
+        let Some(Msg::Removed {
+            removed,
+            error: Some(e),
+        }) = run(
+            Effect::Remove {
+                worktree: Some(("second".to_owned(), second.clone())),
+                branch: Some("missing".to_owned()),
+            },
+            &c,
+        )
+        else {
+            panic!("partial")
+        };
+        assert_eq!(removed, ["worktree second"]);
+        assert!(e.starts_with("removed worktree second, but "), "{e}");
+        assert!(!second.exists());
     }
 
     #[test]

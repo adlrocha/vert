@@ -4,11 +4,12 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 
 use super::feed::chips;
 use super::{
-    Hints, empty_state, marker, pad, panel, spans_width, spinner, stat_spans, truncate, width,
+    Hints, centered, empty_state, marker, pad, panel, spans_width, spinner, stat_spans, truncate,
+    width,
 };
 use crate::age::relative;
 use crate::app::{App, PullStatus, Row, RowFilter};
@@ -20,7 +21,9 @@ const HINTS: Hints = &[
     ("⏎", "open"),
     ("b", "branch diff"),
     ("p", "PR diff"),
-    ("f", "filter"),
+    ("f", "filter kinds"),
+    ("/", "filter names"),
+    ("d", "remove"),
     ("r", "refresh"),
     ("?", "keys"),
 ];
@@ -30,6 +33,10 @@ const KIND_W: usize = 9;
 const MAX_NAME_W: usize = 32;
 /// Narrowest the description column gets before it is dropped.
 const MIN_DESC_W: usize = 12;
+/// Confirmation footer of the removal dialog.
+const CONFIRM_HINT: &str = "y remove · any other key cancels";
+/// Room the removal dialog leaves around its text.
+const CONTENT_PAD: usize = 6;
 
 pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &mut App) -> Hints {
     let rows = app.branches.rows();
@@ -41,6 +48,14 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &mut App) -> Hints {
         title.push(Span::styled(
             format!("· {} ", app.branches.filter.title()),
             Style::default().fg(theme::HIGHLIGHT),
+        ));
+    }
+    if !app.branches.name_filter.is_empty() || app.branches.filter_editing {
+        let cursor = if app.branches.filter_editing { "_" } else { "" };
+        title.push(Span::styled("· ", theme::muted()));
+        title.push(Span::styled(
+            format!("{}{cursor} ", app.branches.name_filter),
+            theme::accent(),
         ));
     }
     if app.branches.loading() {
@@ -65,12 +80,17 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &mut App) -> Hints {
         return HINTS;
     }
     if rows.is_empty() {
-        let detail = if app.branches.filter == RowFilter::All {
-            "Branches, worktrees and open pull requests will appear here."
+        let (title, detail) = if !app.branches.name_filter.is_empty() {
+            ("No rows match", "esc clears the name filter")
+        } else if app.branches.filter == RowFilter::All {
+            (
+                "Nothing to show",
+                "Branches, worktrees and open pull requests will appear here.",
+            )
         } else {
-            "f changes the filter"
+            ("Nothing to show", "f changes the filter")
         };
-        empty_state(frame, inner, "Nothing to show", detail);
+        empty_state(frame, inner, title, detail);
         return HINTS;
     }
 
@@ -164,11 +184,7 @@ fn kind(r: &Row<'_>) -> (&'static str, Style) {
 }
 
 fn name(r: &Row<'_>) -> String {
-    match (r.branch, r.pull) {
-        (Some(b), _) => b.name.clone(),
-        (None, Some(p)) => p.head.clone(),
-        (None, None) => String::new(),
-    }
+    r.name().to_owned()
 }
 
 fn dirty(r: &Row<'_>) -> String {
@@ -287,6 +303,61 @@ fn row(r: &Row<'_>, c: Columns, selected: bool, width_total: usize, now: i64) ->
     }
     spans.extend(right);
     Line::from(spans)
+}
+
+/// The `d` key's confirmation: what will go, and what is risky about it.
+pub(super) fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(removal) = &app.branches.confirm else {
+        return;
+    };
+    let question = match (&removal.worktree, &removal.branch) {
+        (Some((worktree, _)), Some(branch)) => {
+            format!("Remove worktree {worktree} and delete branch {branch}?")
+        }
+        (Some((worktree, _)), None) => format!("Remove worktree {worktree}?"),
+        (None, Some(branch)) => format!("Delete branch {branch}?"),
+        (None, None) => String::new(),
+    };
+    let mut lines = vec![Line::from(Span::styled(question, theme::bold()))];
+    if let Some((_, path)) = &removal.worktree {
+        lines.push(Line::from(Span::styled(
+            truncate(&path.display().to_string(), 56),
+            theme::muted(),
+        )));
+    }
+    let warn = |text: String| Line::from(Span::styled(text, Style::default().fg(theme::WARN)));
+    if removal.unmerged.is_some_and(|ahead| ahead > 0) {
+        let base = app
+            .branches
+            .list
+            .base
+            .as_deref()
+            .unwrap_or("the base branch");
+        lines.push(warn(format!(
+            "⚠ {} commits not on {base}",
+            removal.unmerged.unwrap_or(0)
+        )));
+    }
+    if let Some(number) = removal.pull {
+        lines.push(warn(format!("⚠ open pull request #{number}")));
+    }
+    let content = lines.iter().map(Line::width).max().unwrap_or(0);
+    let box_w = content.max(width(CONFIRM_HINT)) + CONTENT_PAD;
+    let box_h = lines.len() + 4;
+    let area = centered(
+        area,
+        u16::try_from(box_w).unwrap_or(u16::MAX),
+        u16::try_from(box_h).unwrap_or(u16::MAX),
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            panel(true)
+                .title(" Remove ")
+                .title_bottom(Line::from(format!(" {CONFIRM_HINT} ")).alignment(Alignment::Right)),
+        ),
+        area,
+    );
 }
 
 #[cfg(test)]

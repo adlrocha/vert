@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use git2::{BranchType, Oid, Repository};
+use git2::{BranchType, Oid, Repository, WorktreePruneOptions};
 
 use super::feed::{Entry, WORKTREE_ID, file_stats, load_worktree, lossy};
 use super::{Context, FileStat, GitError, Target, short_id};
@@ -379,6 +379,45 @@ fn changes(
     Ok((entry, ahead_behind))
 }
 
+/// Removes the linked worktree at `path`: both its directory and git's
+/// bookkeeping for it. A locked worktree is left alone.
+///
+/// # Errors
+/// Returns [`GitError`] when no such worktree exists or it cannot be removed.
+pub fn remove_worktree(repo: &Repository, name: &str, path: &Path) -> Result<(), GitError> {
+    let registered = registered_name(repo, path).unwrap_or_else(|| name.to_owned());
+    let worktree = repo.find_worktree(&registered).ctx("find the worktree")?;
+    let mut opts = WorktreePruneOptions::new();
+    opts.valid(true).working_tree(true);
+    worktree.prune(Some(&mut opts)).ctx("remove the worktree")
+}
+
+/// The name git registered the worktree at `path` under: its directory name
+/// unless that was already taken.
+fn registered_name(repo: &Repository, path: &Path) -> Option<String> {
+    let wanted = canonical(path);
+    let names = repo.worktrees().ok()?;
+    names
+        .iter()
+        .filter_map(|n| n.ok().flatten())
+        .find_map(|name| {
+            repo.find_worktree(name)
+                .ok()
+                .filter(|wt| canonical(wt.path()) == wanted)
+                .map(|_| name.to_owned())
+        })
+}
+
+/// Deletes the local branch `branch`.
+///
+/// # Errors
+/// Returns [`GitError`] when the branch does not exist or is checked out.
+pub fn delete_branch(repo: &Repository, branch: &str) -> Result<(), GitError> {
+    repo.find_branch(branch, BranchType::Local)
+        .and_then(|mut b| b.delete())
+        .ctx("delete the branch")
+}
+
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -748,6 +787,61 @@ mod tests {
         let wt = b.branches[0].worktree.as_ref().expect("wt");
         assert!(wt.current);
         assert_eq!(wt.dirty.as_ref().map(|d| d.id.as_str()), Some(WORKTREE_ID));
+    }
+
+    #[test]
+    fn removes_worktrees_and_their_branches() {
+        let t = base_repo();
+        commit_on(&t, "agent", "x.txt", "x\n", 2_000);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent-wt");
+        let reference = t.repo.find_reference("refs/heads/agent").expect("ref");
+        let mut add = git2::WorktreeAddOptions::new();
+        add.reference(Some(&reference));
+        t.repo
+            .worktree("agent-wt", &path, Some(&add))
+            .expect("worktree");
+        std::fs::write(path.join("leftover.txt"), "x\n").expect("write");
+
+        remove_worktree(&t.repo, "agent-wt", &path).expect("remove");
+        assert!(!path.exists(), "the directory is gone");
+        assert!(
+            t.repo.worktrees().expect("worktrees").is_empty(),
+            "and so is git's bookkeeping"
+        );
+        // A missing worktree is not silently re-removed.
+        assert!(remove_worktree(&t.repo, "agent-wt", &path).is_err());
+
+        // With the worktree gone, nothing checks the branch out any more.
+        delete_branch(&t.repo, "agent").expect("delete");
+        assert!(t.repo.find_branch("agent", BranchType::Local).is_err());
+        assert!(delete_branch(&t.repo, "agent").is_err(), "already gone");
+    }
+
+    #[test]
+    fn refuses_locked_worktrees_and_checked_out_branches() {
+        let t = base_repo();
+        commit_on(&t, "agent", "x.txt", "x\n", 2_000);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent-wt");
+        t.repo.worktree("agent-wt", &path, None).expect("worktree");
+        t.repo
+            .find_worktree("agent-wt")
+            .expect("worktree")
+            .lock(Some("busy"))
+            .expect("lock");
+        assert!(remove_worktree(&t.repo, "agent-wt", &path).is_err());
+        assert!(path.exists(), "a locked worktree is left alone");
+
+        let current = t
+            .repo
+            .head()
+            .expect("head")
+            .shorthand()
+            .expect("name")
+            .to_owned();
+        let err = delete_branch(&t.repo, &current).expect_err("checked out");
+        assert!(err.to_string().contains("delete the branch"), "{err}");
     }
 
     #[test]

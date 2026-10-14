@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-pub use branches::{BranchesState, PullStatus, Refresh, Row, RowFilter, pull_entry};
+pub use branches::{BranchesState, PullStatus, Refresh, Removal, Row, RowFilter, pull_entry};
 
 use crate::git::RepoInfo;
 use crate::git::branches::Branches;
@@ -431,6 +431,13 @@ pub enum Msg {
     },
     /// Something to tell the user.
     Notice(String),
+    /// A removal finished: what went, and any failure after that.
+    Removed {
+        /// What was removed, named for the user (`"worktree agent"`).
+        removed: Vec<String>,
+        /// Why the removal stopped, naming what had already gone.
+        error: Option<String>,
+    },
 }
 
 /// Side effects requested by [`App::update`].
@@ -481,6 +488,13 @@ pub enum Effect {
         line: u32,
         /// Linked worktree the path is in, or `None` for vert's own.
         root: Option<PathBuf>,
+    },
+    /// Remove a worktree and/or a local branch, after confirmation.
+    Remove {
+        /// The linked worktree: its name and path.
+        worktree: Option<(String, PathBuf)>,
+        /// The local branch to delete.
+        branch: Option<String>,
     },
 }
 
@@ -655,6 +669,12 @@ impl App {
             Msg::Notice(text) => {
                 self.notice = Some(text);
                 Vec::new()
+            }
+            Msg::Removed { removed, error } => {
+                let effects = self.request_branches();
+                self.notice =
+                    Some(error.unwrap_or_else(|| format!("Removed {}", removed.join(" and "))));
+                effects
             }
         }
     }
@@ -860,6 +880,13 @@ impl App {
             self.help = false;
             return Vec::new();
         }
+        if self.branches.confirm.is_some() {
+            let confirmed = matches!(key.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter);
+            return self.answer_remove(confirmed);
+        }
+        if self.tab == Tab::Branches && self.branches.filter_editing {
+            return self.on_branch_filter_key(&key);
+        }
         self.notice = None;
         if !self.views.is_empty() {
             return self.on_view_key(&key);
@@ -872,6 +899,7 @@ impl App {
             KeyCode::Char('?') => self.help = true,
             KeyCode::Char('1') => self.tab = Tab::Feed,
             KeyCode::Char('2') => self.tab = Tab::Hotspots,
+            KeyCode::Char('/') if self.tab == Tab::Branches => self.branches.filter_editing = true,
             KeyCode::Char('3' | '/') => return self.enter_search(),
             KeyCode::Char('4') => return self.enter_branches(),
             KeyCode::Tab => return self.switch_tab(self.tab.next()),
