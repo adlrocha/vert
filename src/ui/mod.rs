@@ -75,7 +75,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         left.push(Span::styled(format!("  ⎇ {branch}"), theme::muted()));
     }
     let mut right = Vec::new();
-    if let Some(UpdateStatus::Available { .. }) = &app.update {
+    if let Some(UpdateStatus::Available) = &app.update {
         right.push(Span::styled("↑ update available  ", theme::muted()));
     }
     if !app.feed.fresh.is_empty() {
@@ -898,9 +898,7 @@ mod render_tests {
             0,
             false,
         );
-        app.update = Some(crate::app::UpdateStatus::Available {
-            latest: "a1b2c3d".to_owned(),
-        });
+        app.update = Some(crate::app::UpdateStatus::Available);
         assert!(screen(&mut app, 100, 12).contains("update available"));
         app.update = Some(crate::app::UpdateStatus::Current);
         assert!(!screen(&mut app, 100, 12).contains("update available"));

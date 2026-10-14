@@ -165,6 +165,8 @@ impl Config {
     #[must_use]
     pub fn update(&self) -> Option<crate::jobs::Update> {
         self.update_check().then(|| crate::jobs::Update {
+            // vert itself lives on public GitHub; `--github-api` describes the
+            // viewed repository's Enterprise host, not vert's home.
             endpoint: crate::github::Endpoint::new("https://api.github.com"),
             timeout: Duration::from_secs(self.github_timeout_secs),
             cache: cache_dir().join("vert/update-check"),

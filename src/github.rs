@@ -1,7 +1,8 @@
 //! Open pull requests on GitHub: finding the repository and a token, listing
-//! open pull requests, and fetching a pull request's diff.
+//! open pull requests, and fetching a pull request's diff; plus vert's own
+//! tokenless update check.
 //!
-//! Network access only happens through [`Client`], which needs a token.
+//! Network access only happens through [`Client`], with or without a token.
 
 use std::process::Command;
 use std::time::Duration;
@@ -431,7 +432,7 @@ impl Client {
             self.agent.post(self.endpoint.graphql()),
             Some(&body),
             JSON_MEDIA_TYPE,
-            &slug.to_string(),
+            slug,
         )?;
         let reply: GraphQl =
             serde_json::from_str(&text).map_err(|e| GhError::Decode(e.to_string()))?;
@@ -477,7 +478,7 @@ impl Client {
             self.agent.get(url).force_send_body(),
             None,
             DIFF_MEDIA_TYPE,
-            &slug.to_string(),
+            slug,
         )
     }
 
@@ -511,7 +512,7 @@ impl Client {
         req: ureq::RequestBuilder<ureq::typestate::WithBody>,
         body: Option<&serde_json::Value>,
         accept: &str,
-        name: &str,
+        name: impl std::fmt::Display,
     ) -> Result<String, GhError> {
         let req = match &self.token {
             Some(token) => req.header("Authorization", &format!("Bearer {}", token.expose())),
@@ -539,7 +540,7 @@ impl Client {
             200..=299 => Ok(text),
             401 => Err(GhError::Unauthorized),
             403 | 429 if exhausted || status == 429 => Err(GhError::RateLimited),
-            404 => Err(GhError::NotFound(name.to_owned())),
+            404 => Err(GhError::NotFound(name.to_string())),
             _ => Err(GhError::Status {
                 status,
                 message: serde_json::from_str::<Message>(&text)

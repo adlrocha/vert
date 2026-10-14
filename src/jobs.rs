@@ -172,16 +172,15 @@ pub fn begin(effect: &Effect, ctx: &Context) {
 
 /// Performs a background effect, returning the message with its outcome.
 ///
-/// Returns `None` for effects that are not background work (see [`is_background`]).
+/// Returns `None` for effects that are not background work (see
+/// [`is_background`]), or when the update check has nothing to say.
 #[must_use]
 pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
     let open = || git::open(&ctx.workdir);
-    // The update check may have nothing to say; every other effect answers.
-    if let Effect::CheckUpdate = effect {
-        return check_update(ctx);
-    }
     Some(match effect {
-        Effect::Quit | Effect::Edit { .. } | Effect::CheckUpdate => return None,
+        Effect::Quit | Effect::Edit { .. } => return None,
+        // The update check may have nothing to say; every other effect answers.
+        Effect::CheckUpdate => return check_update(ctx),
         Effect::LoadCommits => {
             // Loads are serialised by the app, so this lock is uncontended.
             let mut cache = ctx
@@ -353,9 +352,7 @@ fn update_status(update: &Update, now: i64) -> Option<UpdateStatus> {
 /// update.
 fn classify(built_sha: &str, built_time: i64, tip: &github::Tip) -> UpdateStatus {
     if tip.sha != built_sha && tip.time >= built_time {
-        UpdateStatus::Available {
-            latest: tip.sha.clone(),
-        }
+        UpdateStatus::Available
     } else {
         UpdateStatus::Current
     }
@@ -889,9 +886,7 @@ mod tests {
         };
         assert_eq!(
             classify("old", 100, &tip("new", 200)),
-            UpdateStatus::Available {
-                latest: "new".to_owned()
-            }
+            UpdateStatus::Available
         );
         assert_eq!(
             classify("same", 100, &tip("same", 200)),
@@ -905,9 +900,7 @@ mod tests {
         );
         assert_eq!(
             classify("equal", 200, &tip("other", 200)),
-            UpdateStatus::Available {
-                latest: "other".to_owned()
-            }
+            UpdateStatus::Available
         );
     }
 
@@ -953,7 +946,7 @@ mod tests {
         std::fs::write(dir.path().join("stale"), "0 whatever 0").expect("stale");
         assert!(matches!(
             run(Effect::CheckUpdate, &c),
-            Some(Msg::Update(UpdateStatus::Available { .. }))
+            Some(Msg::Update(UpdateStatus::Available))
         ));
         std::fs::write(
             dir.path().join("fresh"),
@@ -964,7 +957,7 @@ mod tests {
         assert!(
             matches!(
                 run(Effect::CheckUpdate, &c),
-                Some(Msg::Update(UpdateStatus::Available { .. }))
+                Some(Msg::Update(UpdateStatus::Available))
             ),
             "answered without a reachable server"
         );

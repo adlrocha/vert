@@ -91,23 +91,19 @@ fn info() -> RepoInfo {
 
 #[test]
 fn update_check_runs_once_at_start_when_enabled() {
+    let (_, effects) = App::new(info(), 1, 1000, 0, false);
+    assert!(!effects.contains(&Effect::CheckUpdate), "off");
+    // Built without git there is nothing to compare, so vert never asks.
+    if crate::BUILD_SHA.is_none() {
+        return;
+    }
     let (mut app, effects) = App::new(info(), 1, 1000, 0, true);
     assert!(effects.contains(&Effect::CheckUpdate));
     assert_eq!(app.update, None);
-    app.update(Msg::Update(UpdateStatus::Available {
-        latest: "a1b2c3d".to_owned(),
-    }));
-    assert_eq!(
-        app.update,
-        Some(UpdateStatus::Available {
-            latest: "a1b2c3d".to_owned()
-        })
-    );
+    app.update(Msg::Update(UpdateStatus::Available));
+    assert_eq!(app.update, Some(UpdateStatus::Available));
     app.update(Msg::Update(UpdateStatus::Current));
     assert_eq!(app.update, Some(UpdateStatus::Current));
-
-    let (_, effects) = App::new(info(), 1, 1000, 0, false);
-    assert!(!effects.contains(&Effect::CheckUpdate), "off");
 }
 
 /// An app with three commits loaded and no working-tree changes.

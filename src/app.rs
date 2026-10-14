@@ -509,11 +509,8 @@ pub enum Effect {
 pub enum UpdateStatus {
     /// This build is at or past `main`.
     Current,
-    /// `main` has commits past this build: its tip's commit id.
-    Available {
-        /// The short id to show, if ever needed.
-        latest: String,
-    },
+    /// `main` has commits past this build.
+    Available,
 }
 
 /// Whole-application state.
