@@ -1385,6 +1385,33 @@ mod tests {
     }
 
     #[test]
+    fn an_open_view_takes_keys_over_the_name_filter() {
+        let mut app = loaded();
+        press(&mut app, KeyCode::Char('/'));
+        assert!(app.branches.filter_editing);
+        // A diff arrives and opens on top of the tab mid-typing.
+        let entry = app
+            .branches
+            .rows()
+            .first()
+            .and_then(|r| r.changes().cloned())
+            .expect("changes");
+        app.update(Msg::Diff {
+            entry: Box::new(entry),
+            result: Ok(Vec::new()),
+            refresh: false,
+        });
+        assert!(!app.views.is_empty());
+        // esc leaves the view; the (invisible) filter does not swallow it.
+        press(&mut app, KeyCode::Esc);
+        assert!(app.views.is_empty());
+        assert!(app.branches.filter_editing, "still typing");
+        // Back on the tab, typing continues where it left off.
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.branches.name_filter, "a");
+    }
+
+    #[test]
     fn the_filter_matches_worktree_directory_names() {
         let mut app = app(true);
         press(&mut app, KeyCode::Char('4'));

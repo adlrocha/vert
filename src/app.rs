@@ -886,12 +886,12 @@ impl App {
             let confirmed = matches!(key.code, KeyCode::Char('y' | 'Y'));
             return self.answer_remove(confirmed);
         }
-        if self.tab == Tab::Branches && self.branches.filter_editing {
-            return self.on_branch_filter_key(&key);
-        }
         self.notice = None;
         if !self.views.is_empty() {
             return self.on_view_key(&key);
+        }
+        if self.tab == Tab::Branches && self.branches.filter_editing {
+            return self.on_branch_filter_key(&key);
         }
         if self.tab == Tab::Search {
             return self.on_search_key(&key);
