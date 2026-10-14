@@ -66,6 +66,9 @@ puts the binary in `~/.local/bin/vert`.
 
 **To update,** run the same command again. It fetches the latest `main`,
 rebuilds, and swaps the binary in place, or tells you it's already up to date.
+vert also checks once a day whether `main` has moved past the commit it was
+built from, and shows `↑ update available` in the header when it has.
+`--no-update-check` (or `--no-network`) turns that off.
 
 | Option / env var                  | Default            | Purpose                          |
 | --------------------------------- | ------------------ | -------------------------------- |
@@ -109,7 +112,10 @@ and looks for one in this order:
 If no token is found, the Branches tab says so and shows everything else.
 vert only reads from GitHub: it lists open pull requests with their check
 status, and fetches a pull request's diff when you open it. It never fetches
-or writes to your repository. `--no-network` turns GitHub access off.
+or writes to your repository. Besides your repository, vert sends one
+unauthenticated request a day to `api.github.com` for its own latest commit —
+no account, token or repository data involved — which is what powers the
+update notice. `--no-network` turns all GitHub access off.
 
 ### Options
 
@@ -132,6 +138,7 @@ or writes to your repository. `--no-network` turns GitHub access off.
 | `--github-api`           | `https://api.github.com` | API URL; for GitHub Enterprise `https://HOST/api/v3` |
 | `--github-timeout-secs`  | 15      | GitHub request timeout                          |
 | `--no-network`           | off     | Never contact GitHub                            |
+| `--no-update-check`      | off     | Never ask GitHub whether a newer vert exists    |
 
 ## Development
 

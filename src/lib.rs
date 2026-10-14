@@ -19,3 +19,9 @@ pub mod search;
 pub mod theme;
 pub mod ui;
 pub mod watch;
+
+/// The commit this build was made from, when git was available at build
+/// time; the update check compares it with `main`.
+pub const BUILD_SHA: Option<&str> = option_env!("VERT_SHA");
+/// That commit's time, as Unix seconds in text.
+pub const BUILD_TIME: Option<&str> = option_env!("VERT_TIME");
