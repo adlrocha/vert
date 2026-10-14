@@ -930,6 +930,7 @@ mod render_tests {
             name: name.to_owned(),
             path: std::path::PathBuf::from(name),
             current,
+            main: current && name == "main",
             dirty: dirty.then(|| changes("dirty", Size::Small)),
         };
         let (mut app, _) = App::new(

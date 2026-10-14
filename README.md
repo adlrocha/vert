@@ -41,8 +41,10 @@ work in parallel.
   or pull request diff. `f` filters by kind, `/` narrows rows by name, and
   `d` removes a line of work — a linked worktree together with its branch —
   after a confirmation that warns about unmerged commits and open pull
-  requests. Checkouts with uncommitted changes, the checkout vert runs in,
-  remote-tracking branches and pull requests are never removed. Diffs of
+  requests. vert never removes the checkout it runs in, the repository's
+  main checkout, remote-tracking branches or pull requests, and a checkout
+  with uncommitted changes is refused — re-checked at removal time, so files
+  that arrived while the confirmation was open are safe too. Diffs of
   linked worktrees stay live, and files open
   from the worktree they belong to.
 - **File viewer:** shows the full file, with lines added by the change you came

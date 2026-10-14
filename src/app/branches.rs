@@ -507,6 +507,9 @@ impl App {
                 Some(b) if b.worktree.as_ref().is_some_and(|w| w.current) => {
                     Ask::Refuse("This is the checkout vert is running in".to_owned())
                 }
+                Some(b) if b.worktree.as_ref().is_some_and(|w| w.main) => {
+                    Ask::Refuse("This is the repository's main checkout".to_owned())
+                }
                 Some(b) if b.remote => Ask::Refuse(
                     "Remote branches follow their remote; nothing to remove locally".to_owned(),
                 ),
@@ -618,6 +621,7 @@ mod tests {
             name: name.to_owned(),
             path: path.clone(),
             current,
+            main: false,
             dirty: dirty.then(|| {
                 let mut e = change(&format!("worktree:{name}"), 200, Target::WorkingTree);
                 e.root = (!current).then_some(path);
@@ -1073,8 +1077,9 @@ mod tests {
         assert!(matches!(&effects[..], [Effect::Edit { root: r, .. }] if *r == root));
     }
 
-    /// A Branches tab with a clean linked worktree, a detached one and a
-    /// remote branch: the shapes `d` can act on.
+    /// A Branches tab seen from a linked worktree, with a clean linked
+    /// worktree, a detached one, the main checkout and a remote branch: the
+    /// shapes `d` can act on.
     fn removal_app() -> App {
         let mut app = app(true);
         assert_eq!(
@@ -1088,9 +1093,22 @@ mod tests {
                 name: "probe".to_owned(),
                 path: PathBuf::from("/wt/probe"),
                 current: false,
+                main: false,
                 dirty: None,
             }),
             ..branch("unused", 7)
+        };
+        // vert runs in a linked worktree, so the main checkout is not current.
+        let main_row = Branch {
+            name: "proj".to_owned(),
+            worktree: Some(Worktree {
+                name: "proj".to_owned(),
+                path: PathBuf::from("/proj"),
+                current: false,
+                main: true,
+                dirty: None,
+            }),
+            ..checkout("main", false, false)
         };
         let remote = Branch {
             name: "origin/gone".to_owned(),
@@ -1100,8 +1118,9 @@ mod tests {
         app.update(Msg::Branches(Ok(Branches {
             base: Some("main".to_owned()),
             branches: vec![
-                checkout("main", true, false),
+                checkout("runner", true, false),
                 checkout("agent", false, false),
+                main_row,
                 detached,
                 remote,
             ],
@@ -1145,8 +1164,16 @@ mod tests {
                 pull: Some(7),
             })
         );
-        // Any other key cancels; y confirms and the outcome reloads.
-        press(&mut app, KeyCode::Char('x'));
+        // Any other key cancels — ⏎ included, since it opens elsewhere;
+        // y confirms and the outcome reloads.
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.branches.confirm, None);
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('x')),
+            Vec::<Effect>::new(),
+            "x cancels"
+        );
         assert_eq!(app.branches.confirm, None);
         press(&mut app, KeyCode::Char('d'));
         assert_eq!(
@@ -1171,10 +1198,20 @@ mod tests {
         let mut app = removal_app();
         assert_eq!(
             keys(&app),
-            ["b:main", "b:agent", "b:probe", "b:origin/gone"]
+            ["b:runner", "b:agent", "b:proj", "b:probe", "b:origin/gone"]
         );
-        // A clean linked worktree takes its branch with it.
+        // The main checkout is refused, even seen from a linked worktree.
         press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.branches.confirm, None);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("main checkout"))
+        );
+        press(&mut app, KeyCode::Char('k'));
+        // A clean linked worktree takes its branch with it.
         press(&mut app, KeyCode::Char('d'));
         assert_eq!(
             app.branches.confirm,
@@ -1187,6 +1224,7 @@ mod tests {
         );
         press(&mut app, KeyCode::Esc);
         // A detached checkout offers the worktree alone.
+        press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('d'));
         assert_eq!(

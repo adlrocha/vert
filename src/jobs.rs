@@ -231,7 +231,13 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
                 })
         })),
         Effect::Remove { worktree, branch } => {
-            let (removed, error) = remove(open(), worktree.as_ref(), branch.as_deref());
+            let (removed, error) = remove(
+                open(),
+                worktree.as_ref(),
+                branch.as_deref(),
+                &ctx.labeler,
+                age::now(),
+            );
             Msg::Removed { removed, error }
         }
         Effect::OpenFile {
@@ -253,18 +259,21 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
     })
 }
 
-/// Performs a confirmed removal: the worktree first, then the branch. Returns
+/// Performs a confirmed removal: the worktree first, then the branch. The
+/// worktree is refused when it turned dirty since the confirmation. Returns
 /// what went, named for the user, and the failure that stopped the rest,
 /// phrased to acknowledge what had already gone.
 fn remove(
     repo: Result<git2::Repository, git::GitError>,
     worktree: Option<&(String, PathBuf)>,
     branch: Option<&str>,
+    labeler: &Labeler,
+    now: i64,
 ) -> (Vec<String>, Option<String>) {
     let mut removed = Vec::new();
     let outcome = repo.and_then(|repo| {
         if let Some((name, path)) = worktree {
-            git::branches::remove_worktree(&repo, name, path)?;
+            git::branches::remove_worktree(&repo, path, labeler, now)?;
             removed.push(format!("worktree {name}"));
         }
         if let Some(branch) = branch {

@@ -881,7 +881,7 @@ impl App {
             return Vec::new();
         }
         if self.branches.confirm.is_some() {
-            let confirmed = matches!(key.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter);
+            let confirmed = matches!(key.code, KeyCode::Char('y' | 'Y'));
             return self.answer_remove(confirmed);
         }
         if self.tab == Tab::Branches && self.branches.filter_editing {
