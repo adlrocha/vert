@@ -312,10 +312,13 @@ pub(super) fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let question = match (&removal.worktree, &removal.branch) {
         (Some((worktree, _)), Some(branch)) => {
-            format!("Remove worktree {worktree} and delete branch {branch}?")
+            format!(
+                "Remove worktree {worktree} and delete branch {}?",
+                branch.name
+            )
         }
         (Some((worktree, _)), None) => format!("Remove worktree {worktree}?"),
-        (None, Some(branch)) => format!("Delete branch {branch}?"),
+        (None, Some(branch)) => format!("Delete branch {}?", branch.name),
         (None, None) => String::new(),
     };
     let mut lines = vec![Line::from(Span::styled(question, theme::bold()))];

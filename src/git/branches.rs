@@ -430,14 +430,30 @@ fn registered_name(repo: &Repository, path: &Path) -> Option<String> {
         })
 }
 
-/// Deletes the local branch `branch`.
+/// Deletes the local branch `branch`, but only if it still points where the
+/// removal was confirmed (`tip`): commits that landed since deserve a fresh
+/// confirmation.
 ///
 /// # Errors
-/// Returns [`GitError`] when the branch does not exist or is checked out.
-pub fn delete_branch(repo: &Repository, branch: &str) -> Result<(), GitError> {
-    repo.find_branch(branch, BranchType::Local)
-        .and_then(|mut b| b.delete())
-        .ctx("delete the branch")
+/// Returns [`GitError`] when the branch does not exist, is checked out, or
+/// moved after the confirmation.
+pub fn delete_branch(repo: &Repository, branch: &str, tip: Option<Oid>) -> Result<(), GitError> {
+    let mut found = repo
+        .find_branch(branch, BranchType::Local)
+        .ctx("find the branch")?;
+    if let Some(tip) = tip {
+        let current = found
+            .get()
+            .peel_to_commit()
+            .ctx("read the branch tip")?
+            .id();
+        if current != tip {
+            return Err(GitError::BranchMoved {
+                branch: branch.to_owned(),
+            });
+        }
+    }
+    found.delete().ctx("delete the branch")
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -840,9 +856,19 @@ mod tests {
             "and so is git's bookkeeping"
         );
         // With the worktree gone, nothing checks the branch out any more.
-        delete_branch(&t.repo, "agent").expect("delete");
+        let tip = t
+            .repo
+            .find_reference("refs/heads/agent")
+            .expect("ref")
+            .peel_to_commit()
+            .expect("tip")
+            .id();
+        delete_branch(&t.repo, "agent", Some(tip)).expect("delete");
         assert!(t.repo.find_branch("agent", BranchType::Local).is_err());
-        assert!(delete_branch(&t.repo, "agent").is_err(), "already gone");
+        assert!(
+            delete_branch(&t.repo, "agent", None).is_err(),
+            "already gone"
+        );
     }
 
     #[test]
@@ -887,8 +913,23 @@ mod tests {
             .shorthand()
             .expect("name")
             .to_owned();
-        let err = delete_branch(&t.repo, &current).expect_err("checked out");
+        let err = delete_branch(&t.repo, &current, None).expect_err("checked out");
         assert!(err.to_string().contains("delete the branch"), "{err}");
+
+        // A branch that gained commits since the confirmation is refused,
+        // whatever the confirmation's snapshot says.
+        let before = commit_on(&t, "moved", "m.txt", "m\n", 3_000);
+        let stale = t
+            .repo
+            .find_reference("refs/heads/main")
+            .expect("ref")
+            .peel_to_commit()
+            .expect("tip")
+            .id();
+        assert_ne!(stale, before);
+        let err = delete_branch(&t.repo, "moved", Some(stale)).expect_err("moved");
+        assert!(matches!(err, GitError::BranchMoved { .. }), "{err}");
+        assert!(t.repo.find_branch("moved", BranchType::Local).is_ok());
     }
 
     #[test]

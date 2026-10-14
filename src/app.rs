@@ -11,7 +11,9 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-pub use branches::{BranchesState, PullStatus, Refresh, Removal, Row, RowFilter, pull_entry};
+pub use branches::{
+    BranchRemoval, BranchesState, PullStatus, Refresh, Removal, Row, RowFilter, pull_entry,
+};
 
 use crate::git::RepoInfo;
 use crate::git::branches::Branches;
@@ -493,8 +495,8 @@ pub enum Effect {
     Remove {
         /// The linked worktree: its name and path.
         worktree: Option<(String, PathBuf)>,
-        /// The local branch to delete.
-        branch: Option<String>,
+        /// The local branch to delete, with the tip it must still point at.
+        branch: Option<BranchRemoval>,
     },
 }
 

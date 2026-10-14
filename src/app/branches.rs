@@ -11,6 +11,7 @@ use crate::git::branches::{Branch, Branches};
 use crate::git::feed::Entry;
 use crate::github::{ORIGIN, PullRequest, PullsError};
 use crate::search::fuzzy_match;
+use git2::Oid;
 
 /// How often the Branches tab reloads while on screen, in seconds.
 /// `None` turns that reload off; for pull requests it also means GitHub is
@@ -106,7 +107,8 @@ impl Row<'_> {
         }
     }
 
-    /// The name this row goes by: a branch, checkout or pull request head.
+    /// The name this row goes by: a branch or pull request head. A checkout's
+    /// directory name is matched separately, in [`named_like`].
     #[must_use]
     pub fn name(&self) -> &str {
         match (self.branch, self.pull) {
@@ -137,13 +139,22 @@ impl Row<'_> {
     }
 }
 
+/// A branch a confirmed removal deletes, snapshotted when it was confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRemoval {
+    /// The branch's name.
+    pub name: String,
+    /// Its tip when confirmed; the deletion aborts if it moved.
+    pub tip: Option<Oid>,
+}
+
 /// A removal waiting for the `d` key's confirmation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Removal {
     /// The linked worktree to remove: its name and path.
     pub worktree: Option<(String, PathBuf)>,
     /// The local branch to delete afterwards.
-    pub branch: Option<String>,
+    pub branch: Option<BranchRemoval>,
     /// Commits the branch has that the base branch lacks, when compared.
     pub unmerged: Option<usize>,
     /// The open pull request on the branch, if any.
@@ -179,6 +190,24 @@ pub struct BranchesState {
     last_load: Option<i64>,
     /// When pull requests were last requested (Unix seconds).
     last_pulls: Option<i64>,
+}
+
+/// Whether a row's branch, checkout directory or pull request name fuzzily
+/// contains `query`.
+fn named_like(row: &Row<'_>, query: &str) -> bool {
+    fuzzy_match(row.name(), query)
+        || row
+            .branch
+            .and_then(|b| b.worktree.as_ref())
+            .is_some_and(|w| fuzzy_match(&w.name, query))
+}
+
+/// The tip commit a branch's changes were measured at, when there were any.
+fn tip_of(entry: Option<&Entry>) -> Option<Oid> {
+    match entry?.target {
+        Target::Range { head, .. } | Target::Commit(head) => Some(head),
+        Target::WorkingTree | Target::PullRequest(_) => None,
+    }
 }
 
 impl BranchesState {
@@ -229,7 +258,7 @@ impl BranchesState {
             .into_iter()
             .chain(rest)
             .filter(|r| self.filter.keeps(r))
-            .filter(|r| fuzzy_match(r.name(), &self.name_filter))
+            .filter(|r| named_like(r, &self.name_filter))
             .collect()
     }
 
@@ -524,7 +553,10 @@ impl App {
                         .worktree
                         .as_ref()
                         .map(|w| (w.name.clone(), w.path.clone())),
-                    branch: b.branch.clone(),
+                    branch: b.branch.clone().map(|name| BranchRemoval {
+                        name,
+                        tip: tip_of(b.changes.as_ref()),
+                    }),
                     unmerged: b.ahead_behind.map(|(ahead, _)| ahead),
                     pull: row.pull.map(|p| p.number),
                 }),
@@ -556,7 +588,6 @@ impl App {
         self.notice = Some(why.to_owned());
         Vec::new()
     }
-
     fn notice_none(&mut self, text: &str) -> Option<Entry> {
         self.notice = Some(text.to_owned());
         None
@@ -1159,7 +1190,10 @@ mod tests {
             app.branches.confirm,
             Some(Removal {
                 worktree: None,
-                branch: Some("feat".to_owned()),
+                branch: Some(BranchRemoval {
+                    name: "feat".to_owned(),
+                    tip: Some(Oid::ZERO_SHA1),
+                }),
                 unmerged: Some(1),
                 pull: Some(7),
             })
@@ -1180,7 +1214,10 @@ mod tests {
             press(&mut app, KeyCode::Char('y')),
             vec![Effect::Remove {
                 worktree: None,
-                branch: Some("feat".to_owned())
+                branch: Some(BranchRemoval {
+                    name: "feat".to_owned(),
+                    tip: Some(Oid::ZERO_SHA1),
+                })
             }]
         );
         assert_eq!(
@@ -1217,7 +1254,10 @@ mod tests {
             app.branches.confirm,
             Some(Removal {
                 worktree: Some(("agent".to_owned(), PathBuf::from("/wt/agent"))),
-                branch: Some("agent".to_owned()),
+                branch: Some(BranchRemoval {
+                    name: "agent".to_owned(),
+                    tip: Some(Oid::ZERO_SHA1),
+                }),
                 unmerged: Some(1),
                 pull: None,
             })
@@ -1342,5 +1382,34 @@ mod tests {
             press(&mut app, KeyCode::Char(c));
         }
         assert_eq!(keys(&app), ["b:agent"]);
+    }
+
+    #[test]
+    fn the_filter_matches_worktree_directory_names() {
+        let mut app = app(true);
+        press(&mut app, KeyCode::Char('4'));
+        // The checkout's directory is named after the branch here.
+        let mut b = checkout("feat", false, false);
+        let mut wt = b.worktree.clone().expect("worktree");
+        wt.name = "agent-wt".to_owned();
+        wt.path = PathBuf::from("/wts/agent-wt");
+        b.worktree = Some(wt);
+        app.update(Msg::Branches(Ok(Branches {
+            base: Some("main".to_owned()),
+            branches: vec![checkout("main", true, false), b],
+        })));
+        press(&mut app, KeyCode::Char('/'));
+        for c in "agent".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(
+            keys(&app),
+            ["b:feat"],
+            "the directory name narrows to its row"
+        );
+        for c in "feat".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(keys(&app).is_empty(), "neither name matches");
     }
 }

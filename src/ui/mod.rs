@@ -1028,7 +1028,10 @@ mod render_tests {
         // A worktree with a branch warns about both, and about its PR.
         app.branches.confirm = Some(crate::app::Removal {
             worktree: Some(("agent-wt".to_owned(), "/x/agent-wt".into())),
-            branch: Some("agent/auth".to_owned()),
+            branch: Some(crate::app::BranchRemoval {
+                name: "agent/auth".to_owned(),
+                tip: None,
+            }),
             unmerged: Some(3),
             pull: Some(42),
         });

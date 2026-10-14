@@ -234,7 +234,7 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
             let (removed, error) = remove(
                 open(),
                 worktree.as_ref(),
-                branch.as_deref(),
+                branch.as_ref(),
                 &ctx.labeler,
                 age::now(),
             );
@@ -259,14 +259,15 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
     })
 }
 
-/// Performs a confirmed removal: the worktree first, then the branch. The
-/// worktree is refused when it turned dirty since the confirmation. Returns
-/// what went, named for the user, and the failure that stopped the rest,
-/// phrased to acknowledge what had already gone.
+/// Performs a confirmed removal: the worktree first, then the branch. A
+/// checkout that turned dirty, or a branch that gained commits, is refused —
+/// what changed deserves a fresh confirmation. Returns what went, named for
+/// the user, and the failure that stopped the rest, phrased to acknowledge
+/// what had already gone.
 fn remove(
     repo: Result<git2::Repository, git::GitError>,
     worktree: Option<&(String, PathBuf)>,
-    branch: Option<&str>,
+    branch: Option<&crate::app::BranchRemoval>,
     labeler: &Labeler,
     now: i64,
 ) -> (Vec<String>, Option<String>) {
@@ -277,8 +278,8 @@ fn remove(
             removed.push(format!("worktree {name}"));
         }
         if let Some(branch) = branch {
-            git::branches::delete_branch(&repo, branch)?;
-            removed.push(format!("branch {branch}"));
+            git::branches::delete_branch(&repo, &branch.name, branch.tip)?;
+            removed.push(format!("branch {}", branch.name));
         }
         Ok(())
     });
@@ -357,6 +358,14 @@ mod tests {
         });
         *c.token.lock().expect("lock") = token.map(github::Token::new);
         c
+    }
+
+    /// A branch removal to ask for, optionally pinned to a tip.
+    fn branch(name: &str, tip: Option<git2::Oid>) -> crate::app::BranchRemoval {
+        crate::app::BranchRemoval {
+            name: name.to_owned(),
+            tip,
+        }
     }
 
     fn repo() -> TestRepo {
@@ -689,7 +698,7 @@ mod tests {
         }) = run(
             Effect::Remove {
                 worktree: Some(("agent".to_owned(), path.clone())),
-                branch: Some("agent".to_owned()),
+                branch: Some(branch("agent", None)),
             },
             &c,
         )
@@ -712,7 +721,7 @@ mod tests {
         }) = run(
             Effect::Remove {
                 worktree: None,
-                branch: Some("missing".to_owned()),
+                branch: Some(branch("missing", None)),
             },
             &c,
         )
@@ -720,7 +729,7 @@ mod tests {
             panic!("error")
         };
         assert!(removed.is_empty(), "{removed:?}");
-        assert!(e.contains("failed to delete the branch"), "{e}");
+        assert!(e.contains("failed to find the branch"), "{e}");
 
         // A partial removal names what already went.
         let second = dir.path().join("second");
@@ -731,7 +740,7 @@ mod tests {
         }) = run(
             Effect::Remove {
                 worktree: Some(("second".to_owned(), second.clone())),
-                branch: Some("missing".to_owned()),
+                branch: Some(branch("missing", None)),
             },
             &c,
         )
@@ -741,6 +750,48 @@ mod tests {
         assert_eq!(removed, ["worktree second"]);
         assert!(e.starts_with("removed worktree second, but "), "{e}");
         assert!(!second.exists());
+
+        // A branch that gained commits since the confirmation is refused.
+        commit_on_head(&t, "moved");
+        let tip = t
+            .repo
+            .find_reference("refs/heads/moved")
+            .expect("ref")
+            .peel_to_commit()
+            .expect("tip")
+            .id();
+        commit_on_head(&t, "moved");
+        let Some(Msg::Removed { error: Some(e), .. }) = run(
+            Effect::Remove {
+                worktree: None,
+                branch: Some(branch("moved", Some(tip))),
+            },
+            &c,
+        ) else {
+            panic!("moved")
+        };
+        assert!(e.contains("moved since the confirmation"), "{e}");
+        assert!(t.repo.find_branch("moved", git2::BranchType::Local).is_ok());
+    }
+
+    /// Commits on `branch`, creating it from HEAD if needed.
+    fn commit_on_head(t: &TestRepo, branch: &str) {
+        let reference = format!("refs/heads/{branch}");
+        let parent = t
+            .repo
+            .find_reference(&reference)
+            .and_then(|r| r.peel_to_commit())
+            .or_else(|_| t.repo.head().and_then(|h| h.peel_to_commit()))
+            .expect("tip");
+        let sig = t
+            .repo
+            .signature()
+            .or_else(|_| git2::Signature::now("a", "a@x"))
+            .expect("sig");
+        let tree = parent.tree().expect("tree");
+        t.repo
+            .commit(Some(&reference), &sig, &sig, "c", &tree, &[&parent])
+            .expect("commit");
     }
 
     #[test]
