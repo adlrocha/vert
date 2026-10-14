@@ -38,7 +38,14 @@ work in parallel.
   its CI checks (✓ passing, ✗ failing, ● running). Pull requests without a local branch get their own rows. `⏎` opens the most
   relevant diff: uncommitted work first, then the branch against the point
   where it left the base, then the pull request. `b` and `p` pick the branch
-  or pull request diff. Diffs of linked worktrees stay live, and files open
+  or pull request diff. `f` filters by kind, `/` narrows rows by name, and
+  `d` removes a line of work — a linked worktree together with its branch —
+  after a confirmation that warns about unmerged commits and open pull
+  requests. vert never removes the checkout it runs in, the repository's
+  main checkout, remote-tracking branches or pull requests, and a checkout
+  with uncommitted changes is refused — re-checked at removal time, so files
+  that arrived while the confirmation was open are safe too. Diffs of
+  linked worktrees stay live, and files open
   from the worktree they belong to.
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter. `e` opens `$VISUAL`/`$EDITOR` at that line
@@ -88,7 +95,7 @@ Press `?` inside vert for all keys. The essentials:
 | Hotspots  | `w` time window · `m` files/modules · `⏎` filter feed · `o`/`e` view/edit |
 | Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
-| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter · `r` refresh      |
+| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names · `d` remove · `r` refresh |
 
 ### Pull requests
 
@@ -118,7 +125,7 @@ or writes to your repository. `--no-network` turns GitHub access off.
 | `--max-file-kb`          | 4096    | Largest file the viewer opens                   |
 | `--no-watch`             | off     | Disable live updates                            |
 | `--base`                 | auto    | Branch to compare against (`origin/HEAD`, else `main`/`master`) |
-| `--max-branches`         | 100     | Branches without a worktree to show, newest first |
+| `--max-branches`         | 30      | Branches without a worktree to show, newest first |
 | `--branch-refresh-secs`  | 5       | Branches tab rescan interval                    |
 | `--pr-refresh-secs`      | 60      | Pull request refresh interval                   |
 | `--max-prs`              | 50      | Open pull requests to list (at most 100)        |

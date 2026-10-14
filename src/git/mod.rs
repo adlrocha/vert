@@ -1,4 +1,5 @@
-//! Reading changes out of a git repository.
+//! Reading changes out of a git repository, and removing the lines of work
+//! that are done: worktrees and branches.
 
 pub mod branches;
 pub mod diff;
@@ -24,6 +25,21 @@ pub enum GitError {
     /// Bare repositories have no working tree to explore.
     #[error("bare repositories are not supported (no working tree)")]
     Bare,
+    /// Nothing is registered as a linked worktree at the path.
+    #[error("no worktree at {path}")]
+    WorktreeMissing {
+        /// Path that was searched.
+        path: PathBuf,
+    },
+    /// The worktree holds changes a removal would lose.
+    #[error("the worktree has uncommitted changes; commit or discard them first")]
+    DirtyWorktree,
+    /// The branch gained commits after its removal was confirmed.
+    #[error("branch {branch} moved since the confirmation")]
+    BranchMoved {
+        /// Branch that changed.
+        branch: String,
+    },
     /// The change is not stored locally (a pull request diff comes from GitHub).
     #[error("this change has no local diff")]
     NotLocal,

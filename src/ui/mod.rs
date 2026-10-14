@@ -52,6 +52,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     };
     draw_footer(frame, footer, hints, app.notice.as_deref());
+    if app.branches.confirm.is_some() {
+        branches::draw_confirm(frame, frame.area(), app);
+    }
     if app.help {
         draw_help(frame);
     }
@@ -185,7 +188,9 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("⏎", "uncommitted, else branch, else PR"),
             ("b", "branch vs base"),
             ("p", "pull request diff"),
+            ("d", "remove worktree/branch"),
             ("f", "filter rows"),
+            ("/", "narrow by name"),
         ],
     ),
     (
@@ -925,6 +930,7 @@ mod render_tests {
             name: name.to_owned(),
             path: std::path::PathBuf::from(name),
             current,
+            main: current && name == "main",
             dirty: dirty.then(|| changes("dirty", Size::Small)),
         };
         let (mut app, _) = App::new(
@@ -968,6 +974,77 @@ mod render_tests {
             ],
         ))));
         app
+    }
+
+    #[test]
+    fn branch_name_filter_and_removal_dialog_render() {
+        let mut app = branches_app();
+        // / narrows by name, with a cursor while editing.
+        press(&mut app, KeyCode::Char('/'));
+        let s = screen(&mut app, 120, 20);
+        assert!(s.contains("· _"), "cursor: {s}");
+        for c in "agent".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let s = screen(&mut app, 120, 20);
+        assert!(s.contains("Branches 1"), "{s}");
+        assert!(s.contains("agent/auth"), "{s}");
+        // No matches say so.
+        for c in "zzz".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(screen(&mut app, 120, 20).contains("No rows match"));
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+
+        // d asks before removing anything; risky rows are refused.
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.branches.confirm.is_none(), "current checkout");
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("running in"))
+        );
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.branches.confirm.is_none(), "dirty worktree");
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.branches.confirm.is_none(), "remote branch");
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.branches.confirm.is_none(), "PR-only row");
+        // A plain branch asks.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.branches.confirm.is_some());
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+        let s = screen(&mut app, 100, 20);
+        assert!(s.contains("Delete branch detached?"), "{s}");
+        assert!(s.contains("y remove"), "{s}");
+
+        // A worktree with a branch warns about both, and about its PR.
+        app.branches.confirm = Some(crate::app::Removal {
+            worktree: Some(("agent-wt".to_owned(), "/x/agent-wt".into())),
+            branch: Some(crate::app::BranchRemoval {
+                name: "agent/auth".to_owned(),
+                tip: None,
+            }),
+            unmerged: Some(3),
+            pull: Some(42),
+        });
+        let s = screen(&mut app, 100, 20);
+        assert!(
+            s.contains("Remove worktree agent-wt and delete branch agent/auth?"),
+            "{s}"
+        );
+        assert!(s.contains("⚠ 3 commits not on origin/main"), "{s}");
+        assert!(s.contains("#42"), "{s}");
+        // y confirms; anything else cancels.
+        press(&mut app, KeyCode::Char('y'));
+        assert!(app.branches.confirm.is_none());
     }
 
     #[test]

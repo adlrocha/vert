@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use git2::{BranchType, Oid, Repository};
+use git2::{BranchType, Oid, Repository, WorktreePruneOptions};
 
 use super::feed::{Entry, WORKTREE_ID, file_stats, load_worktree, lossy};
 use super::{Context, FileStat, GitError, Target, short_id};
@@ -22,6 +22,9 @@ pub struct Worktree {
     pub path: PathBuf,
     /// Whether this is the checkout vert is running in.
     pub current: bool,
+    /// Whether this is the repository's main checkout, which holds git's
+    /// database and can never be removed.
+    pub main: bool,
     /// Uncommitted changes, or `None` when clean.
     pub dirty: Option<Entry>,
 }
@@ -205,9 +208,10 @@ fn list_worktrees(
 ) -> Result<Vec<(Worktree, Option<Head>)>, GitError> {
     let current = canonical(&super::workdir(repo)?);
     let main = Repository::open(repo.commondir()).ctx("open the main checkout")?;
-    let mut checkouts: Vec<Repository> = Vec::new();
+    // (repository, whether it is the main checkout)
+    let mut checkouts: Vec<(Repository, bool)> = Vec::new();
     if main.workdir().is_some() {
-        checkouts.push(main);
+        checkouts.push((main, true));
     }
     let names = repo.worktrees().ctx("list worktrees")?;
     for name in names.iter().filter_map(|n| n.ok().flatten()) {
@@ -218,12 +222,12 @@ fn list_worktrees(
         if wt.validate().is_ok()
             && let Ok(r) = Repository::open_from_worktree(&wt)
         {
-            checkouts.push(r);
+            checkouts.push((r, false));
         }
     }
     let mut out = checkouts
         .iter()
-        .map(|r| {
+        .map(|(r, is_main)| {
             let path = canonical(&super::workdir(r)?);
             let is_current = path == current;
             let name = path.file_name().map_or_else(
@@ -247,6 +251,7 @@ fn list_worktrees(
                 name,
                 path,
                 current: is_current,
+                main: *is_main,
                 dirty,
             };
             Ok((wt, head))
@@ -377,6 +382,78 @@ fn changes(
     entry.time = commit.time().seconds();
     entry.root = root.map(Path::to_path_buf);
     Ok((entry, ahead_behind))
+}
+
+/// Removes the linked worktree at `path`: both its directory and git's
+/// bookkeeping for it. The path must name a registered linked worktree, and
+/// the checkout must be clean by the time it is read — a removal deletes
+/// everything in the directory. A locked worktree is left alone.
+///
+/// # Errors
+/// Returns [`GitError::WorktreeMissing`] when nothing is registered at
+/// `path`, [`GitError::DirtyWorktree`] when the checkout is not clean, or
+/// [`GitError::Op`] when the worktree cannot be opened or removed.
+pub fn remove_worktree(
+    repo: &Repository,
+    path: &Path,
+    labeler: &Labeler,
+    now: i64,
+) -> Result<(), GitError> {
+    let registered = registered_name(repo, path).ok_or(GitError::WorktreeMissing {
+        path: path.to_path_buf(),
+    })?;
+    let worktree = repo.find_worktree(&registered).ctx("find the worktree")?;
+    // Decided on the last scan, re-read here: files may have changed while
+    // the confirmation was open, and a removal deletes them for good.
+    let checkout = Repository::open(path).ctx("open the worktree")?;
+    if load_worktree(&checkout, labeler, now)?.is_some() {
+        return Err(GitError::DirtyWorktree);
+    }
+    let mut opts = WorktreePruneOptions::new();
+    opts.valid(true).working_tree(true);
+    worktree.prune(Some(&mut opts)).ctx("remove the worktree")
+}
+
+/// The name git registered the linked worktree at `path` under, matched by
+/// path so a shared directory name can never name another checkout.
+fn registered_name(repo: &Repository, path: &Path) -> Option<String> {
+    let wanted = canonical(path);
+    let names = repo.worktrees().ok()?;
+    names
+        .iter()
+        .filter_map(|n| n.ok().flatten())
+        .find_map(|name| {
+            repo.find_worktree(name)
+                .ok()
+                .filter(|wt| canonical(wt.path()) == wanted)
+                .map(|_| name.to_owned())
+        })
+}
+
+/// Deletes the local branch `branch`, but only if it still points where the
+/// removal was confirmed (`tip`): commits that landed since deserve a fresh
+/// confirmation.
+///
+/// # Errors
+/// Returns [`GitError`] when the branch does not exist, is checked out, or
+/// moved after the confirmation.
+pub fn delete_branch(repo: &Repository, branch: &str, tip: Option<Oid>) -> Result<(), GitError> {
+    let mut found = repo
+        .find_branch(branch, BranchType::Local)
+        .ctx("find the branch")?;
+    if let Some(tip) = tip {
+        let current = found
+            .get()
+            .peel_to_commit()
+            .ctx("read the branch tip")?
+            .id();
+        if current != tip {
+            return Err(GitError::BranchMoved {
+                branch: branch.to_owned(),
+            });
+        }
+    }
+    found.delete().ctx("delete the branch")
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -723,12 +800,14 @@ mod tests {
             .as_ref()
             .and_then(|w| w.dirty.as_ref());
         let main_dirty = main_dirty.expect("main is dirty");
+        assert!(b.branches[0].worktree.as_ref().expect("wt").main);
         assert_eq!(main_dirty.id, WORKTREE_ID);
         assert_eq!(main_dirty.root, None);
 
         let agent = find(&b, "agent");
         let wt = agent.worktree.as_ref().expect("worktree");
         assert!(!wt.current);
+        assert!(!wt.main, "a linked worktree is not the main checkout");
         assert_eq!(wt.name, "agent-wt");
         let dirty = wt.dirty.as_ref().expect("dirty");
         assert_eq!(dirty.summary, "Uncommitted changes in agent-wt");
@@ -741,13 +820,116 @@ mod tests {
         );
         assert!(agent.time() >= 2_000);
 
-        // Opened from inside the linked worktree, that checkout is current.
+        // Opened from inside the linked worktree, that checkout is current
+        // and the main one is still flagged as the main one.
         let inside = Repository::open(&path).expect("open");
         let b = load(&inside, opts(&l, None), &mut RangeCache::new()).expect("load");
         assert_eq!(b.branches[0].name, "agent");
         let wt = b.branches[0].worktree.as_ref().expect("wt");
         assert!(wt.current);
+        assert!(!wt.main);
         assert_eq!(wt.dirty.as_ref().map(|d| d.id.as_str()), Some(WORKTREE_ID));
+        assert!(
+            b.branches[1].worktree.as_ref().is_some_and(|w| w.main),
+            "the main checkout keeps its flag from any vantage point"
+        );
+    }
+
+    #[test]
+    fn removes_worktrees_and_their_branches() {
+        let t = base_repo();
+        commit_on(&t, "agent", "x.txt", "x\n", 2_000);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent-wt");
+        let reference = t.repo.find_reference("refs/heads/agent").expect("ref");
+        let mut add = git2::WorktreeAddOptions::new();
+        add.reference(Some(&reference));
+        t.repo
+            .worktree("agent-wt", &path, Some(&add))
+            .expect("worktree");
+        let l = labeler();
+
+        remove_worktree(&t.repo, &path, &l, 50_000).expect("remove");
+        assert!(!path.exists(), "the directory is gone");
+        assert!(
+            t.repo.worktrees().expect("worktrees").is_empty(),
+            "and so is git's bookkeeping"
+        );
+        // With the worktree gone, nothing checks the branch out any more.
+        let tip = t
+            .repo
+            .find_reference("refs/heads/agent")
+            .expect("ref")
+            .peel_to_commit()
+            .expect("tip")
+            .id();
+        delete_branch(&t.repo, "agent", Some(tip)).expect("delete");
+        assert!(t.repo.find_branch("agent", BranchType::Local).is_err());
+        assert!(
+            delete_branch(&t.repo, "agent", None).is_err(),
+            "already gone"
+        );
+    }
+
+    #[test]
+    fn worktree_removal_refuses_risky_checkouts() {
+        let t = base_repo();
+        let l = labeler();
+        // The main checkout is not a registered worktree and never matches.
+        let err = remove_worktree(&t.repo, t.path(), &l, 50_000).expect_err("main");
+        assert!(matches!(err, GitError::WorktreeMissing { .. }), "{err}");
+        assert!(t.path().exists());
+
+        // A worktree that grew files since the scan is refused, not deleted.
+        commit_on(&t, "agent", "x.txt", "x\n", 2_000);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent-wt");
+        let reference = t.repo.find_reference("refs/heads/agent").expect("ref");
+        let mut add = git2::WorktreeAddOptions::new();
+        add.reference(Some(&reference));
+        t.repo
+            .worktree("agent-wt", &path, Some(&add))
+            .expect("worktree");
+        std::fs::write(path.join("leftover.txt"), "x\n").expect("write");
+        let err = remove_worktree(&t.repo, &path, &l, 50_000).expect_err("dirty");
+        assert!(matches!(err, GitError::DirtyWorktree), "{err}");
+        assert!(path.exists(), "nothing was deleted");
+
+        // A locked worktree is left alone.
+        std::fs::remove_file(path.join("leftover.txt")).expect("clean");
+        t.repo
+            .find_worktree("agent-wt")
+            .expect("worktree")
+            .lock(Some("busy"))
+            .expect("lock");
+        assert!(remove_worktree(&t.repo, &path, &l, 50_000).is_err());
+        assert!(path.exists(), "a locked worktree is left alone");
+
+        // A branch checked out in the main checkout is refused.
+        let current = t
+            .repo
+            .head()
+            .expect("head")
+            .shorthand()
+            .expect("name")
+            .to_owned();
+        let err = delete_branch(&t.repo, &current, None).expect_err("checked out");
+        assert!(err.to_string().contains("delete the branch"), "{err}");
+
+        // A branch that gained commits since the confirmation is refused,
+        // whatever the confirmation's snapshot says.
+        let before = commit_on(&t, "moved", "m.txt", "m\n", 3_000);
+        let stale = t
+            .repo
+            .find_reference("refs/heads/main")
+            .expect("ref")
+            .peel_to_commit()
+            .expect("tip")
+            .id();
+        assert_ne!(stale, before);
+        let err = delete_branch(&t.repo, "moved", Some(stale)).expect_err("moved");
+        assert!(matches!(err, GitError::BranchMoved { .. }), "{err}");
+        assert!(t.repo.find_branch("moved", BranchType::Local).is_ok());
     }
 
     #[test]

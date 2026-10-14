@@ -1,13 +1,17 @@
 //! The Branches tab: worktrees, branches and open pull requests merged into
 //! one list of rows, one per line of work.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use std::path::PathBuf;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Effect, ListPos, Loader, Tab, View};
 use crate::git::Target;
 use crate::git::branches::{Branch, Branches};
 use crate::git::feed::Entry;
 use crate::github::{ORIGIN, PullRequest, PullsError};
+use crate::search::fuzzy_match;
+use git2::Oid;
 
 /// How often the Branches tab reloads while on screen, in seconds.
 /// `None` turns that reload off; for pull requests it also means GitHub is
@@ -103,6 +107,17 @@ impl Row<'_> {
         }
     }
 
+    /// The name this row goes by: a branch or pull request head. A checkout's
+    /// directory name is matched separately, in [`named_like`].
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match (self.branch, self.pull) {
+            (Some(b), _) => &b.name,
+            (None, Some(p)) => &p.head,
+            (None, None) => "",
+        }
+    }
+
     /// Latest activity: on the branch, its checkout, or its pull request.
     #[must_use]
     pub fn time(&self) -> i64 {
@@ -124,6 +139,28 @@ impl Row<'_> {
     }
 }
 
+/// A branch a confirmed removal deletes, snapshotted when it was confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRemoval {
+    /// The branch's name.
+    pub name: String,
+    /// Its tip when confirmed; the deletion aborts if it moved.
+    pub tip: Option<Oid>,
+}
+
+/// A removal waiting for the `d` key's confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removal {
+    /// The linked worktree to remove: its name and path.
+    pub worktree: Option<(String, PathBuf)>,
+    /// The local branch to delete afterwards.
+    pub branch: Option<BranchRemoval>,
+    /// Commits the branch has that the base branch lacks, when compared.
+    pub unmerged: Option<usize>,
+    /// The open pull request on the branch, if any.
+    pub pull: Option<u64>,
+}
+
 /// Branches tab state.
 #[derive(Debug, Default)]
 pub struct BranchesState {
@@ -135,6 +172,12 @@ pub struct BranchesState {
     pub pull_status: PullStatus,
     /// Which rows are shown.
     pub filter: RowFilter,
+    /// Narrows rows to those whose name fuzzily contains this.
+    pub name_filter: String,
+    /// Whether `name_filter` is being typed into.
+    pub filter_editing: bool,
+    /// A removal waiting for the user's yes.
+    pub confirm: Option<Removal>,
     /// Selection.
     pub pos: ListPos,
     /// Whether branches loaded at least once.
@@ -147,6 +190,24 @@ pub struct BranchesState {
     last_load: Option<i64>,
     /// When pull requests were last requested (Unix seconds).
     last_pulls: Option<i64>,
+}
+
+/// Whether a row's branch, checkout directory or pull request name fuzzily
+/// contains `query`.
+fn named_like(row: &Row<'_>, query: &str) -> bool {
+    fuzzy_match(row.name(), query)
+        || row
+            .branch
+            .and_then(|b| b.worktree.as_ref())
+            .is_some_and(|w| fuzzy_match(&w.name, query))
+}
+
+/// The tip commit a branch's changes were measured at, when there were any.
+fn tip_of(entry: Option<&Entry>) -> Option<Oid> {
+    match entry?.target {
+        Target::Range { head, .. } | Target::Commit(head) => Some(head),
+        Target::WorkingTree | Target::PullRequest(_) => None,
+    }
 }
 
 impl BranchesState {
@@ -197,6 +258,7 @@ impl BranchesState {
             .into_iter()
             .chain(rest)
             .filter(|r| self.filter.keeps(r))
+            .filter(|r| named_like(r, &self.name_filter))
             .collect()
     }
 
@@ -375,6 +437,20 @@ impl App {
             self.branches.pos = ListPos::default();
             return Vec::new();
         }
+        if key.code == KeyCode::Char('d') {
+            return self.ask_remove();
+        }
+        if key.code == KeyCode::Esc && !self.branches.name_filter.is_empty() {
+            self.branches.name_filter.clear();
+            self.branches.pos = ListPos::default();
+            return Vec::new();
+        }
+        self.open_selected(key.code)
+    }
+
+    /// Opens a diff of the selected row: `code` picks which, mirroring the
+    /// keys that reach this.
+    fn open_selected(&mut self, code: KeyCode) -> Vec<Effect> {
         let Some((dirty, changes, pull)) = self
             .branches
             .rows()
@@ -389,7 +465,7 @@ impl App {
         else {
             return Vec::new();
         };
-        let entry = match key.code {
+        let entry = match code {
             KeyCode::Enter | KeyCode::Char('l') => dirty.or(changes).or(pull),
             KeyCode::Char('b') => {
                 changes.or_else(|| self.notice_none("No branch here; p opens the pull request"))
@@ -409,6 +485,109 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Keys while the name filter is being typed: characters edit the query,
+    /// navigation and `⏎` still act, `esc` stops typing.
+    pub(super) fn on_branch_filter_key(&mut self, key: &KeyEvent) -> Vec<Effect> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let len = self.branches.rows().len();
+        let nav = matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+        ) || (ctrl && matches!(key.code, KeyCode::Char('n' | 'p' | 'j' | 'k' | 'd')));
+        if nav && self.branches.pos.navigate(key, len) {
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.branches.filter_editing = false;
+                return Vec::new();
+            }
+            KeyCode::Enter => {
+                self.branches.filter_editing = false;
+                return self.open_selected(KeyCode::Enter);
+            }
+            KeyCode::Backspace => {
+                self.branches.name_filter.pop();
+            }
+            KeyCode::Char('u') if ctrl => self.branches.name_filter.clear(),
+            KeyCode::Char(c) if !ctrl => self.branches.name_filter.push(c),
+            _ => return Vec::new(),
+        }
+        self.branches.pos = ListPos::default();
+        Vec::new()
+    }
+
+    /// Asks whether to remove the selected row, refusing the risky ones.
+    pub(super) fn ask_remove(&mut self) -> Vec<Effect> {
+        enum Ask {
+            /// Nothing is selected.
+            Nothing,
+            /// Tell the user why not.
+            Refuse(String),
+            /// Offer this removal.
+            Offer(Removal),
+        }
+        let ask = match self.branches.rows().get(self.branches.pos.selected) {
+            None => Ask::Nothing,
+            Some(row) => match row.branch {
+                None => {
+                    Ask::Refuse("Pull requests live on GitHub; nothing to remove here".to_owned())
+                }
+                Some(b) if b.worktree.as_ref().is_some_and(|w| w.current) => {
+                    Ask::Refuse("This is the checkout vert is running in".to_owned())
+                }
+                Some(b) if b.worktree.as_ref().is_some_and(|w| w.main) => {
+                    Ask::Refuse("This is the repository's main checkout".to_owned())
+                }
+                Some(b) if b.remote => Ask::Refuse(
+                    "Remote branches follow their remote; nothing to remove locally".to_owned(),
+                ),
+                Some(b) if b.worktree.as_ref().and_then(|w| w.dirty.as_ref()).is_some() => {
+                    Ask::Refuse(format!(
+                        "{} has uncommitted changes; commit or discard them first",
+                        b.name
+                    ))
+                }
+                Some(b) => Ask::Offer(Removal {
+                    worktree: b
+                        .worktree
+                        .as_ref()
+                        .map(|w| (w.name.clone(), w.path.clone())),
+                    branch: b.branch.clone().map(|name| BranchRemoval {
+                        name,
+                        tip: tip_of(b.changes.as_ref()),
+                    }),
+                    unmerged: b.ahead_behind.map(|(ahead, _)| ahead),
+                    pull: row.pull.map(|p| p.number),
+                }),
+            },
+        };
+        match ask {
+            Ask::Nothing => Vec::new(),
+            Ask::Refuse(why) => self.refuse(&why),
+            Ask::Offer(removal) => {
+                self.branches.confirm = Some(removal);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Answers the removal confirmation: `true` removes, anything else cancels.
+    pub(super) fn answer_remove(&mut self, confirmed: bool) -> Vec<Effect> {
+        match (self.branches.confirm.take(), confirmed) {
+            (Some(removal), true) => vec![Effect::Remove {
+                worktree: removal.worktree,
+                branch: removal.branch,
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Tells the user why nothing will be removed.
+    fn refuse(&mut self, why: &str) -> Vec<Effect> {
+        self.notice = Some(why.to_owned());
+        Vec::new()
+    }
     fn notice_none(&mut self, text: &str) -> Option<Entry> {
         self.notice = Some(text.to_owned());
         None
@@ -473,6 +652,7 @@ mod tests {
             name: name.to_owned(),
             path: path.clone(),
             current,
+            main: false,
             dirty: dirty.then(|| {
                 let mut e = change(&format!("worktree:{name}"), 200, Target::WorkingTree);
                 e.root = (!current).then_some(path);
@@ -926,5 +1106,337 @@ mod tests {
         });
         let effects = press(&mut app, KeyCode::Char('e'));
         assert!(matches!(&effects[..], [Effect::Edit { root: r, .. }] if *r == root));
+    }
+
+    /// A Branches tab seen from a linked worktree, with a clean linked
+    /// worktree, a detached one, the main checkout and a remote branch: the
+    /// shapes `d` can act on.
+    fn removal_app() -> App {
+        let mut app = app(true);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('4')),
+            [Effect::LoadBranches, Effect::LoadPulls]
+        );
+        let detached = Branch {
+            name: "probe".to_owned(),
+            branch: None,
+            worktree: Some(Worktree {
+                name: "probe".to_owned(),
+                path: PathBuf::from("/wt/probe"),
+                current: false,
+                main: false,
+                dirty: None,
+            }),
+            ..branch("unused", 7)
+        };
+        // vert runs in a linked worktree, so the main checkout is not current.
+        let main_row = Branch {
+            name: "proj".to_owned(),
+            worktree: Some(Worktree {
+                name: "proj".to_owned(),
+                path: PathBuf::from("/proj"),
+                current: false,
+                main: true,
+                dirty: None,
+            }),
+            ..checkout("main", false, false)
+        };
+        let remote = Branch {
+            name: "origin/gone".to_owned(),
+            remote: true,
+            ..branch("gone", 5)
+        };
+        app.update(Msg::Branches(Ok(Branches {
+            base: Some("main".to_owned()),
+            branches: vec![
+                checkout("runner", true, false),
+                checkout("agent", false, false),
+                main_row,
+                detached,
+                remote,
+            ],
+        })));
+        app
+    }
+
+    #[test]
+    fn removal_needs_confirmation() {
+        let mut app = loaded();
+        // The running checkout is refused.
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.branches.confirm, None);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("running in"))
+        );
+        // So is a worktree with uncommitted changes.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("uncommitted"))
+        );
+        // A pull request on its own has nothing local to remove.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.notice.as_deref().is_some_and(|n| n.contains("GitHub")));
+        // A branch asks first, naming its unmerged commits and open PR.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.notice, None);
+        assert_eq!(
+            app.branches.confirm,
+            Some(Removal {
+                worktree: None,
+                branch: Some(BranchRemoval {
+                    name: "feat".to_owned(),
+                    tip: Some(Oid::ZERO_SHA1),
+                }),
+                unmerged: Some(1),
+                pull: Some(7),
+            })
+        );
+        // Any other key cancels — ⏎ included, since it opens elsewhere;
+        // y confirms and the outcome reloads.
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.branches.confirm, None);
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('x')),
+            Vec::<Effect>::new(),
+            "x cancels"
+        );
+        assert_eq!(app.branches.confirm, None);
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('y')),
+            vec![Effect::Remove {
+                worktree: None,
+                branch: Some(BranchRemoval {
+                    name: "feat".to_owned(),
+                    tip: Some(Oid::ZERO_SHA1),
+                })
+            }]
+        );
+        assert_eq!(
+            app.update(Msg::Removed {
+                removed: vec!["branch feat".to_owned()],
+                error: None,
+            }),
+            vec![Effect::LoadBranches]
+        );
+        assert_eq!(app.notice.as_deref(), Some("Removed branch feat"));
+    }
+
+    #[test]
+    fn worktree_rows_offer_worktree_and_branch() {
+        let mut app = removal_app();
+        assert_eq!(
+            keys(&app),
+            ["b:runner", "b:agent", "b:proj", "b:probe", "b:origin/gone"]
+        );
+        // The main checkout is refused, even seen from a linked worktree.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.branches.confirm, None);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("main checkout"))
+        );
+        press(&mut app, KeyCode::Char('k'));
+        // A clean linked worktree takes its branch with it.
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            app.branches.confirm,
+            Some(Removal {
+                worktree: Some(("agent".to_owned(), PathBuf::from("/wt/agent"))),
+                branch: Some(BranchRemoval {
+                    name: "agent".to_owned(),
+                    tip: Some(Oid::ZERO_SHA1),
+                }),
+                unmerged: Some(1),
+                pull: None,
+            })
+        );
+        press(&mut app, KeyCode::Esc);
+        // A detached checkout offers the worktree alone.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            app.branches.confirm,
+            Some(Removal {
+                worktree: Some(("probe".to_owned(), PathBuf::from("/wt/probe"))),
+                branch: None,
+                unmerged: Some(1),
+                pull: None,
+            })
+        );
+        press(&mut app, KeyCode::Char('n'));
+        // Remote-tracking rows follow their remote.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("Remote branches"))
+        );
+    }
+
+    #[test]
+    fn removal_failures_reload_and_report() {
+        let mut app = loaded();
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        let why = "removed worktree agent, but failed to delete the branch: nope".to_owned();
+        app.update(Msg::Removed {
+            removed: vec!["worktree agent".to_owned()],
+            error: Some(why.clone()),
+        });
+        assert_eq!(app.notice.as_deref(), Some(why.as_str()));
+        assert!(app.branches.loading(), "the list reloads either way");
+    }
+
+    #[test]
+    fn typing_narrows_rows_and_esc_clears() {
+        let mut app = loaded();
+        // / starts filtering instead of opening the Search tab.
+        press(&mut app, KeyCode::Char('/'));
+        assert!(app.branches.filter_editing);
+        assert_eq!(app.tab, Tab::Branches);
+        for c in "feat".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(keys(&app), ["b:feat"]);
+        assert_eq!(
+            app.branches.pos.selected, 0,
+            "selection resets while typing"
+        );
+        // Shortcuts become text while editing: d opens no dialog.
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.branches.confirm, None);
+        assert_eq!(app.branches.name_filter, "featd");
+        // ? types too instead of opening help.
+        press(&mut app, KeyCode::Char('?'));
+        assert!(!app.help);
+        assert_eq!(app.branches.name_filter, "featd?");
+        // ctrl-u clears the query, still editing.
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(app.branches.filter_editing);
+        assert!(app.branches.name_filter.is_empty());
+        assert_eq!(keys(&app).len(), 6);
+        // Backspace pops; esc stops editing but keeps the filter.
+        for c in "age".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.branches.name_filter, "ag");
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.branches.filter_editing);
+        assert_eq!(keys(&app), ["b:agent"], "the filter persists");
+        // A second esc clears it.
+        press(&mut app, KeyCode::Esc);
+        assert!(app.branches.name_filter.is_empty());
+        assert_eq!(keys(&app).len(), 6);
+        // 3 still reaches the Search tab.
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.tab, Tab::Search);
+    }
+
+    #[test]
+    fn enter_opens_the_filtered_row() {
+        let mut app = loaded();
+        press(&mut app, KeyCode::Char('/'));
+        for c in "agent".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        // Arrows still navigate while editing; j and k type.
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.branches.pos.selected, 0, "one row, clamped");
+        assert_eq!(app.branches.name_filter, "agent");
+        let effects = press(&mut app, KeyCode::Enter);
+        assert!(!app.branches.filter_editing);
+        let [Effect::LoadDiff { entry, .. }] = &effects[..] else {
+            panic!("{effects:?}")
+        };
+        assert_eq!(entry.id, "worktree:agent");
+    }
+
+    #[test]
+    fn kind_and_name_filters_intersect() {
+        let mut app = loaded();
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(keys(&app), ["b:main", "b:agent"]);
+        press(&mut app, KeyCode::Char('/'));
+        for c in "agent".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(keys(&app), ["b:agent"]);
+    }
+
+    #[test]
+    fn an_open_view_takes_keys_over_the_name_filter() {
+        let mut app = loaded();
+        press(&mut app, KeyCode::Char('/'));
+        assert!(app.branches.filter_editing);
+        // A diff arrives and opens on top of the tab mid-typing.
+        let entry = app
+            .branches
+            .rows()
+            .first()
+            .and_then(|r| r.changes().cloned())
+            .expect("changes");
+        app.update(Msg::Diff {
+            entry: Box::new(entry),
+            result: Ok(Vec::new()),
+            refresh: false,
+        });
+        assert!(!app.views.is_empty());
+        // esc leaves the view; the (invisible) filter does not swallow it.
+        press(&mut app, KeyCode::Esc);
+        assert!(app.views.is_empty());
+        assert!(app.branches.filter_editing, "still typing");
+        // Back on the tab, typing continues where it left off.
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.branches.name_filter, "a");
+    }
+
+    #[test]
+    fn the_filter_matches_worktree_directory_names() {
+        let mut app = app(true);
+        press(&mut app, KeyCode::Char('4'));
+        // The checkout's directory is named after the branch here.
+        let mut b = checkout("feat", false, false);
+        let mut wt = b.worktree.clone().expect("worktree");
+        wt.name = "agent-wt".to_owned();
+        wt.path = PathBuf::from("/wts/agent-wt");
+        b.worktree = Some(wt);
+        app.update(Msg::Branches(Ok(Branches {
+            base: Some("main".to_owned()),
+            branches: vec![checkout("main", true, false), b],
+        })));
+        press(&mut app, KeyCode::Char('/'));
+        for c in "agent".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(
+            keys(&app),
+            ["b:feat"],
+            "the directory name narrows to its row"
+        );
+        for c in "feat".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(keys(&app).is_empty(), "neither name matches");
     }
 }

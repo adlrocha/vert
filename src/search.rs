@@ -120,6 +120,21 @@ pub fn fuzzy_files(files: &[String], query: &str, limit: usize) -> Vec<FileMatch
         .collect()
 }
 
+/// Whether `text` fuzzily contains `query`; an empty or blank query matches
+/// anything. Uses the same matching as [`fuzzy_files`].
+#[must_use]
+pub fn fuzzy_match(text: &str, query: &str) -> bool {
+    if query.trim().is_empty() {
+        return true;
+    }
+    let mut matcher = Fuzzy::new(MatchConfig::DEFAULT);
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut buf = Vec::new();
+    pattern
+        .score(Utf32Str::new(text, &mut buf), &mut matcher)
+        .is_some()
+}
+
 /// One line matching a content search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextMatch {
@@ -263,6 +278,17 @@ mod tests {
     }
 
     const NEVER: &(dyn Fn() -> bool + Sync) = &|| false;
+
+    #[test]
+    fn fuzzy_matches_subsequences() {
+        assert!(fuzzy_match("feat/auth", "fa"));
+        assert!(fuzzy_match("Feat/auth", "fa"), "lowercase matches any case");
+        assert!(!fuzzy_match("feat/auth", "FA"), "uppercase needs uppercase");
+        assert!(!fuzzy_match("feat", "zf"));
+        assert!(fuzzy_match("", ""));
+        assert!(fuzzy_match("anything", ""), "blank matches all");
+        assert!(fuzzy_match("anything", "  "));
+    }
 
     #[test]
     fn lists_files_respecting_gitignore() {
