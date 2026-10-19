@@ -35,7 +35,7 @@ jobs:
       group: nibble-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
       cancel-in-progress: true
     steps:
-      # v1.0.3 — full SHA so a moved tag can never change what runs with the write token and model key. Bump deliberately.
-      - uses: adlrocha/nibble-review@8eea18aa5a522ec8238d4128d3545c67567a2d13
+      # v1.0.4 — full SHA so a moved tag can never change what runs with the write token and model key. Bump deliberately.
+      - uses: adlrocha/nibble-review@207ac6a160b6aed76cdebef5fafa10df8ee57707
         with:
           api-key: ${{ secrets.OPENCODE_API_KEY }}
