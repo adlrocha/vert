@@ -82,6 +82,13 @@ fn run() -> Result<()> {
         config.update_check(),
     );
     app.set_refresh(config.refresh());
+    let explainer = config.explainer(std::env::var_os("PATH").as_deref());
+    app.set_explainer(
+        explainer
+            .as_ref()
+            .map(vert::explain::Explainer::label)
+            .map_err(Clone::clone),
+    );
     let _watch = if config.no_watch {
         app.watch = WatchStatus::Disabled;
         None
@@ -114,6 +121,7 @@ fn run() -> Result<()> {
             update: config.update(),
             tokens: jobs::TokenSource::default(),
             token: Arc::default(),
+            explain: explainer.ok(),
         },
         tx: tx.clone(),
         gate: Arc::new(InputGate::default()),

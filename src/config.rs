@@ -1,10 +1,13 @@
 //! Command-line configuration.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
 
+use crate::explain::agent::{self, Choice};
+use crate::explain::{Explainer, cache::Cache};
 use crate::labels::{LabelError, Labeler};
 
 /// Understand what your agents are building: a live, navigable view of a git repo's changes.
@@ -88,13 +91,37 @@ pub struct Config {
     #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
     pub github_timeout_secs: u64,
 
-    /// Never contact GitHub (pull requests are not shown).
+    /// Never contact GitHub (pull requests are not shown), and explain no changes.
     #[arg(long)]
     pub no_network: bool,
 
     /// Never ask GitHub whether a newer vert exists.
     #[arg(long)]
     pub no_update_check: bool,
+
+    /// Coding agent that explains a change (`x` in a diff); `auto` picks the
+    /// first of claude, codex and pi found on PATH.
+    #[arg(long, value_enum, default_value_t = Choice::Auto, value_name = "AGENT", env = "VERT_EXPLAIN_AGENT")]
+    pub explain_agent: Choice,
+
+    /// Model the agent explains with, in the agent's own naming (passed as
+    /// its `--model`); unset uses the agent's default.
+    #[arg(long, value_name = "MODEL", env = "VERT_EXPLAIN_MODEL")]
+    pub explain_model: Option<String>,
+
+    /// Shell command that explains changes instead of a known agent: it reads
+    /// the prompt on stdin and prints its answer.
+    #[arg(long, value_name = "CMD", env = "VERT_EXPLAIN_CMD")]
+    pub explain_cmd: Option<String>,
+
+    /// Seconds an agent may take to explain a change.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..), env = "VERT_EXPLAIN_TIMEOUT_SECS")]
+    pub explain_timeout_secs: u64,
+
+    /// KiB of diff sent to the agent in full; later hunks are listed by
+    /// header only, for the agent to read itself.
+    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..), env = "VERT_EXPLAIN_MAX_DIFF_KB")]
+    pub explain_max_diff_kb: u32,
 }
 
 impl Config {
@@ -170,6 +197,32 @@ impl Config {
             endpoint: crate::github::Endpoint::new("https://api.github.com"),
             timeout: Duration::from_secs(self.github_timeout_secs),
             cache: cache_dir().join("vert/update-check"),
+        })
+    }
+
+    /// How to explain changes, given the `PATH` to look for agents in.
+    ///
+    /// # Errors
+    /// Explains, for the user, why explanations are unavailable.
+    pub fn explainer(&self, path: Option<&OsStr>) -> Result<Explainer, String> {
+        if self.no_network {
+            return Err("network access is off (--no-network)".to_owned());
+        }
+        let agent = agent::select(self.explain_agent, self.explain_cmd.as_deref(), path)?;
+        let model = self
+            .explain_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_owned);
+        Ok(Explainer {
+            agent,
+            model,
+            timeout: Duration::from_secs(self.explain_timeout_secs),
+            max_diff_bytes: usize::try_from(self.explain_max_diff_kb)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(1024),
+            cache: Some(Cache::new(cache_dir().join("vert/explain"))),
         })
     }
 
@@ -252,6 +305,37 @@ mod tests {
     fn rejects_inconsistent_thresholds() {
         let config = Config::parse_from(["vert", "--medium-lines", "500", "--large-lines", "100"]);
         assert!(config.labeler().is_err());
+    }
+
+    #[test]
+    fn explanations_pick_an_agent_unless_offline() {
+        let config =
+            Config::parse_from(["vert", "--explain-cmd", "llm", "--explain-max-diff-kb", "2"]);
+        let ex = config.explainer(None).expect("custom command");
+        assert_eq!(ex.agent, agent::Agent::Custom("llm".to_owned()));
+        assert_eq!(ex.max_diff_bytes, 2048);
+        assert_eq!(ex.timeout, Duration::from_secs(600));
+        assert!(ex.cache.is_some());
+        assert_eq!(ex.model, None);
+        let model = |m: &str| {
+            Config::parse_from(["vert", "--explain-cmd", "llm", "--explain-model", m])
+                .explainer(None)
+                .expect("custom command")
+                .model
+        };
+        assert_eq!(model(" opus "), Some("opus".to_owned()));
+        assert_eq!(model(" "), None, "blank means the agent's default");
+
+        let none = Config::parse_from(["vert", "--explain-agent", "codex"])
+            .explainer(None)
+            .expect_err("codex is not on an empty PATH");
+        assert!(none.contains("codex"), "{none}");
+        let off = Config::parse_from(["vert", "--no-network", "--explain-cmd", "llm"])
+            .explainer(None)
+            .expect_err("offline");
+        assert!(off.contains("--no-network"), "{off}");
+        assert!(Config::try_parse_from(["vert", "--explain-agent", "gpt"]).is_err());
+        assert!(Config::try_parse_from(["vert", "--explain-timeout-secs", "0"]).is_err());
     }
 
     #[test]

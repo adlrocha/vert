@@ -23,6 +23,7 @@ pub const DETAIL_HINTS: Hints = &[
     ("n/N", "hunk"),
     ("⏎", "view file"),
     ("e", "edit"),
+    ("x", "explain"),
     ("esc", "back"),
 ];
 

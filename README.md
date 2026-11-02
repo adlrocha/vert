@@ -47,6 +47,13 @@ work in parallel.
   that arrived while the confirmation was open are safe too. Diffs of
   linked worktrees stay live, and files open
   from the worktree they belong to.
+- **Explanations:** press `x` in a diff and a coding agent you already use
+  (Claude Code, Codex or pi) explains the change for a human reviewer: its
+  intent, the order to read it in, a small diagram when a picture helps
+  (components, states, a flow or data), and what deserves a second look.
+  Every step and box points at hunks, and `⏎` jumps to them. vert checks
+  each pointer against the real diff and lists the hunks nothing explains,
+  which is where to look first. See [Explanations](#explanations).
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter. `e` opens `$VISUAL`/`$EDITOR` at that line
   (vim, nvim, helix, VS Code, Cursor, …).
@@ -96,7 +103,8 @@ Press `?` inside vert for all keys. The essentials:
 | Anywhere  | `1` `2` `3` `4` / `tab` switch tab · `j` `k` move · `⏎` open · `esc` back · `q` quit |
 | Feed      | `n` next new change · `esc` clear filter · `r` reload                   |
 | Hotspots  | `w` time window · `m` files/modules · `⏎` filter feed · `o`/`e` view/edit |
-| Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit |
+| Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit · `x` explain |
+| Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `r` ask again |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
 | Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names · `d` remove · `r` refresh |
 
@@ -116,6 +124,56 @@ or writes to your repository. Besides your repository, vert sends one
 unauthenticated request a day to `api.github.com` for its own latest commit —
 no account, token or repository data involved — which is what powers the
 update notice. `--no-network` turns all GitHub access off.
+
+### Explanations
+
+`x` in a diff asks a coding agent to explain the change. vert runs the
+agent's own CLI, so it uses whatever login, subscription, model and settings
+you already have:
+
+| Agent                     | Runs as                                                       |
+| ------------------------- | ------------------------------------------------------------- |
+| Claude Code (`claude`)    | `claude -p --tools Read,Grep,Glob`                             |
+| Codex (`codex`)           | `codex exec --sandbox read-only`                              |
+| pi (`pi`)                 | `pi -p --tools read,grep,find,ls`                             |
+| your own (`--explain-cmd`)| `sh -c CMD`                                                   |
+
+By default vert uses the first of those it finds on `PATH`; `--explain-agent`
+picks one. Each agent uses its own default model unless `--explain-model`
+names another, in the agent's own naming (`claude --model`, `codex --model`,
+`pi --model`: for example `sonnet` for Claude Code, or a
+`provider/model` from `pi --list-models` for pi, such as
+`anthropic/claude-haiku-5-5`);
+a custom command gets it in `VERT_EXPLAIN_MODEL`. The agent and model in use
+are shown at the top of the explanation.
+
+To set them once for a machine rather than on every run, export them from
+your shell profile. Every explain option has an environment variable, and a
+flag given on the command line wins over it:
+
+```sh
+export VERT_EXPLAIN_AGENT=pi            # auto, claude, codex or pi
+export VERT_EXPLAIN_MODEL=anthropic/claude-haiku-5-5  # optional; agent's default otherwise
+# export VERT_EXPLAIN_CMD='llm -m gpt-5'  # any command that reads stdin
+```
+
+The agent gets the prompt on standard input and runs in the
+checkout the change belongs to, with read-only tools, so it can open the
+surrounding code but not change it. vert sends it the change's message and
+diff, with every hunk numbered, and asks for JSON back. A custom command
+must read the prompt on stdin and print that JSON.
+
+The answer opens as an outline: an overview (the intent and, when the agent
+judges one useful, a diagram), the steps in reading order, the concerns, and
+the hunks no step or diagram box covers. In the diagram, `+` marks what the
+change added, `~` what it changed and `−` what it removed; `↺` points back to
+a box already drawn.
+
+Answers are cached in `~/.cache/vert/explain`, keyed by the agent, the model and the
+exact diff, so a commit is explained once and a working tree that moved on is
+asked about afresh. `r` asks again. The diff leaves your machine through the
+agent, like any other prompt you give it; `--no-network` turns explanations
+off.
 
 ### Options
 
@@ -137,8 +195,13 @@ update notice. `--no-network` turns all GitHub access off.
 | `--max-prs`              | 50      | Open pull requests to list (at most 100)        |
 | `--github-api`           | `https://api.github.com` | API URL; for GitHub Enterprise `https://HOST/api/v3` |
 | `--github-timeout-secs`  | 15      | GitHub request timeout                          |
-| `--no-network`           | off     | Never contact GitHub                            |
+| `--no-network`           | off     | Never contact GitHub, and no explanations       |
 | `--no-update-check`      | off     | Never ask GitHub whether a newer vert exists    |
+| `--explain-agent` / `VERT_EXPLAIN_AGENT` | `auto` | Agent for `x`: `auto`, `claude`, `codex` or `pi` |
+| `--explain-model` / `VERT_EXPLAIN_MODEL` | agent's default | Model the agent uses, in its own naming |
+| `--explain-cmd` / `VERT_EXPLAIN_CMD` | — | Shell command to use instead of a known agent |
+| `--explain-timeout-secs` / `VERT_EXPLAIN_TIMEOUT_SECS` | 600 | How long an agent may take |
+| `--explain-max-diff-kb` / `VERT_EXPLAIN_MAX_DIFF_KB` | 256 | Diff sent in full; later hunks go by header only |
 
 ## Development
 
@@ -161,6 +224,7 @@ the event loop. This keeps all interaction logic testable without a terminal.
 | ----------- | ---------------------------------------------------------------- |
 | `git`       | Feed entries (with a per-commit cache), branches and worktrees, structured diffs |
 | `github`    | `origin` detection, token lookup, open pull requests and their diffs |
+| `explain`   | Prompts, agent routing, answer validation and caching, diagram layout |
 | `labels`    | Size, breadth and revert classification                          |
 | `hotspots`  | Ranking by change frequency                                      |
 | `search`    | Fuzzy file names (nucleo) and content search (ripgrep crates)    |
