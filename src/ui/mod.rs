@@ -3,6 +3,7 @@
 
 mod branches;
 pub mod detail;
+mod explain;
 mod feed;
 mod hotspots;
 mod search;
@@ -40,6 +41,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             draw_crumbs(frame, tabs, &["File", split_path(&f.path).1]);
             detail::draw_file(frame, body, f);
             detail::FILE_HINTS
+        }
+        Some(View::Explain(v)) => {
+            draw_crumbs(frame, tabs, &[app.tab.title(), &v.entry.short, "Explain"]);
+            explain::draw(frame, body, v, app.now, app.tick);
+            explain::EXPLAIN_HINTS
         }
         None => {
             draw_tabs(frame, tabs, app);
@@ -204,6 +210,17 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n N", "next / prev hunk"),
             ("← →", "scroll sideways"),
             ("⏎ e", "view / edit file"),
+            ("x", "explain the change"),
+        ],
+    ),
+    (
+        "Explain",
+        &[
+            ("tab h l", "outline / detail"),
+            ("j k", "move"),
+            ("⏎", "go to the code"),
+            ("J K", "scroll"),
+            ("r", "ask the agent again"),
         ],
     ),
     (
@@ -305,6 +322,47 @@ pub fn truncate(s: &str, max: usize) -> String {
         out.push(c);
     }
     out.push('…');
+    out
+}
+
+/// Wraps `text` into lines of at most `max` columns, breaking at spaces and
+/// splitting words longer than a line. Line breaks in `text` are kept.
+///
+/// ```
+/// assert_eq!(vert::ui::wrap("one two three", 7), ["one two", "three"]);
+/// assert_eq!(vert::ui::wrap("abcdefgh", 3), ["abc", "def", "gh"]);
+/// ```
+#[must_use]
+pub fn wrap(text: &str, max: usize) -> Vec<String> {
+    let max = max.max(1);
+    let mut out = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        let mut used = 0;
+        for word in paragraph.split_whitespace() {
+            let w = width(word);
+            if used > 0 && used + 1 + w <= max {
+                line.push(' ');
+                line.push_str(word);
+                used += 1 + w;
+                continue;
+            }
+            if used > 0 {
+                out.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            for c in word.chars() {
+                let cw = c.width().unwrap_or(0);
+                if used + cw > max && used > 0 {
+                    out.push(std::mem::take(&mut line));
+                    used = 0;
+                }
+                line.push(c);
+                used += cw;
+            }
+        }
+        out.push(line);
+    }
     out
 }
 
@@ -884,6 +942,185 @@ mod render_tests {
             refresh: false,
         });
         assert!(screen(&mut app, 140, 20).contains("Uncommitted changes"));
+    }
+
+    /// The real app with the newest commit's diff open and an explanation
+    /// asked for: the app, the diff, and the request's key.
+    fn explaining() -> (TestRepo, App, Vec<git::diff::FileDiff>, u64) {
+        let (t, mut app) = real_app();
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
+        let entry = app.feed.commits[0].clone();
+        let files = git::diff::load(&t.repo, entry.target).expect("diff");
+        app.update(Msg::Diff {
+            entry: Box::new(entry),
+            result: Ok(files.clone()),
+            refresh: false,
+        });
+        assert!(screen(&mut app, 140, 30).contains("x explain"));
+        let effects = app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        let [crate::app::Effect::Explain { key, .. }] = effects.as_slice() else {
+            panic!("asked: {effects:?}")
+        };
+        let key = *key;
+        (t, app, files, key)
+    }
+
+    #[test]
+    fn explanations_render_while_asking_and_after_failing() {
+        let (_t, mut app, _, key) = explaining();
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Asking pi to explain this change"), "{s}");
+        assert!(s.contains("Explain"), "crumbs: {s}");
+        assert!(s.contains("go to code"), "hints: {s}");
+
+        app.update(Msg::Explained {
+            key,
+            result: Err("pi failed (exit status: 1): not logged in".to_owned()),
+        });
+        let s = screen(&mut app, 100, 20);
+        assert!(s.contains("Couldn't explain this change"), "{s}");
+        assert!(s.contains("not logged in"), "{s}");
+        assert!(s.contains("failed"), "{s}");
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+    }
+
+    #[test]
+    fn explanations_render_walkthrough_and_diagram() {
+        use crate::explain::{Answer, Explanation};
+
+        let (_t, mut app, files, key) = explaining();
+        let answer = r#"{
+          "intent": "Say hello instead of hi, and add modules for docs and a library.",
+          "steps": [
+            {"title": "Greeting", "detail": "main now prints hello.",
+             "refs": [{"file": "src/main.rs", "hunk": 1}, {"file": "nowhere.rs"}]},
+            {"title": "New modules", "detail": "", "refs": []}
+          ],
+          "diagram": {"kind": "components", "title": "What depends on what",
+            "nodes": [
+              {"id": "main", "label": "main", "change": "changed", "refs": [{"file": "src/main.rs"}]},
+              {"id": "lib", "label": "lib::a", "change": "added", "refs": [{"file": "lib/a.rs"}]},
+              {"id": "old", "label": "legacy", "change": "removed"},
+              {"id": "docs", "label": "guide", "change": "same"}
+            ],
+            "edges": [
+              {"from": "main", "to": "lib", "label": "will call", "change": "added"},
+              {"from": "lib", "to": "main", "label": "", "change": "same"},
+              {"from": "main", "to": "old", "label": "used to call", "change": "removed"}
+            ]},
+          "concerns": [{"text": "extra() is never called.", "refs": [{"file": "src/main.rs", "hunk": 1}]}]
+        }"#;
+        let explanation = Explanation::validate(answer, &files).expect("valid");
+        assert_eq!(explanation.unexplained.len(), 1, "docs/guide.md");
+        app.update(Msg::Explained {
+            key,
+            result: Ok(Answer {
+                explanation,
+                cached: true,
+            }),
+        });
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+        let s = screen(&mut app, 140, 30);
+        for needle in [
+            "Walkthrough",
+            "◆ Overview",
+            " 1 Greeting",
+            "⚠ Concerns 1",
+            "? Unexplained 1",
+            "1 bad pointer dropped",
+            "Intent",
+            "Say hello",
+            "Diagram · components",
+            "What depends on what",
+            "main ~",
+            "├─▶ lib::a +  will call",
+            "│   ↓",
+            "│   main ~ ↺",
+            "└─▶ legacy −  used to call",
+            "guide",
+            "+ added",
+            "2 steps · 1 concern · 1 hunk unexplained",
+            "from cache",
+        ] {
+            assert!(s.contains(needle), "missing {needle}:\n{s}");
+        }
+        let press = |app: &mut App, code| {
+            app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        // The detail pane follows the selected pointer.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('j'));
+        screen(&mut app, 140, 8);
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("▌"), "{s}");
+        press(&mut app, KeyCode::Tab);
+
+        press(&mut app, KeyCode::Char('j'));
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Step 1 of 2"), "{s}");
+        assert!(s.contains("main now prints hello."), "{s}");
+        assert!(s.contains("› src/main.rs  @@"), "{s}");
+        press(&mut app, KeyCode::Char('j'));
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("pointed at no code"), "{s}");
+        press(&mut app, KeyCode::Char('j'));
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Worth a second look"), "{s}");
+        assert!(s.contains("⚠ extra() is never called."), "{s}");
+        press(&mut app, KeyCode::Char('j'));
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Not covered by the walkthrough"), "{s}");
+        assert!(s.contains("› docs/guide.md  @@ -0,0 +1 @@"), "{s}");
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+    }
+
+    #[test]
+    fn diagram_less_explanations_say_so() {
+        use crate::explain::Explanation;
+
+        let (_t, mut app) = real_app();
+        let wt = app.feed.worktree.clone().expect("dirty");
+        let mut view = crate::app::ExplainView {
+            key: 0,
+            entry: wt,
+            files: Vec::new(),
+            agent: "pi".to_owned(),
+            status: crate::app::Status::Ready(
+                Box::new(Explanation::validate(r#"{"intent": "Tidy."}"#, &[]).expect("valid")),
+                false,
+            ),
+            pos: crate::app::ListPos::default(),
+            pane: crate::app::Pane::Outline,
+            target: 0,
+            scroll: 0,
+            height: 0,
+            rows: 0,
+        };
+        view.entry.root = None;
+        app.views.push(crate::app::View::Explain(Box::new(view)));
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Uncommitted changes"), "{s}");
+        assert!(s.contains("No diagram"), "{s}");
+        assert!(s.contains("every hunk explained"), "{s}");
+        assert!(s.contains("just now"), "{s}");
+    }
+
+    #[test]
+    fn wraps_text_to_a_width() {
+        assert_eq!(super::wrap("", 5), [] as [String; 0]);
+        assert_eq!(super::wrap("a b\n\nc", 10), ["a b", "", "c"]);
+        assert_eq!(super::wrap("aa bb cc", 5), ["aa bb", "cc"]);
+        assert_eq!(super::wrap("x", 0), ["x"]);
+        assert_eq!(super::wrap("日本語", 4), ["日本", "語"]);
     }
 
     #[test]

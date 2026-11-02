@@ -1,6 +1,6 @@
 [package]
 name = "vert"
-version = "0.1.0"
+version = "0.2.0"
 description = "Understand what your agents are building: a live, navigable terminal view of a git repo."
 license = "MIT"
 repository = "https://github.com/adlrocha/vert"
@@ -9,7 +9,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
 crossterm = "0.29.0"
 git2 = "0.21.0"
 grep-matcher = "0.1.9"

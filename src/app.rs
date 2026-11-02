@@ -5,6 +5,7 @@
 //! interaction logic testable without a terminal or repository.
 
 mod branches;
+mod explain;
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
@@ -14,7 +15,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 pub use branches::{
     BranchRemoval, BranchesState, PullStatus, Refresh, Removal, Row, RowFilter, pull_entry,
 };
+#[cfg(test)]
+pub(crate) use explain::pi_for_tests;
+pub use explain::{ExplainState, ExplainView, Item, Pane, Status, items, row_pointer, targets};
 
+use crate::explain::Answer;
 use crate::git::RepoInfo;
 use crate::git::branches::Branches;
 use crate::git::diff::{FileDiff, LineKind};
@@ -381,6 +386,27 @@ pub enum View {
     Detail(Box<DetailView>),
     /// A file's contents.
     File(Box<FileView>),
+    /// An agent's explanation of the change underneath.
+    Explain(Box<ExplainView>),
+}
+
+impl View {
+    /// The diff, when this view is one.
+    #[must_use]
+    pub fn as_detail(&self) -> Option<&DetailView> {
+        match self {
+            Self::Detail(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The diff, when this view is one, to change.
+    pub fn as_detail_mut(&mut self) -> Option<&mut DetailView> {
+        match self {
+            Self::Detail(d) => Some(d),
+            _ => None,
+        }
+    }
 }
 
 /// Inputs to [`App::update`].
@@ -442,6 +468,13 @@ pub enum Msg {
     },
     /// The update check answered.
     Update(UpdateStatus),
+    /// An agent answered about a change.
+    Explained {
+        /// The diff it was asked about (see [`crate::explain::diff_key`]).
+        key: u64,
+        /// The explanation, or why there is none.
+        result: Result<Answer, String>,
+    },
 }
 
 /// Side effects requested by [`App::update`].
@@ -502,6 +535,17 @@ pub enum Effect {
     },
     /// Ask GitHub whether a newer vert exists.
     CheckUpdate,
+    /// Ask a coding agent to explain a change.
+    Explain {
+        /// Identifies the exact diff (see [`crate::explain::diff_key`]).
+        key: u64,
+        /// The change.
+        entry: Box<Entry>,
+        /// Its diff.
+        files: Vec<FileDiff>,
+        /// Ask even if an answer is cached.
+        fresh: bool,
+    },
 }
 
 /// What the once-a-day update check found out about vert itself.
@@ -531,6 +575,8 @@ pub struct App {
     pub branches: BranchesState,
     /// Branches-tab reload intervals.
     refresh: Refresh,
+    /// Explanations of changes.
+    pub explain: ExplainState,
     /// Stacked views (detail, file); the last one is on screen.
     pub views: Vec<View>,
     /// Whether the help overlay is shown.
@@ -589,6 +635,7 @@ impl App {
             },
             branches: BranchesState::default(),
             refresh: Refresh::default(),
+            explain: ExplainState::default(),
             views: Vec::new(),
             help: false,
             watch: WatchStatus::Live,
@@ -697,6 +744,10 @@ impl App {
                 self.update = Some(status);
                 Vec::new()
             }
+            Msg::Explained { key, result } => {
+                self.on_explained(key, result);
+                Vec::new()
+            }
             Msg::Removed { removed, error } => {
                 let effects = self.request_branches();
                 self.notice =
@@ -743,7 +794,9 @@ impl App {
                 self.feed.worktree = worktree;
                 self.reselect(selected.as_deref());
                 self.recompute_hotspots();
-                if let Some(View::Detail(d)) = self.views.last()
+                // The diff stays live under views stacked on it (an
+                // explanation), not only while it is on top.
+                if let Some(d) = self.views.iter().rev().find_map(View::as_detail)
                     && d.entry.is_own_worktree()
                     && let Some(wt) = &self.feed.worktree
                 {
@@ -844,7 +897,7 @@ impl App {
     /// Replaces the diff of the open detail view if it still shows `entry`.
     fn refresh_detail(&mut self, entry: Entry, files: Vec<FileDiff>) {
         let max = self.max_highlight;
-        if let Some(View::Detail(d)) = self.views.last_mut()
+        if let Some(d) = self.views.iter_mut().rev().find_map(View::as_detail_mut)
             && d.entry.id == entry.id
         {
             let current = d.files.get(d.pos.selected).map(|f| f.stat.path.clone());
@@ -1178,7 +1231,11 @@ impl App {
             key.code,
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace
         ) {
-            self.views.pop();
+            if matches!(self.views.last(), Some(View::Explain(_))) {
+                self.close_explain();
+            } else {
+                self.views.pop();
+            }
             return Vec::new();
         }
         if key.code == KeyCode::Char('?') {
@@ -1187,8 +1244,10 @@ impl App {
         }
         let max = self.max_highlight;
         match self.views.last_mut() {
+            Some(View::Detail(_)) if key.code == KeyCode::Char('x') => self.open_explain(),
             Some(View::Detail(d)) => detail_key(d, key, max),
             Some(View::File(f)) => file_key(f, key),
+            Some(View::Explain(_)) => self.on_explain_key(key),
             None => Vec::new(),
         }
     }

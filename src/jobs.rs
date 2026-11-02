@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::app::{Effect, Msg, UpdateStatus};
+use crate::explain::Explainer;
 use crate::git::Target;
 use crate::git::feed::Entry;
 use crate::github::{self, Client, Endpoint, GhError, PullsError, Slug};
@@ -95,6 +96,8 @@ pub struct Context {
     pub tokens: TokenSource,
     /// The last token that worked, so `gh` is not asked on every refresh.
     pub token: Arc<Mutex<Option<github::Token>>>,
+    /// How to explain changes, or `None` when that is unavailable.
+    pub explain: Option<Explainer>,
 }
 
 impl Context {
@@ -244,6 +247,12 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
             )
         }
         Effect::LoadPulls => Msg::Pulls(open_pulls(ctx)),
+        Effect::Explain {
+            key,
+            entry,
+            files,
+            fresh,
+        } => explain(ctx, key, &entry, &files, fresh),
         Effect::Remove { worktree, branch } => {
             let (removed, error) = remove(
                 open(),
@@ -313,6 +322,22 @@ fn check_update(ctx: &Context) -> Option<Msg> {
         .as_ref()
         .and_then(|update| update_status(update, age::now()))
         .map(Msg::Update)
+}
+
+/// Asks the configured agent to explain `entry`, in the checkout it belongs to.
+fn explain(
+    ctx: &Context,
+    key: u64,
+    entry: &Entry,
+    files: &[git::diff::FileDiff],
+    fresh: bool,
+) -> Msg {
+    let result = ctx
+        .explain
+        .as_ref()
+        .ok_or_else(|| "explanations are unavailable".to_owned())
+        .and_then(|ex| ex.explain(entry, files, ctx.dir(entry.root.as_deref()), fresh));
+    Msg::Explained { key, result }
 }
 
 /// Open pull requests of the repository `origin` points at.
@@ -426,6 +451,7 @@ mod tests {
                 gh: "false".to_owned(),
             },
             token: Arc::default(),
+            explain: None,
         }
     }
 
@@ -965,6 +991,56 @@ mod tests {
         // Off, or nothing to compare: silent.
         c.update = None;
         assert!(run(Effect::CheckUpdate, &c).is_none());
+    }
+
+    #[test]
+    fn explains_in_the_checkout_the_change_belongs_to() {
+        let t = repo();
+        let mut c = ctx(&t);
+        let wt = git::feed::load_worktree(&t.repo, &c.labeler, 0)
+            .expect("worktree")
+            .expect("dirty");
+        let files = git::diff::load(&t.repo, wt.target).expect("diff");
+        let ask = |c: &Context, entry: &Entry| {
+            run(
+                Effect::Explain {
+                    key: 9,
+                    entry: Box::new(entry.clone()),
+                    files: files.clone(),
+                    fresh: true,
+                },
+                c,
+            )
+        };
+        let Some(Msg::Explained { key: 9, result }) = ask(&c, &wt) else {
+            panic!("explained")
+        };
+        assert_eq!(result, Err("explanations are unavailable".to_owned()));
+
+        // The agent runs where the change's files are.
+        c.explain = Some(Explainer {
+            agent: crate::explain::agent::Agent::Custom(
+                r#"cat > /dev/null; printf '{"intent": "%s"}' "$(basename "$PWD")""#.to_owned(),
+            ),
+            model: None,
+            timeout: Duration::from_secs(10),
+            max_diff_bytes: 1024,
+            cache: None,
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let linked = dir.path().join("linked-wt");
+        std::fs::create_dir(&linked).expect("dir");
+        let mut elsewhere = wt.clone();
+        elsewhere.root = Some(linked);
+        let Some(Msg::Explained {
+            result: Ok(answer), ..
+        }) = ask(&c, &elsewhere)
+        else {
+            panic!("answered")
+        };
+        assert_eq!(answer.explanation.intent, "linked-wt");
+        assert_eq!(answer.explanation.unexplained.len(), 1);
+        assert!(!answer.cached);
     }
 
     #[test]

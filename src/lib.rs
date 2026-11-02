@@ -9,6 +9,7 @@ pub mod age;
 pub mod app;
 pub mod config;
 pub mod editor;
+pub mod explain;
 pub mod git;
 pub mod github;
 pub mod highlight;
