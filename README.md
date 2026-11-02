@@ -170,7 +170,8 @@ the hunks no step or diagram box covers. In the diagram, `+` marks what the
 change added, `~` what it changed and `−` what it removed; `↺` points back to
 a box already drawn.
 
-Answers are cached in `~/.cache/vert/explain`, keyed by the agent, the model and the
+Answers are cached in `$XDG_CACHE_HOME/vert/explain` (`~/.cache/vert/explain`
+by default), readable only by you, keyed by the agent, the model and the
 exact diff, so a commit is explained once and a working tree that moved on is
 asked about afresh. `r` asks again. The diff leaves your machine through the
 agent, like any other prompt you give it; `--no-network` turns explanations

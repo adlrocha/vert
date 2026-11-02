@@ -1,8 +1,13 @@
 //! Agents' answers on disk, so a change is explained once.
 //!
-//! An answer is stored under the hash of the agent and the exact prompt,
-//! which holds the whole diff: a commit keeps its answer forever, and a
-//! working tree that moved on simply misses.
+//! An answer is stored under a hash of the agent, the model, the full diff
+//! and the prompt (see `Explainer::explain`). The diff is hashed on its own
+//! because the prompt leaves hunk bodies out past `--explain-max-diff-kb`, so
+//! two changes can share a prompt but never an answer. A commit keeps its
+//! answer forever, and a working tree that moved on simply misses.
+//!
+//! Answers describe private code, so the directory and its files are made
+//! readable by their owner only.
 
 use std::path::{Path, PathBuf};
 
@@ -33,15 +38,30 @@ impl Cache {
     /// Stores `answer` for `key`. Failing only means asking the agent again
     /// next time, so errors are ignored.
     pub fn put(&self, key: u64, answer: &str) {
-        let _ = std::fs::create_dir_all(&self.dir);
+        let _ = private_dir(&self.dir);
         let _ = write_atomic(&self.path(key), answer);
     }
 }
 
-/// Writes through a temporary file, so a reader never sees half an answer.
+/// Creates `dir` readable by its owner only.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
+/// Writes through a temporary file readable by its owner only, so a reader
+/// never sees half an answer.
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    std::fs::write(&tmp, text)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(&tmp)?.write_all(text.as_bytes())?;
     std::fs::rename(&tmp, path)
 }
 
@@ -56,7 +76,15 @@ mod tests {
         assert_eq!(cache.get(7), None);
         cache.put(7, "{\"intent\":\"x\"}");
         assert_eq!(cache.get(7).as_deref(), Some("{\"intent\":\"x\"}"));
-        assert!(dir.path().join("explain/0000000000000007.json").exists());
+        let saved = dir.path().join("explain/0000000000000007.json");
+        assert!(saved.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode(&dir.path().join("explain")), 0o700);
+            assert_eq!(mode(&saved), 0o600);
+        }
         cache.put(7, "newer");
         assert_eq!(cache.get(7).as_deref(), Some("newer"));
     }

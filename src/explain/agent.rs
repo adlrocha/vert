@@ -2,7 +2,9 @@
 //! login, subscription, model and settings are used as they are.
 //!
 //! Every agent gets the prompt on standard input, runs in the change's
-//! checkout with only read-only tools, and answers on standard output.
+//! checkout and answers on standard output. Claude Code, Codex and pi are
+//! limited to read-only tools; a custom command runs unconfined, with the
+//! user's own permissions.
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -19,6 +21,9 @@ const POLL: Duration = Duration::from_millis(100);
 /// How long the output of an agent that exited is still awaited after the
 /// deadline.
 const GRACE: Duration = Duration::from_millis(500);
+/// Most bytes kept from each of an agent's output streams; an answer past
+/// this is not one vert can use.
+const MAX_OUTPUT: usize = 16 << 20;
 /// Most characters of an agent's error output repeated to the user.
 const ERROR_CHARS: usize = 400;
 
@@ -78,8 +83,8 @@ impl Agent {
         }
     }
 
-    /// The command that runs the agent non-interactively with read-only tools,
-    /// on `model` when given (else the agent's own default). A custom command
+    /// The command that runs the agent non-interactively (Claude Code, Codex
+    /// and pi with read-only tools; a custom command unconfined), on `model` when given (else the agent's own default). A custom command
     /// gets the model in the `VERT_EXPLAIN_MODEL` environment variable.
     ///
     /// ```
@@ -244,8 +249,11 @@ pub fn run(
     timeout: Duration,
 ) -> Result<String, RunError> {
     let name = agent.name().to_owned();
-    let mut child = agent
-        .command(model)
+    let mut command = agent.command(model);
+    // Its own process group, so a timeout stops whatever the agent started.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -272,6 +280,7 @@ pub fn run(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() >= deadline => {
+                kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(timed_out());
@@ -288,24 +297,34 @@ pub fn run(
     // A child the agent left behind can hold the pipes open after it exits,
     // so reading them is bounded by the same deadline (plus a moment for the
     // last bytes of an agent that finished just in time).
-    let collect = |rx: Option<Receiver<String>>| -> Result<String, RunError> {
+    let collect = |rx: Option<Receiver<(String, bool)>>| -> Result<(String, bool), RunError> {
         let Some(rx) = rx else {
-            return Ok(String::new());
+            return Ok((String::new(), false));
         };
         let wait = deadline
             .saturating_duration_since(Instant::now())
             .max(GRACE);
         match rx.recv_timeout(wait) {
             Ok(text) => Ok(text),
-            Err(RecvTimeoutError::Disconnected) => Ok(String::new()),
+            Err(RecvTimeoutError::Disconnected) => Ok((String::new(), false)),
             Err(RecvTimeoutError::Timeout) => Err(timed_out()),
         }
     };
-    let out = collect(stdout)?;
+    // Whatever the agent left behind goes with it, so nothing keeps running
+    // (and spending the user's subscription) after vert stopped listening.
+    kill_group(child.id());
+    let (out, cut) = collect(stdout)?;
+    if cut {
+        return Err(RunError::Failed {
+            name,
+            status: status.to_string(),
+            output: format!("printed more than {} MiB", MAX_OUTPUT >> 20),
+        });
+    }
     if status.success() {
         return Ok(out);
     }
-    let err = collect(stderr)?;
+    let (err, _) = collect(stderr)?;
     let text = if err.trim().is_empty() { out } else { err };
     Err(RunError::Failed {
         name,
@@ -315,15 +334,38 @@ pub fn run(
 }
 
 /// Reads a pipe to the end on its own thread, so neither pipe can fill up
-/// and block the agent; the text arrives on the returned channel.
-fn drain(mut pipe: impl Read + Send + 'static) -> Receiver<String> {
+/// and block the agent. The text arrives on the returned channel, with
+/// whether it was cut at [`MAX_OUTPUT`] bytes (the rest is read and dropped).
+fn drain(pipe: impl Read + Send + 'static) -> Receiver<(String, bool)> {
+    drain_up_to(pipe, MAX_OUTPUT)
+}
+
+fn drain_up_to(mut pipe: impl Read + Send + 'static, max: usize) -> Receiver<(String, bool)> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = pipe.read_to_end(&mut bytes);
-        let _ = tx.send(String::from_utf8_lossy(&bytes).into_owned());
+        let limit = u64::try_from(max).unwrap_or(u64::MAX);
+        let _ = pipe.by_ref().take(limit).read_to_end(&mut bytes);
+        let cut = std::io::copy(&mut pipe, &mut std::io::sink()).is_ok_and(|n| n > 0);
+        let _ = tx.send((String::from_utf8_lossy(&bytes).into_owned(), cut));
     });
     rx
+}
+
+/// Stops every process in the group `pid` leads. Best effort: the group is
+/// usually gone already.
+fn kill_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 /// The last lines of `text`, up to [`ERROR_CHARS`] characters, on one line.
@@ -483,21 +525,55 @@ mod tests {
             "stdout when stderr is empty: {quiet}"
         );
 
+        // A child left behind in the agent's group is stopped with it.
         let start = Instant::now();
         let left = run(
             &sh("sleep 30 & echo partial"),
             None,
             dir.path(),
             "",
+            Duration::from_secs(10),
+        )
+        .expect("answered");
+        assert_eq!(left, "partial\n");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        // One that left the group and holds stdout open runs into the timeout
+        // (`setsid` is Linux-only).
+        let has_setsid = std::env::var_os("PATH").is_some_and(|p| on_path("setsid", &p));
+        let start = Instant::now();
+        let escaped = run(
+            &sh(if has_setsid {
+                "setsid sleep 30 & echo partial"
+            } else {
+                "sleep 30"
+            }),
+            None,
+            dir.path(),
+            "",
             Duration::from_millis(300),
         )
-        .expect_err("a leftover child holds stdout open")
+        .expect_err("stdout held open")
         .to_string();
-        assert!(left.contains("didn't answer"), "{left}");
+        assert!(escaped.contains("didn't answer"), "{escaped}");
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "the timeout holds"
         );
+        // The leftover child was stopped with the agent.
+        let marker = dir.path().join("still-running");
+        let _ = run(
+            &sh("(sleep 1; touch still-running) & sleep 30"),
+            None,
+            dir.path(),
+            "",
+            Duration::from_millis(200),
+        );
+        thread::sleep(Duration::from_millis(1500));
+        assert!(!marker.exists(), "the whole group was stopped");
 
         let slow = run(
             &sh("sleep 5"),
@@ -528,6 +604,25 @@ mod tests {
             run(&sh("echo ok"), None, dir.path(), &"x".repeat(1 << 20), secs).expect("ok"),
             "ok\n"
         );
+    }
+
+    #[test]
+    fn output_past_the_cap_is_dropped_and_reported() {
+        let (text, cut) = drain_up_to(&b"abcdef"[..], 4).recv().expect("drained");
+        assert_eq!((text.as_str(), cut), ("abcd", true));
+        let (text, cut) = drain_up_to(&b"abcd"[..], 4).recv().expect("drained");
+        assert_eq!((text.as_str(), cut), ("abcd", false));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let big = run(
+            &sh("head -c 17000000 /dev/zero"),
+            None,
+            dir.path(),
+            "",
+            Duration::from_secs(20),
+        )
+        .expect_err("too much")
+        .to_string();
+        assert!(big.ends_with("printed more than 16 MiB"), "{big}");
     }
 
     #[test]

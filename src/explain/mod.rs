@@ -350,9 +350,14 @@ impl Explanation {
 }
 
 /// Agent text made safe to draw: trimmed, with tabs expanded and control
-/// characters (escape sequences included) replaced.
+/// characters (escape sequences included) replaced, line by line so its
+/// paragraphs survive.
 fn clean(text: &str) -> String {
-    crate::highlight::sanitize(text.trim())
+    text.trim()
+        .lines()
+        .map(crate::highlight::sanitize)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn diagram(raw: RawDiagram, resolve: &mut Resolver<'_>) -> Option<Diagram> {
@@ -597,7 +602,7 @@ impl Explainer {
             &prompt,
             self.timeout,
         )
-        .map_err(|e| crate::jobs::describe(&e))?;
+        .map_err(|e| e.to_string())?;
         let explanation = Explanation::validate(&out, files)
             .map_err(|e| format!("{}: {e}", self.agent.name()))?;
         if let Some(cache) = &self.cache {
@@ -938,10 +943,12 @@ mod tests {
 
     #[test]
     fn agent_text_cannot_reach_the_terminal_raw() {
-        let answer =
-            r#"{"intent": "\u001b[31mred\u001b[0m\tend", "steps": [{"title": " a\u0007b "}]}"#;
+        let answer = r#"{"intent": "\u001b[31mred\u001b[0m\tend\n\nNext.\r\n", "steps": [{"title": " a\u0007b "}]}"#;
         let e = Explanation::validate(answer, &sample()).expect("valid");
-        assert_eq!(e.intent, "·[31mred·[0m    end");
+        assert_eq!(
+            e.intent, "·[31mred·[0m    end\n\nNext.",
+            "paragraphs survive"
+        );
         assert_eq!(e.steps[0].title, "a·b");
     }
 
