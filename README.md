@@ -51,9 +51,10 @@ work in parallel.
   (Claude Code, Codex or pi) explains the change for a human reviewer: its
   intent, the order to read it in, a small diagram when a picture helps
   (components, states, a flow or data), and what deserves a second look.
-  Every step and box points at hunks, and `⏎` jumps to them. vert checks
-  each pointer against the real diff and lists the hunks nothing explains,
-  which is where to look first. See [Explanations](#explanations).
+  Steps and boxes point at the hunks the agent placed in the diff, and `⏎`
+  jumps to them. vert checks each pointer against the real diff, drops the
+  ones that name nothing, and lists the hunks nothing explains, which is
+  where to look first. See [Explanations](#explanations).
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter. `e` opens `$VISUAL`/`$EDITOR` at that line
   (vim, nvim, helix, VS Code, Cursor, …).
@@ -131,12 +132,15 @@ update notice. `--no-network` turns all GitHub access off.
 agent's own CLI, so it uses whatever login, subscription, model and settings
 you already have:
 
-| Agent                     | Runs as                                                       |
-| ------------------------- | ------------------------------------------------------------- |
-| Claude Code (`claude`)    | `claude -p --tools Read,Grep,Glob`                             |
-| Codex (`codex`)           | `codex exec --sandbox read-only`                              |
-| pi (`pi`)                 | `pi -p --tools read,grep,find,ls`                             |
-| your own (`--explain-cmd`)| `sh -c CMD`                                                   |
+| Agent                      | Runs as                                                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------- |
+| Claude Code (`claude`)     | `claude -p --output-format text --no-session-persistence --tools Read,Grep,Glob`         |
+| Codex (`codex`)            | `codex exec --sandbox read-only --skip-git-repo-check --ephemeral --color never -`       |
+| pi (`pi`)                  | `pi -p --no-session --tools read,grep,find,ls`                                           |
+| your own (`--explain-cmd`) | `sh -c CMD`                                                                              |
+
+These are the full commands; `--explain-model` adds `--model MODEL` before
+Codex's final `-`, or at the end for the others. No session is saved.
 
 By default vert uses the first of those it finds on `PATH`; `--explain-agent`
 picks one. Each agent uses its own default model unless `--explain-model`

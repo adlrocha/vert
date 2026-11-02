@@ -222,6 +222,43 @@ fn worktree_entry_comes_first_and_refreshes_open_detail() {
 }
 
 #[test]
+fn worktree_diff_under_an_explanation_stays_live() {
+    let mut app = loaded();
+    let wt = entry(crate::git::feed::WORKTREE_ID, 9_999, &["src/live.rs"]);
+    app.update(Msg::Worktree(Ok(Some(wt.clone()))));
+    app.feed.pos.selected = 0;
+    app.update(Msg::Diff {
+        entry: Box::new(wt.clone()),
+        result: Ok(vec![file_diff("src/a.rs")]),
+        refresh: false,
+    });
+    app.set_explainer(&Ok(crate::app::pi_for_tests()));
+    app.update(ch('x'));
+    assert!(matches!(app.views.last(), Some(View::Explain(_))));
+
+    app.update(Msg::Changed(BTreeSet::from([Change::Workdir])));
+    let effects = app.update(Msg::Worktree(Ok(Some(wt.clone()))));
+    assert!(
+        matches!(&effects[..], [Effect::LoadDiff { refresh: true, .. }]),
+        "{effects:?}"
+    );
+    app.update(Msg::Diff {
+        entry: Box::new(wt),
+        result: Ok(vec![file_diff("src/a.rs"), file_diff("src/live.rs")]),
+        refresh: true,
+    });
+    assert!(
+        matches!(app.views.last(), Some(View::Explain(_))),
+        "still on top"
+    );
+    app.update(key(KeyCode::Esc));
+    let Some(View::Detail(d)) = app.views.last() else {
+        panic!("detail")
+    };
+    assert_eq!(d.files.len(), 2, "the diff underneath was refreshed");
+}
+
+#[test]
 fn feed_navigation() {
     let mut app = loaded();
     app.update(ch('j'));

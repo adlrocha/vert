@@ -390,6 +390,25 @@ pub enum View {
     Explain(Box<ExplainView>),
 }
 
+impl View {
+    /// The diff, when this view is one.
+    #[must_use]
+    pub fn as_detail(&self) -> Option<&DetailView> {
+        match self {
+            Self::Detail(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The diff, when this view is one, to change.
+    pub fn as_detail_mut(&mut self) -> Option<&mut DetailView> {
+        match self {
+            Self::Detail(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
 /// Inputs to [`App::update`].
 #[derive(Debug)]
 pub enum Msg {
@@ -775,7 +794,9 @@ impl App {
                 self.feed.worktree = worktree;
                 self.reselect(selected.as_deref());
                 self.recompute_hotspots();
-                if let Some(View::Detail(d)) = self.views.last()
+                // The diff stays live under views stacked on it (an
+                // explanation), not only while it is on top.
+                if let Some(d) = self.views.iter().rev().find_map(View::as_detail)
                     && d.entry.is_own_worktree()
                     && let Some(wt) = &self.feed.worktree
                 {
@@ -876,7 +897,7 @@ impl App {
     /// Replaces the diff of the open detail view if it still shows `entry`.
     fn refresh_detail(&mut self, entry: Entry, files: Vec<FileDiff>) {
         let max = self.max_highlight;
-        if let Some(View::Detail(d)) = self.views.last_mut()
+        if let Some(d) = self.views.iter_mut().rev().find_map(View::as_detail_mut)
             && d.entry.id == entry.id
         {
             let current = d.files.get(d.pos.selected).map(|f| f.stat.path.clone());
