@@ -8,6 +8,7 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,9 @@ use thiserror::Error;
 
 /// How often a running agent is checked for having finished.
 const POLL: Duration = Duration::from_millis(100);
+/// How long the output of an agent that exited is still awaited after the
+/// deadline.
+const GRACE: Duration = Duration::from_millis(500);
 /// Most characters of an agent's error output repeated to the user.
 const ERROR_CHARS: usize = 400;
 
@@ -56,6 +60,21 @@ impl Agent {
             Self::Codex => "codex",
             Self::Pi => "pi",
             Self::Custom(_) => "--explain-cmd",
+        }
+    }
+
+    /// Identifies the agent in cached answers; stable across releases.
+    ///
+    /// ```
+    /// use vert::explain::agent::Agent;
+    /// assert_eq!(Agent::Pi.key(), "pi");
+    /// assert_eq!(Agent::Custom("llm".into()).key(), "cmd:llm");
+    /// ```
+    #[must_use]
+    pub fn key(&self) -> String {
+        match self {
+            Self::Custom(cmd) => format!("cmd:{cmd}"),
+            agent => agent.name().to_owned(),
         }
     }
 
@@ -244,29 +263,49 @@ pub fn run(
     }
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
-    let start = Instant::now();
+    let deadline = Instant::now() + timeout;
+    let timed_out = || RunError::TimedOut {
+        name: name.clone(),
+        secs: timeout.as_secs(),
+    };
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if start.elapsed() >= timeout => {
+            Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(RunError::TimedOut {
-                    name,
-                    secs: timeout.as_secs(),
-                });
+                return Err(timed_out());
             }
             Ok(None) => thread::sleep(POLL),
-            Err(source) => return Err(RunError::Wait { name, source }),
+            Err(source) => {
+                return Err(RunError::Wait {
+                    name: name.clone(),
+                    source,
+                });
+            }
         }
     };
-    let collect =
-        |h: Option<thread::JoinHandle<String>>| h.and_then(|h| h.join().ok()).unwrap_or_default();
-    let out = collect(stdout);
+    // A child the agent left behind can hold the pipes open after it exits,
+    // so reading them is bounded by the same deadline (plus a moment for the
+    // last bytes of an agent that finished just in time).
+    let collect = |rx: Option<Receiver<String>>| -> Result<String, RunError> {
+        let Some(rx) = rx else {
+            return Ok(String::new());
+        };
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(GRACE);
+        match rx.recv_timeout(wait) {
+            Ok(text) => Ok(text),
+            Err(RecvTimeoutError::Disconnected) => Ok(String::new()),
+            Err(RecvTimeoutError::Timeout) => Err(timed_out()),
+        }
+    };
+    let out = collect(stdout)?;
     if status.success() {
         return Ok(out);
     }
-    let err = collect(stderr);
+    let err = collect(stderr)?;
     let text = if err.trim().is_empty() { out } else { err };
     Err(RunError::Failed {
         name,
@@ -276,13 +315,15 @@ pub fn run(
 }
 
 /// Reads a pipe to the end on its own thread, so neither pipe can fill up
-/// and block the agent.
-fn drain(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<String> {
+/// and block the agent; the text arrives on the returned channel.
+fn drain(mut pipe: impl Read + Send + 'static) -> Receiver<String> {
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = pipe.read_to_end(&mut bytes);
-        String::from_utf8_lossy(&bytes).into_owned()
-    })
+        let _ = tx.send(String::from_utf8_lossy(&bytes).into_owned());
+    });
+    rx
 }
 
 /// The last lines of `text`, up to [`ERROR_CHARS`] characters, on one line.
@@ -440,6 +481,22 @@ mod tests {
         assert!(
             quiet.ends_with("only stdout"),
             "stdout when stderr is empty: {quiet}"
+        );
+
+        let start = Instant::now();
+        let left = run(
+            &sh("sleep 30 & echo partial"),
+            None,
+            dir.path(),
+            "",
+            Duration::from_millis(300),
+        )
+        .expect_err("a leftover child holds stdout open")
+        .to_string();
+        assert!(left.contains("didn't answer"), "{left}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the timeout holds"
         );
 
         let slow = run(

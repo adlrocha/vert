@@ -83,12 +83,7 @@ fn run() -> Result<()> {
     );
     app.set_refresh(config.refresh());
     let explainer = config.explainer(std::env::var_os("PATH").as_deref());
-    app.set_explainer(
-        explainer
-            .as_ref()
-            .map(vert::explain::Explainer::label)
-            .map_err(Clone::clone),
-    );
+    app.set_explainer(&explainer);
     let _watch = if config.no_watch {
         app.watch = WatchStatus::Disabled;
         None

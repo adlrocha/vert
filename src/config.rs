@@ -105,7 +105,8 @@ pub struct Config {
     pub explain_agent: Choice,
 
     /// Model the agent explains with, in the agent's own naming (passed as
-    /// its `--model`); unset uses the agent's default.
+    /// its `--model`, or to `--explain-cmd` in `VERT_EXPLAIN_MODEL`); unset
+    /// uses the agent's default.
     #[arg(long, value_name = "MODEL", env = "VERT_EXPLAIN_MODEL")]
     pub explain_model: Option<String>,
 
@@ -310,7 +311,18 @@ mod tests {
     #[test]
     fn explanations_pick_an_agent_unless_offline() {
         let config =
-            Config::parse_from(["vert", "--explain-cmd", "llm", "--explain-max-diff-kb", "2"]);
+            // Explicit flags, so `VERT_EXPLAIN_*` in the shell doesn't matter.
+            Config::parse_from([
+                "vert",
+                "--explain-cmd",
+                "llm",
+                "--explain-max-diff-kb",
+                "2",
+                "--explain-timeout-secs",
+                "600",
+                "--explain-model",
+                "",
+            ]);
         let ex = config.explainer(None).expect("custom command");
         assert_eq!(ex.agent, agent::Agent::Custom("llm".to_owned()));
         assert_eq!(ex.max_diff_bytes, 2048);
@@ -326,7 +338,7 @@ mod tests {
         assert_eq!(model(" opus "), Some("opus".to_owned()));
         assert_eq!(model(" "), None, "blank means the agent's default");
 
-        let none = Config::parse_from(["vert", "--explain-agent", "codex"])
+        let none = Config::parse_from(["vert", "--explain-agent", "codex", "--explain-cmd", ""])
             .explainer(None)
             .expect_err("codex is not on an empty PATH");
         assert!(none.contains("codex"), "{none}");

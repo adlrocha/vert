@@ -15,7 +15,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 pub use branches::{
     BranchRemoval, BranchesState, PullStatus, Refresh, Removal, Row, RowFilter, pull_entry,
 };
-pub use explain::{ExplainState, ExplainView, Item, Pane, Status, items, targets};
+#[cfg(test)]
+pub(crate) use explain::pi_for_tests;
+pub use explain::{ExplainState, ExplainView, Item, Pane, Status, items, row_pointer, targets};
 
 use crate::explain::Answer;
 use crate::git::RepoInfo;

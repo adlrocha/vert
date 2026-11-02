@@ -948,7 +948,7 @@ mod render_tests {
     /// asked for: the app, the diff, and the request's key.
     fn explaining() -> (TestRepo, App, Vec<git::diff::FileDiff>, u64) {
         let (t, mut app) = real_app();
-        app.set_explainer(Ok("pi".to_owned()));
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
         let entry = app.feed.commits[0].clone();
         let files = git::diff::load(&t.repo, entry.target).expect("diff");
         app.update(Msg::Diff {

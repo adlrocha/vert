@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Effect, Focus, ListPos, View, half_page, max_scroll};
-use crate::explain::{Answer, Explanation, Ref, diff_key, tree};
+use crate::explain::{Answer, Diagram, Explainer, Explanation, Ref, diff_key, tree};
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
 use crate::ui::detail::build_diff;
@@ -131,8 +131,7 @@ pub fn targets(e: &Explanation, item: Item) -> Vec<&Ref> {
         Item::Overview => e.diagram.as_ref().map_or_else(Vec::new, |d| {
             tree::layout(d)
                 .iter()
-                .filter(|row| !row.repeat)
-                .filter_map(|row| d.nodes[row.node].refs.first())
+                .filter_map(|row| row_pointer(d, row))
                 .collect()
         }),
         Item::Step(i) => e
@@ -142,6 +141,17 @@ pub fn targets(e: &Explanation, item: Item) -> Vec<&Ref> {
         Item::Concerns => e.concerns.iter().flat_map(|n| &n.refs).collect(),
         Item::Unexplained => e.unexplained.iter().collect(),
     }
+}
+
+/// The code pointer a diagram row offers: the first ref of a node drawn for
+/// the first time. The overview's targets and the drawn highlight both use
+/// it, so they stay in step.
+#[must_use]
+pub fn row_pointer<'a>(d: &'a Diagram, row: &tree::Row) -> Option<&'a Ref> {
+    if row.repeat {
+        return None;
+    }
+    d.nodes[row.node].refs.first()
 }
 
 /// Explanations: which agent answers, and the answers so far.
@@ -159,8 +169,13 @@ pub struct ExplainState {
 
 impl App {
     /// Sets the agent explanations come from, or why there is none.
-    pub fn set_explainer(&mut self, agent: Result<String, String>) {
-        self.explain.agent = Some(agent);
+    pub fn set_explainer(&mut self, explainer: &Result<Explainer, String>) {
+        self.explain.agent = Some(
+            explainer
+                .as_ref()
+                .map(Explainer::label)
+                .map_err(Clone::clone),
+        );
     }
 
     /// Opens the explain view for the change in the open detail view.
@@ -340,6 +355,18 @@ impl App {
             .copied()
             .unwrap_or(0);
         d.scroll = start.min(max_scroll(d.rendered.len(), d.height));
+    }
+}
+
+/// An explainer that asks pi, for tests.
+#[cfg(test)]
+pub(crate) fn pi_for_tests() -> Explainer {
+    Explainer {
+        agent: crate::explain::agent::Agent::Pi,
+        model: None,
+        timeout: std::time::Duration::from_secs(1),
+        max_diff_bytes: 1,
+        cache: None,
     }
 }
 
@@ -566,7 +593,7 @@ mod tests {
         let mut a = app();
         assert_eq!(press(&mut a, KeyCode::Char('x')), []);
         assert!(a.notice.as_deref().is_some_and(|n| n.contains("no agent")));
-        a.set_explainer(Err("network access is off".to_owned()));
+        a.set_explainer(&Err("network access is off".to_owned()));
         press(&mut a, KeyCode::Char('x'));
         assert_eq!(
             a.notice.as_deref(),
@@ -574,7 +601,7 @@ mod tests {
         );
         assert_eq!(a.views.len(), 1, "still on the diff");
 
-        a.set_explainer(Ok("pi".to_owned()));
+        a.set_explainer(&Ok(pi_for_tests()));
         a.update(Msg::Diff {
             entry: Box::new(change("empty")),
             result: Ok(Vec::new()),
@@ -590,7 +617,7 @@ mod tests {
     #[test]
     fn asks_once_shows_the_answer_and_jumps_to_code() {
         let mut a = app();
-        a.set_explainer(Ok("pi".to_owned()));
+        a.set_explainer(&Ok(pi_for_tests()));
         let key = asked(&press(&mut a, KeyCode::Char('x')), false);
         assert_eq!(view(&a).status, Status::Asking(100));
         assert_eq!(view(&a).agent, "pi");
@@ -643,7 +670,7 @@ mod tests {
     #[test]
     fn answers_are_reused_and_can_be_asked_again() {
         let mut a = app();
-        a.set_explainer(Ok("pi".to_owned()));
+        a.set_explainer(&Ok(pi_for_tests()));
         let key = asked(&press(&mut a, KeyCode::Char('x')), false);
         press(&mut a, KeyCode::Esc);
         a.update(Msg::Explained {
@@ -684,7 +711,7 @@ mod tests {
     #[test]
     fn keys_move_scroll_and_switch_panes() {
         let mut a = app();
-        a.set_explainer(Ok("pi".to_owned()));
+        a.set_explainer(&Ok(pi_for_tests()));
         let key = asked(&press(&mut a, KeyCode::Char('x')), false);
         a.update(Msg::Explained {
             key,
@@ -760,7 +787,7 @@ mod tests {
     #[test]
     fn jumping_without_a_diff_underneath_just_closes() {
         let mut a = app();
-        a.set_explainer(Ok("pi".to_owned()));
+        a.set_explainer(&Ok(pi_for_tests()));
         let key = asked(&press(&mut a, KeyCode::Char('x')), false);
         a.update(Msg::Explained {
             key,

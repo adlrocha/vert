@@ -158,8 +158,9 @@ export VERT_EXPLAIN_MODEL=anthropic/claude-haiku-5-5  # optional; agent's defaul
 ```
 
 The agent gets the prompt on standard input and runs in the
-checkout the change belongs to, with read-only tools, so it can open the
-surrounding code but not change it. vert sends it the change's message and
+checkout the change belongs to. Claude Code, Codex and pi get read-only
+tools, so they can open the surrounding code but not change it; a custom
+command runs with your own permissions, so it can. vert sends it the change's message and
 diff, with every hunk numbered, and asks for JSON back. A custom command
 must read the prompt on stdin and print that JSON.
 

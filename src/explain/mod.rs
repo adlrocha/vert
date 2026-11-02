@@ -307,7 +307,7 @@ impl Explanation {
         let json = extract_json(answer).ok_or_else(|| ParseError::NoJson(snippet(answer)))?;
         let raw: RawExplanation =
             serde_json::from_str(json).map_err(|e| ParseError::Shape(e.to_string()))?;
-        let intent = raw.intent.trim().to_owned();
+        let intent = clean(&raw.intent);
         if intent.is_empty() {
             return Err(ParseError::NoIntent);
         }
@@ -317,8 +317,8 @@ impl Explanation {
             .iter()
             .filter(|s| !s.title.trim().is_empty() || !s.detail.trim().is_empty())
             .map(|s| Step {
-                title: s.title.trim().to_owned(),
-                detail: s.detail.trim().to_owned(),
+                title: clean(&s.title),
+                detail: clean(&s.detail),
                 refs: resolve.many(&s.refs),
             })
             .collect();
@@ -328,7 +328,7 @@ impl Explanation {
             .iter()
             .filter(|n| !n.text.trim().is_empty())
             .map(|n| Note {
-                text: n.text.trim().to_owned(),
+                text: clean(&n.text),
                 refs: resolve.many(&n.refs),
             })
             .collect();
@@ -349,6 +349,12 @@ impl Explanation {
     }
 }
 
+/// Agent text made safe to draw: trimmed, with tabs expanded and control
+/// characters (escape sequences included) replaced.
+fn clean(text: &str) -> String {
+    crate::highlight::sanitize(text.trim())
+}
+
 fn diagram(raw: RawDiagram, resolve: &mut Resolver<'_>) -> Option<Diagram> {
     let mut ids: HashMap<String, usize> = HashMap::new();
     let mut nodes = Vec::new();
@@ -360,7 +366,7 @@ fn diagram(raw: RawDiagram, resolve: &mut Resolver<'_>) -> Option<Diagram> {
         ids.insert(id.to_owned(), nodes.len());
         let label = n.label.trim();
         nodes.push(Node {
-            label: if label.is_empty() { id } else { label }.to_owned(),
+            label: clean(if label.is_empty() { id } else { label }),
             change: Change::from(n.change.clone()),
             refs: resolve.many(&n.refs),
         });
@@ -375,14 +381,14 @@ fn diagram(raw: RawDiagram, resolve: &mut Resolver<'_>) -> Option<Diagram> {
             Some(Edge {
                 from: *ids.get(e.from.trim())?,
                 to: *ids.get(e.to.trim())?,
-                label: e.label.trim().to_owned(),
+                label: clean(&e.label),
                 change: Change::from(e.change),
             })
         })
         .collect();
     Some(Diagram {
-        kind: raw.kind.trim().to_owned(),
-        title: raw.title.trim().to_owned(),
+        kind: clean(&raw.kind),
+        title: clean(&raw.title),
         nodes,
         edges,
     })
@@ -569,9 +575,11 @@ impl Explainer {
         fresh: bool,
     ) -> Result<Answer, String> {
         let prompt = prompt(entry, files, self.max_diff_bytes);
-        let agent = format!("{:?}", self.agent);
         let model = self.model.as_deref().unwrap_or_default();
-        let key = fingerprint([agent.as_str(), model, prompt.as_str()]);
+        // The prompt leaves out hunk bodies past the budget, so the full
+        // diff is part of the key too.
+        let diff = format!("{:016x}", diff_key(entry, files));
+        let key = fingerprint([&self.agent.key(), model, &diff, prompt.as_str()]);
         if !fresh
             && let Some(cache) = &self.cache
             && let Some(saved) = cache.get(key)
@@ -898,6 +906,43 @@ mod tests {
             hunks: Vec::new(),
         };
         assert!(prompt(&wt, &[deleted], 100).contains("(deleted"));
+    }
+
+    #[test]
+    fn diffs_cut_from_the_prompt_still_get_their_own_answers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ex = Explainer {
+            agent: agent::Agent::Custom(
+                r#"cat > /dev/null; printf '{"intent": "%s"}' "$(cat intent)""#.to_owned(),
+            ),
+            model: None,
+            timeout: Duration::from_secs(10),
+            // Too small for any hunk body: the prompts below are identical.
+            max_diff_bytes: 1,
+            cache: Some(cache::Cache::new(dir.path().join("cache"))),
+        };
+        let mut edited = sample();
+        edited[0].hunks[0].lines[1].content = "newer".to_owned();
+        assert_eq!(prompt(&entry(), &sample(), 1), prompt(&entry(), &edited, 1));
+        let ask = |files: &[FileDiff], intent: &str| {
+            std::fs::write(dir.path().join("intent"), intent).expect("write");
+            ex.explain(&entry(), files, dir.path(), false)
+                .expect("explained")
+        };
+        assert!(!ask(&sample(), "first").cached);
+        let second = ask(&edited, "second");
+        assert!(!second.cached, "a different diff is asked about afresh");
+        assert_eq!(second.explanation.intent, "second");
+        assert!(ask(&sample(), "unused").cached);
+    }
+
+    #[test]
+    fn agent_text_cannot_reach_the_terminal_raw() {
+        let answer =
+            r#"{"intent": "\u001b[31mred\u001b[0m\tend", "steps": [{"title": " a\u0007b "}]}"#;
+        let e = Explanation::validate(answer, &sample()).expect("valid");
+        assert_eq!(e.intent, "·[31mred·[0m    end");
+        assert_eq!(e.steps[0].title, "a·b");
     }
 
     #[test]

@@ -59,7 +59,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, v: &mut ExplainView, now: i64, ti
                 Line::raw(""),
             ];
             lines.extend(
-                wrap(why, w)
+                wrap(&crate::highlight::sanitize(why), w)
                     .into_iter()
                     .map(|l| Line::from(Span::styled(format!("  {l}"), theme::muted()))),
             );
@@ -428,7 +428,7 @@ fn diagram(out: &mut Detail, d: &Diagram) {
                 Span::styled(format!("  {text}"), arrow_style),
             ]);
         }
-        let target = !row.repeat && !node.refs.is_empty();
+        let target = crate::app::row_pointer(d, &row).is_some();
         let selected = target && out.target();
         let mut spans = Vec::new();
         // The tree lines stay muted; the arrow head takes the arrow's colour.
