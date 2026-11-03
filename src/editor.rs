@@ -147,6 +147,6 @@ mod tests {
     #[test]
     fn editor_env_fallback() {
         // Only checks that some editor is always produced.
-        assert!(!editor_from_env().is_empty());
+        assert_ne!(editor_from_env(), "");
     }
 }

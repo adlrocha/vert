@@ -298,11 +298,7 @@ mod tests {
     #[test]
     fn empty_repo_has_empty_feed() {
         let t = TestRepo::new();
-        assert!(
-            load_commits(&t.repo, 10, &labeler())
-                .expect("load")
-                .is_empty()
-        );
+        assert_eq!(load_commits(&t.repo, 10, &labeler()).expect("load"), []);
         assert!(load_worktree(&t.repo, &labeler(), 0).expect("wt").is_none());
     }
 

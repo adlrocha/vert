@@ -158,13 +158,13 @@ fn loads_coalesce_while_in_flight() {
         app.update(Msg::Changed(workdir.clone())).is_empty(),
         "worktree already loading"
     );
-    assert!(app.update(Msg::Changed(workdir)).is_empty());
+    assert_eq!(app.update(Msg::Changed(workdir)), []);
     assert_eq!(
         app.update(Msg::Worktree(Ok(None))),
         [Effect::LoadWorktree],
         "one follow-up"
     );
-    assert!(app.update(Msg::Worktree(Ok(None))).is_empty());
+    assert_eq!(app.update(Msg::Worktree(Ok(None))), []);
     assert!(
         app.update(Msg::Changed(BTreeSet::from([Change::Refs])))
             .iter()
@@ -331,7 +331,7 @@ fn tabs_help_and_quit() {
         KeyModifiers::NONE,
         KeyEventKind::Release,
     );
-    assert!(app.update(Msg::Key(release)).is_empty());
+    assert_eq!(app.update(Msg::Key(release)), []);
     let tab_names: Vec<_> = Tab::ALL.iter().map(|t| t.title()).collect();
     assert_eq!(tab_names, ["Feed", "Hotspots", "Search", "Branches"]);
 }
@@ -372,7 +372,7 @@ fn hotspots_filter_feed_and_open_files() {
     app.update(ch('m'));
     assert_eq!(app.hotspots.grouping, Grouping::Modules);
     assert_eq!(app.hotspots.spots[0].key, "src");
-    assert!(app.update(ch('o')).is_empty());
+    assert_eq!(app.update(ch('o')), []);
     assert!(app.notice.is_some());
     app.update(ch('j'));
     app.update(key(KeyCode::Enter));
@@ -419,7 +419,7 @@ fn file_search_flow() {
     app.update(ctrl('p'));
     assert_eq!(app.search.pos.selected, 0);
     // 'q' and digits are typed, not commands, while searching.
-    assert!(app.update(ch('q')).is_empty());
+    assert_eq!(app.update(ch('q')), []);
     assert_eq!(app.search.query, "q");
     app.update(ch('/'));
     assert_eq!(app.search.query, "q/");
@@ -493,7 +493,7 @@ fn text_search_discards_stale_results() {
     app.update(key(KeyCode::Backspace));
     app.update(key(KeyCode::Backspace));
     assert!(!app.search.text_running);
-    assert!(app.search.text.matches.is_empty());
+    assert_eq!(app.search.text.matches, []);
     app.update(key(KeyCode::BackTab));
     assert_eq!(app.search.mode, SearchMode::Files);
 }
@@ -725,9 +725,9 @@ fn tab_cycle_and_ctrl_navigation() {
     assert_eq!(app.feed.pos.selected, 0);
     assert!(app.update(ch('z')).is_empty(), "unbound keys are ignored");
     app.update(ch('2'));
-    assert!(app.update(ch('z')).is_empty());
+    assert_eq!(app.update(ch('z')), []);
     app.update(ch('3'));
-    assert!(app.update(ctrl('x')).is_empty());
+    assert_eq!(app.update(ctrl('x')), []);
 }
 
 #[test]
@@ -735,16 +735,16 @@ fn empty_lists_ignore_actions() {
     let (mut app, _) = App::new(info(), 1, 1000, 0, false);
     app.update(Msg::Commits(Ok(Vec::new())));
     app.update(Msg::Worktree(Ok(None)));
-    assert!(app.update(key(KeyCode::Enter)).is_empty());
+    assert_eq!(app.update(key(KeyCode::Enter)), []);
     app.update(ch('n'));
     app.update(ch('2'));
-    assert!(app.update(key(KeyCode::Enter)).is_empty());
-    assert!(app.update(ch('o')).is_empty());
-    assert!(app.update(ch('e')).is_empty());
+    assert_eq!(app.update(key(KeyCode::Enter)), []);
+    assert_eq!(app.update(ch('o')), []);
+    assert_eq!(app.update(ch('e')), []);
     app.update(ch('3'));
     app.update(Msg::Files(Vec::new()));
-    assert!(app.update(key(KeyCode::Enter)).is_empty());
-    assert!(app.update(ctrl('e')).is_empty());
+    assert_eq!(app.update(key(KeyCode::Enter)), []);
+    assert_eq!(app.update(ctrl('e')), []);
 }
 
 #[test]
@@ -758,9 +758,9 @@ fn detail_view_edge_keys() {
         _ => panic!("detail"),
     };
     assert_eq!(focus(&app), Focus::Files);
-    assert!(app.update(ch('z')).is_empty());
+    assert_eq!(app.update(ch('z')), []);
     app.update(ch('l'));
-    assert!(app.update(ch('z')).is_empty());
+    assert_eq!(app.update(ch('z')), []);
     // Scrolling within the diff, then `N` returns to the hunk above.
     app.update(ch('J'));
     app.update(ch('J'));
@@ -781,7 +781,7 @@ fn file_view_ignores_unbound_keys() {
         marks: BTreeSet::new(),
         root: None,
     });
-    assert!(app.update(ch('z')).is_empty());
+    assert_eq!(app.update(ch('z')), []);
     app.views.push(View::File(Box::new(FileView {
         path: String::new(),
         language: String::new(),
