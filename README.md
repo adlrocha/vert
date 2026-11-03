@@ -5,7 +5,9 @@ live, labelled feed of a git repository's changes, uncommitted work
 included. From the feed you can open syntax-highlighted diffs, search files
 and contents, and see where change is concentrating. The Branches tab lists
 every worktree, branch and open pull request, so you can follow agents that
-work in parallel.
+work in parallel. Press `x` on any diff and the coding agent you already use
+(Claude Code, Codex or pi) explains it: what it is for, what order to read it
+in, and what deserves a second look.
 
 ```
  ◆ vert │ nibble  ⎇ main                                              ✦ 2 new  ● live
@@ -128,58 +130,95 @@ update notice. `--no-network` turns all GitHub access off.
 
 ### Explanations
 
-`x` in a diff asks a coding agent to explain the change. vert runs the
-agent's own CLI, so it uses whatever login, subscription, model and settings
-you already have:
+Press `x` in any diff (a commit, the working tree, a branch or a pull
+request) and a coding agent explains the change for a human reviewer. vert
+doesn't call a model itself. It runs the agent CLI you already have, so the
+agent's login, subscription and settings apply, and vert needs no API key.
 
-| Agent                      | Runs as                                                                                  |
-| -------------------------- | ---------------------------------------------------------------------------------------- |
-| Claude Code (`claude`)     | `claude -p --output-format text --no-session-persistence --tools Read,Grep,Glob`         |
-| Codex (`codex`)            | `codex exec --sandbox read-only --skip-git-repo-check --ephemeral --color never -`       |
-| pi (`pi`)                  | `pi -p --no-session --tools read,grep,find,ls`                                           |
-| your own (`--explain-cmd`) | `sh -c CMD`                                                                              |
+**Setup.** Install and log in to at least one of
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+[Codex](https://github.com/openai/codex) or pi, then press `x`. By default
+vert uses the first of `claude`, `codex` and `pi` it finds on `PATH`. The
+agent and model in use are shown at the top of each explanation.
 
-These are the full commands; `--explain-model` adds `--model MODEL` before
-Codex's final `-`, or at the end for the others. No session is saved.
-
-By default vert uses the first of those it finds on `PATH`; `--explain-agent`
-picks one. Each agent uses its own default model unless `--explain-model`
-names another, in the agent's own naming (`claude --model`, `codex --model`,
-`pi --model`: for example `sonnet` for Claude Code, or a
-`provider/model` from `pi --list-models` for pi, such as
-`anthropic/claude-haiku-5-5`);
-a custom command gets it in `VERT_EXPLAIN_MODEL`. The agent and model in use
-are shown at the top of the explanation.
-
-To set them once for a machine rather than on every run, export them from
-your shell profile. Every explain option has an environment variable, and a
-flag given on the command line wins over it:
+**Choosing the agent and model.** Set them once per machine in your shell
+profile (`~/.zshrc`, `~/.bashrc`, …) and they apply to every run:
 
 ```sh
-export VERT_EXPLAIN_AGENT=pi            # auto, claude, codex or pi
-export VERT_EXPLAIN_MODEL=anthropic/claude-haiku-5-5  # optional; agent's default otherwise
-# export VERT_EXPLAIN_CMD='llm -m gpt-5'  # any command that reads stdin
+export VERT_EXPLAIN_AGENT=pi                          # auto (default), claude, codex or pi
+export VERT_EXPLAIN_MODEL=anthropic/claude-haiku-5-5  # optional; otherwise the agent's default
 ```
 
-The agent gets the prompt on standard input and runs in the
-checkout the change belongs to. Claude Code, Codex and pi get read-only
-tools, so they can open the surrounding code but not change it; a custom
-command runs with your own permissions, so it can. vert sends it the change's message and
-diff, with every hunk numbered, and asks for JSON back. A custom command
-must read the prompt on stdin and print that JSON.
+Each variable has a matching flag (see [Options](#options)), and a flag on
+the command line overrides the variable, e.g. for one run:
+`vert --explain-agent claude --explain-model sonnet`. Name the model the way
+the agent itself does:
 
-The answer opens as an outline: an overview (the intent and, when the agent
-judges one useful, a diagram), the steps in reading order, the concerns, and
-the hunks no step or diagram box covers. In the diagram, `+` marks what the
-change added, `~` what it changed and `−` what it removed; `↺` points back to
-a box already drawn.
+| Agent       | Model examples                  | Where the names come from                 |
+| ----------- | ------------------------------- | ----------------------------------------- |
+| Claude Code | `sonnet`, `opus`, `haiku`       | `claude --model`                          |
+| Codex       | any model your Codex login offers | `codex --model`                         |
+| pi          | `anthropic/claude-haiku-5-5`    | `pi --list-models`. Always write `provider/model`, because a bare name fails when several providers are logged in |
 
-Answers are cached in `$XDG_CACHE_HOME/vert/explain` (`~/.cache/vert/explain`
-by default), readable only by you, keyed by the agent, the model and the
-exact diff, so a commit is explained once and a working tree that moved on is
-asked about afresh. `r` asks again. The diff leaves your machine through the
-agent, like any other prompt you give it; `--no-network` turns explanations
-off.
+**Any other tool.** `VERT_EXPLAIN_CMD` (or `--explain-cmd`) runs a shell
+command instead of a known agent (it takes precedence over
+`VERT_EXPLAIN_AGENT`), for example
+`export VERT_EXPLAIN_CMD='llm -m gpt-5'`. The command must read the prompt
+on standard input and print the JSON answer the prompt asks for. It gets the
+model, if one is set, in `VERT_EXPLAIN_MODEL`.
+
+**What you get.** The answer opens as an outline:
+
+- an overview: the intent and, when the agent thinks one helps, a small
+  diagram of components, states, a flow or data;
+- the steps, in the order to read them;
+- concerns, i.e. what deserves a second look;
+- the hunks that no step or diagram box covers. This is where to look first.
+
+Steps and boxes point at hunks of the diff, and `⏎` jumps to the code. vert
+checks every pointer against the real diff and drops any that point at
+nothing. In the diagram, `+` marks what the change added, `~` what it changed
+and `−` what it removed. `↺` points back to a box already drawn.
+
+**How the agent is run.** The agent runs in the checkout the change belongs
+to, with the prompt on standard input: the change's message and its diff,
+with every hunk numbered. Claude Code, Codex and pi get read-only tools, so
+they can open the surrounding code but can't change it. No session is saved.
+These are the full commands:
+
+| Agent         | Runs as                                                                            |
+| ------------- | ---------------------------------------------------------------------------------- |
+| Claude Code   | `claude -p --output-format text --no-session-persistence --tools Read,Grep,Glob`   |
+| Codex         | `codex exec --sandbox read-only --skip-git-repo-check --ephemeral --color never -` |
+| pi            | `pi -p --no-session --tools read,grep,find,ls`                                     |
+| `--explain-cmd` | `sh -c CMD`, unconfined, with your own permissions                               |
+
+When a model is set, `--model MODEL` is added before Codex's final `-`, or at
+the end for the others. Each agent gets `--explain-timeout-secs` (default
+600) to answer. A diff larger than `--explain-max-diff-kb` (default 256) is
+sent in full only up to that size; later hunks are sent by their header
+alone.
+
+**Cache and privacy.** Answers are cached in `$XDG_CACHE_HOME/vert/explain`
+(`~/.cache/vert/explain` by default), readable only by you. The cache key
+covers the agent, the model and the exact diff, so each commit is explained
+once and a working tree that has moved on gets a fresh answer. `r` asks
+again. The diff leaves your machine through the agent, as with any prompt
+you give it. `--no-network` turns explanations off.
+
+**Troubleshooting.** When there is no agent to ask, `x` shows
+*Can't explain: …* at the bottom of the screen with the reason:
+
+- `no coding agent found`: none of `claude`, `codex` or `pi` is on the
+  `PATH` vert was started with. Install one, or set `VERT_EXPLAIN_CMD`.
+- `pi is not on PATH (--explain-agent)`: `VERT_EXPLAIN_AGENT` names an agent
+  that isn't installed.
+- `network access is off`: vert was started with `--no-network`.
+
+When the agent runs but fails, for example because it is logged out, the
+model is unknown or it timed out, the explanation reads *Couldn't explain
+this change* followed by the agent's own error output, and `r` tries again.
+For the full output, run the command from the table above in a terminal.
 
 ### Options
 

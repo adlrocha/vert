@@ -207,13 +207,13 @@ mod tests {
         assert_eq!(text.first_changed_line(), 1);
         let bin = files.iter().find(|f| f.stat.path == "b.bin").expect("b");
         assert!(bin.stat.binary);
-        assert!(bin.hunks.is_empty());
+        assert_eq!(bin.hunks, []);
         assert_eq!(bin.first_changed_line(), 1);
     }
 
     #[test]
     fn parses_patch_text() {
-        assert!(parse("  \n").expect("empty").is_empty());
+        assert_eq!(parse(" \n").expect("empty"), []);
         let text = "diff --git a/n.txt b/n.txt\nnew file mode 100644\nindex 0000000..92d5444\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+fresh\ndiff --git a/old.txt b/new.txt\nsimilarity index 76%\nrename from old.txt\nrename to new.txt\nindex 302c88e..ecaf925 100644\n--- a/old.txt\n+++ b/new.txt\n@@ -1,4 +1,4 @@\n keep\n-gone\n+here\n more\n lines\n";
         let files = parse(text).expect("parse");
         assert_eq!(files.len(), 2);

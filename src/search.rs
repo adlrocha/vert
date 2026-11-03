@@ -315,7 +315,7 @@ mod tests {
         let hits = fuzzy_files(&files, "main", 10);
         assert_eq!(hits[0].path, "src/main.rs");
         assert_eq!(hits[0].indices, [4, 5, 6, 7]);
-        assert!(fuzzy_files(&files, "zzz", 10).is_empty());
+        assert_eq!(fuzzy_files(&files, "zzz", 10), []);
         assert_eq!(fuzzy_files(&files, "", 2).len(), 2);
         assert_eq!(fuzzy_files(&files, "s", 1).len(), 1);
     }
@@ -366,6 +366,6 @@ mod tests {
         assert!(capped.truncated);
         let cancelled = search_text(dir.path(), "hello", 100, &|| true).expect("s");
         assert!(cancelled.cancelled);
-        assert!(cancelled.matches.is_empty());
+        assert_eq!(cancelled.matches, []);
     }
 }

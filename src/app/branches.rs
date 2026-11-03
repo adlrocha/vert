@@ -831,7 +831,7 @@ mod tests {
         // Dirty worktree: uncommitted first, b for the branch.
         assert_eq!(opened(press(&mut app, KeyCode::Enter)), "worktree:agent");
         assert_eq!(opened(press(&mut app, KeyCode::Char('b'))), "branch:agent");
-        assert!(press(&mut app, KeyCode::Char('p')).is_empty());
+        assert_eq!(press(&mut app, KeyCode::Char('p')), []);
         assert_eq!(
             app.notice.as_deref(),
             Some("No open pull request for this branch")
@@ -839,7 +839,7 @@ mod tests {
         // A pull request without a local branch.
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(opened(press(&mut app, KeyCode::Char('l'))), "pr:9");
-        assert!(press(&mut app, KeyCode::Char('b')).is_empty());
+        assert_eq!(press(&mut app, KeyCode::Char('b')), []);
         assert!(
             app.notice
                 .as_deref()
@@ -849,7 +849,7 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(opened(press(&mut app, KeyCode::Enter)), "branch:feat");
         assert_eq!(opened(press(&mut app, KeyCode::Char('p'))), "pr:7");
-        assert!(press(&mut app, KeyCode::Char('x')).is_empty());
+        assert_eq!(press(&mut app, KeyCode::Char('x')), []);
 
         app.branches.pulls.clear();
         app.branches.list.branches.clear();
@@ -911,7 +911,7 @@ mod tests {
         );
         assert_eq!(press(&mut bare, KeyCode::Char('4')), [Effect::LoadBranches]);
         bare.update(Msg::Branches(Ok(Branches::default())));
-        assert!(bare.update(Msg::Tick(1_000_000)).is_empty());
+        assert_eq!(bare.update(Msg::Tick(1_000_000)), []);
     }
 
     #[test]
@@ -925,7 +925,7 @@ mod tests {
         assert_eq!(app.branches.pulls.len(), 3, "stale list kept");
         app.update(Msg::Pulls(Err(PullsError::NoToken)));
         assert_eq!(app.branches.pull_status, PullStatus::NoToken);
-        assert!(app.branches.pulls.is_empty());
+        assert_eq!(app.branches.pulls, []);
         app.update(Msg::Pulls(Err(PullsError::Unsupported(
             "gitlab".to_owned(),
         ))));
@@ -1050,7 +1050,7 @@ mod tests {
 
         // A removed worktree has nothing left to diff.
         let reload = app.update(Msg::Branches(Ok(Branches::default())));
-        assert!(reload.is_empty());
+        assert_eq!(reload, []);
 
         // Diffs opened from other tabs don't poll branches.
         press(&mut app, KeyCode::Esc);
@@ -1062,7 +1062,7 @@ mod tests {
             marks: std::collections::BTreeSet::new(),
             root: None,
         });
-        assert!(app.update(Msg::Tick(99_999)).is_empty());
+        assert_eq!(app.update(Msg::Tick(99_999)), []);
     }
 
     #[test]
@@ -1335,7 +1335,7 @@ mod tests {
             KeyModifiers::CONTROL,
         )));
         assert!(app.branches.filter_editing);
-        assert!(app.branches.name_filter.is_empty());
+        assert_eq!(app.branches.name_filter, "");
         assert_eq!(keys(&app).len(), 6);
         // Backspace pops; esc stops editing but keeps the filter.
         for c in "age".chars() {
@@ -1348,7 +1348,7 @@ mod tests {
         assert_eq!(keys(&app), ["b:agent"], "the filter persists");
         // A second esc clears it.
         press(&mut app, KeyCode::Esc);
-        assert!(app.branches.name_filter.is_empty());
+        assert_eq!(app.branches.name_filter, "");
         assert_eq!(keys(&app).len(), 6);
         // 3 still reaches the Search tab.
         press(&mut app, KeyCode::Char('3'));

@@ -721,7 +721,7 @@ mod tests {
             panic!("pulls")
         };
         assert_eq!(repo, "o/r");
-        assert!(pulls.is_empty());
+        assert_eq!(pulls, []);
         assert!(requests.recv().expect("req").contains("env-token"));
         assert_eq!(
             c.token
