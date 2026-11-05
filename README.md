@@ -49,6 +49,14 @@ in, and what deserves a second look.
   that arrived while the confirmation was open are safe too. Diffs of
   linked worktrees stay live, and files open
   from the worktree they belong to.
+- **Collisions between lines of work:** a row marked `⚠2` would fail to merge
+  with two other lines of work, and `≈3` changes the same files as three
+  others. Each pair is compared from where the two diverged, so stacked
+  branches don't count. Uncommitted work counts too, but only as `≈`, since
+  there is no commit to merge yet. `c` lists what a row collides with, and
+  `⏎` opens the diff on that file. Merge checks run in memory, so they write
+  nothing to your repository. vert can only tell work apart by branch or
+  worktree: two agents sharing one checkout look like one line of work.
 - **Explanations:** press `x` in a diff and a coding agent you already use
   (Claude Code, Codex or pi) explains the change for a human reviewer: its
   intent, the order to read it in, a small diagram when a picture helps
@@ -109,7 +117,7 @@ Press `?` inside vert for all keys. The essentials:
 | Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit · `x` explain |
 | Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `r` ask again |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
-| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names · `d` remove · `r` refresh |
+| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names · `c` collisions · `d` remove · `r` refresh |
 
 ### Pull requests
 
@@ -235,6 +243,8 @@ For the full output, run the command from the table above in a terminal.
 | `--no-watch`             | off     | Disable live updates                            |
 | `--base`                 | auto    | Branch to compare against (`origin/HEAD`, else `main`/`master`) |
 | `--max-branches`         | 30      | Branches without a worktree to show, newest first |
+| `--overlap-ignore`       | common lock files | Files that never count as a collision, by name or path, comma-separated |
+| `--max-overlap-checks`   | 100     | Pairs of branches to merge-check in one pass; the rest show as overlaps until a later pass |
 | `--branch-refresh-secs`  | 5       | Branches tab rescan interval                    |
 | `--pr-refresh-secs`      | 60      | Pull request refresh interval                   |
 | `--max-prs`              | 50      | Open pull requests to list (at most 100)        |

@@ -24,6 +24,7 @@ const HINTS: Hints = &[
     ("p", "PR diff"),
     ("f", "filter kinds"),
     ("/", "filter names"),
+    ("c", "collisions"),
     ("d", "remove"),
     ("r", "refresh"),
     ("?", "keys"),
@@ -32,6 +33,9 @@ const HINTS: Hints = &[
 const CONFLICT_GLYPH: &str = "⚠";
 /// Marks lines of work that change the same file.
 const OVERLAP_GLYPH: &str = "≈";
+/// Most rows the collision list shows at once.
+const MAX_COLLISION_ROWS: usize = 14;
+const COLLISION_HINT: &str = "j/k move · ⏎ open diff · esc close";
 /// Width of the kind column (`worktree`, `branch`, …).
 const KIND_W: usize = 9;
 /// Widest the branch-name column grows.
@@ -196,13 +200,8 @@ fn overlap_status(app: &App) -> Vec<Span<'static>> {
 /// lines of work.
 fn flag(r: &Row<'_>, overlaps: &Overlaps) -> Option<(String, Style)> {
     let (level, count) = overlaps.flag(&r.branch?.name)?;
-    Some(match level {
-        Level::Conflict => (
-            format!("{CONFLICT_GLYPH}{count}"),
-            Style::default().fg(theme::REMOVED),
-        ),
-        Level::Overlap => (format!("{OVERLAP_GLYPH}{count}"), theme::muted()),
-    })
+    let (glyph, style) = level_mark(level);
+    Some((format!("{glyph}{count}"), style))
 }
 
 /// Widths of the variable columns, sized to the rows on screen.
@@ -376,6 +375,58 @@ fn row(
     }
     spans.extend(right);
     Line::from(spans)
+}
+
+/// The glyph and style of a collision level.
+fn level_mark(level: Level) -> (&'static str, Style) {
+    match level {
+        Level::Conflict => (CONFLICT_GLYPH, Style::default().fg(theme::REMOVED)),
+        Level::Overlap => (OVERLAP_GLYPH, theme::muted()),
+    }
+}
+
+/// What the selected line of work collides with, over everything else.
+pub(super) fn draw_collisions(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let Some(list) = app.branches.collisions.as_mut() else {
+        return;
+    };
+    let total = list.rows.len();
+    let height = total
+        .min(MAX_COLLISION_ROWS)
+        .min(usize::from(area.height).saturating_sub(CONTENT_PAD));
+    let offset = list.pos.scrolled(height, total);
+    let other_w = list.rows.iter().map(|r| width(&r.other)).max().unwrap_or(0);
+    let lines: Vec<Line<'_>> = list.rows[offset..(offset + height).min(total)]
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let (glyph, style) = level_mark(r.level);
+            Line::from(vec![
+                marker(offset + i == list.pos.selected),
+                Span::styled(format!("{glyph} "), style),
+                Span::styled(pad(&r.other, other_w + 2), theme::bold()),
+                Span::styled(r.path.clone(), theme::text()),
+            ])
+        })
+        .collect();
+    let title = format!(" {} collides with ", list.name);
+    let content = lines.iter().map(Line::width).max().unwrap_or(0);
+    let box_w = content.max(width(COLLISION_HINT)).max(width(&title)) + CONTENT_PAD;
+    let box_h = lines.len() + 2;
+    let area = centered(
+        area,
+        u16::try_from(box_w).unwrap_or(u16::MAX),
+        u16::try_from(box_h).unwrap_or(u16::MAX),
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            panel(true).title(title).title_bottom(
+                Line::from(format!(" {COLLISION_HINT} ")).alignment(Alignment::Right),
+            ),
+        ),
+        area,
+    );
 }
 
 /// The `d` key's confirmation: what will go, and what is risky about it.

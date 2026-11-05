@@ -143,9 +143,7 @@ impl Entry {
     /// Whether any changed file has `path`.
     #[must_use]
     pub fn touches_path(&self, path: &str) -> bool {
-        self.files
-            .iter()
-            .any(|f| f.path == path || f.old_path.as_deref() == Some(path))
+        self.files.iter().any(|f| f.touches(path))
     }
 }
 

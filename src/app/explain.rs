@@ -548,6 +548,7 @@ mod tests {
             entry: Box::new(change("c1")),
             result: Ok(vec![file("src/a.rs"), file("docs/x.md")]),
             refresh: false,
+            file: None,
         });
         app
     }
@@ -606,6 +607,7 @@ mod tests {
             entry: Box::new(change("empty")),
             result: Ok(Vec::new()),
             refresh: false,
+            file: None,
         });
         press(&mut a, KeyCode::Char('x'));
         assert!(a.notice.as_deref().is_some_and(|n| n.contains("Nothing")));

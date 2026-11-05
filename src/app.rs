@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 pub use branches::{
-    BranchRemoval, BranchesState, PullStatus, Refresh, Removal, Row, RowFilter, pull_entry,
+    BranchRemoval, BranchesState, CollisionList, CollisionRow, PullStatus, Refresh, Removal, Row,
+    RowFilter, pull_entry,
 };
 #[cfg(test)]
 pub(crate) use explain::pi_for_tests;
@@ -446,6 +447,8 @@ pub enum Msg {
         result: Result<Vec<FileDiff>, String>,
         /// Whether this refreshes an open detail view rather than opening one.
         refresh: bool,
+        /// The file to start on, if not the first.
+        file: Option<String>,
     },
     /// A file for the viewer was read.
     File {
@@ -510,6 +513,8 @@ pub enum Effect {
         entry: Box<Entry>,
         /// Whether to refresh the open detail view.
         refresh: bool,
+        /// The file to start on, if not the first.
+        file: Option<String>,
     },
     /// Read a file for the viewer.
     OpenFile {
@@ -724,10 +729,11 @@ impl App {
                 entry,
                 result,
                 refresh,
+                file,
             } => {
                 match result {
                     Ok(files) if refresh => self.refresh_detail(*entry, files),
-                    Ok(files) => self.open_detail(*entry, files),
+                    Ok(files) => self.open_detail(*entry, files, file.as_deref()),
                     Err(e) => self.notice = Some(format!("Could not load diff: {e}")),
                 }
                 Vec::new()
@@ -809,6 +815,7 @@ impl App {
                     effects.push(Effect::LoadDiff {
                         entry: Box::new(wt.clone()),
                         refresh: true,
+                        file: None,
                     });
                 }
             }
@@ -883,15 +890,22 @@ impl App {
         self.search.pos = ListPos::default();
     }
 
-    fn open_detail(&mut self, entry: Entry, files: Vec<FileDiff>) {
+    /// Opens the diff of `entry` on `file` if it has that file, else the first.
+    fn open_detail(&mut self, entry: Entry, files: Vec<FileDiff>, file: Option<&str>) {
+        let selected = file
+            .and_then(|path| files.iter().position(|f| f.stat.touches(path)))
+            .unwrap_or(0);
         let rendered = files
-            .first()
+            .get(selected)
             .map(|f| build_diff(f, self.max_highlight))
             .unwrap_or_default();
         self.views.push(View::Detail(Box::new(DetailView {
             entry,
             files,
-            pos: ListPos::default(),
+            pos: ListPos {
+                selected,
+                ..ListPos::default()
+            },
             focus: Focus::Files,
             scroll: 0,
             hscroll: 0,
@@ -971,6 +985,9 @@ impl App {
             return self.answer_remove(confirmed);
         }
         self.notice = None;
+        if self.branches.collisions.is_some() {
+            return self.on_collisions_key(&key);
+        }
         if !self.views.is_empty() {
             return self.on_view_key(&key);
         }
@@ -1051,6 +1068,7 @@ impl App {
                     return vec![Effect::LoadDiff {
                         entry: Box::new(entry),
                         refresh: false,
+                        file: None,
                     }];
                 }
             }

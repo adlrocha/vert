@@ -195,6 +195,14 @@ pub struct FileStat {
     pub binary: bool,
 }
 
+impl FileStat {
+    /// Whether this file is at `path`, now or before a rename.
+    #[must_use]
+    pub fn touches(&self, path: &str) -> bool {
+        self.path == path || self.old_path.as_deref() == Some(path)
+    }
+}
+
 fn path_string(path: Option<&Path>) -> Option<String> {
     path.map(|p| p.to_string_lossy().replace('\\', "/"))
 }
