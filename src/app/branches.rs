@@ -381,6 +381,7 @@ impl App {
     fn request_overlaps(&mut self) -> Option<Effect> {
         if self.branches.list.branches.len() < 2 {
             self.branches.overlaps = Overlaps::default();
+            self.branches.overlap_error = None;
             return None;
         }
         self.branches
@@ -393,10 +394,14 @@ impl App {
         Effect::LoadOverlaps(Box::new(self.branches.list.clone()))
     }
 
-    /// Takes in collisions, unless a newer list is already waiting for its own.
+    /// Takes in collisions, unless a newer list is already waiting for its own
+    /// or too few lines of work remain for them to mean anything.
     pub(super) fn on_overlaps(&mut self, result: Result<Overlaps, String>) -> Vec<Effect> {
         if self.branches.overlap_load.finish() {
             return vec![self.overlaps_effect()];
+        }
+        if self.branches.list.branches.len() < 2 {
+            return Vec::new();
         }
         match result {
             Ok(overlaps) => {
@@ -745,6 +750,22 @@ mod tests {
         app.update(Msg::Overlaps(Ok(collisions("a", "b"))));
         assert_eq!(app.update(Msg::Branches(Ok(list_of(&["a"])))), []);
         assert_eq!(app.branches.overlaps, Overlaps::default());
+    }
+
+    #[test]
+    fn a_result_is_dropped_once_the_list_shrinks_to_one() {
+        let mut app = app(false);
+        app.update(Msg::Branches(Ok(list_of(&["a", "b"]))));
+        app.branches.overlap_error = Some("boom".to_owned());
+        assert_eq!(app.update(Msg::Branches(Ok(list_of(&["a"])))), []);
+        assert_eq!(app.branches.overlap_error, None);
+        assert_eq!(app.update(Msg::Overlaps(Ok(collisions("a", "b")))), []);
+        assert_eq!(app.branches.overlaps, Overlaps::default());
+        let names = ["a", "b"];
+        assert_eq!(
+            app.update(Msg::Branches(Ok(list_of(&names)))),
+            [overlap_effect(&names)]
+        );
     }
 
     #[test]

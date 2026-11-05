@@ -153,7 +153,8 @@ fn status_line(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Collision totals for the bottom border; nothing when there are none.
+/// Collision totals, pairs left unchecked and any error for the bottom border;
+/// nothing when none of those apply.
 fn overlap_status(app: &App) -> Vec<Span<'static>> {
     let overlaps = &app.branches.overlaps;
     let conflicts = overlaps.count(Level::Conflict);
