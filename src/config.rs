@@ -71,6 +71,21 @@ pub struct Config {
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
     pub max_branches: u32,
 
+    /// Files that never count as a collision between branches: file names or
+    /// repository-relative paths, separated by commas.
+    #[arg(
+        long,
+        value_name = "FILES",
+        value_delimiter = ',',
+        default_value = "Cargo.lock,package-lock.json,pnpm-lock.yaml,yarn.lock,go.sum,uv.lock,poetry.lock"
+    )]
+    pub overlap_ignore: Vec<String>,
+
+    /// Maximum pairs of branches to run a merge check on in one pass. Pairs
+    /// past the limit show as overlaps until a later pass reaches them.
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_overlap_checks: u32,
+
     /// How often the Branches tab rescans branches and worktrees, in seconds.
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..))]
     pub branch_refresh_secs: u32,
@@ -156,6 +171,12 @@ impl Config {
     #[must_use]
     pub const fn max_file_bytes(&self) -> u64 {
         self.max_file_kb.saturating_mul(1024)
+    }
+
+    /// Merge check cap as a `usize`.
+    #[must_use]
+    pub fn max_overlap_checks(&self) -> usize {
+        usize::try_from(self.max_overlap_checks).unwrap_or(usize::MAX)
     }
 
     /// Branch cap as a `usize`.
@@ -284,6 +305,8 @@ mod tests {
         assert_eq!(config.search_limit(), 2000);
         assert_eq!(config.max_file_bytes(), 4096 * 1024);
         assert_eq!(config.branch_limit(), 30);
+        assert_eq!(config.max_overlap_checks(), 100);
+        assert!(config.overlap_ignore.iter().any(|f| f == "Cargo.lock"));
         assert_eq!(config.base, None);
         let github = config.github().expect("network on by default");
         assert_eq!(github.endpoint.web_host(), "github.com");

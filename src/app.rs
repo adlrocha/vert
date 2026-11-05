@@ -24,6 +24,7 @@ use crate::git::RepoInfo;
 use crate::git::branches::Branches;
 use crate::git::diff::{FileDiff, LineKind};
 use crate::git::feed::Entry;
+use crate::git::overlap::Overlaps;
 use crate::github::{PullRequest, PullsError};
 use crate::highlight::{Fragment, Highlighter};
 use crate::hotspots::{self, Grouping, Hotspot, Window};
@@ -424,6 +425,8 @@ pub enum Msg {
     Changed(BTreeSet<Change>),
     /// Branches and worktrees loaded.
     Branches(Result<Branches, String>),
+    /// Collisions between lines of work were found.
+    Overlaps(Result<Overlaps, String>),
     /// Open pull requests loaded: the repository and its pull requests.
     Pulls(Result<(String, Vec<PullRequest>), PullsError>),
     /// The file list for search was built.
@@ -492,6 +495,8 @@ pub enum Effect {
     LoadBranches,
     /// Reload open pull requests.
     LoadPulls,
+    /// Find where these lines of work collide.
+    LoadOverlaps(Box<Branches>),
     /// Run a content search.
     SearchText {
         /// Query.
@@ -689,6 +694,7 @@ impl App {
                 self.poll_branches()
             }
             Msg::Branches(result) => self.on_branches(result),
+            Msg::Overlaps(result) => self.on_overlaps(result),
             Msg::Pulls(result) => self.on_pulls(result),
             Msg::Commits(result) => self.on_commits(result),
             Msg::Worktree(result) => self.on_worktree(result),

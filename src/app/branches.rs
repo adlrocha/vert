@@ -9,6 +9,7 @@ use super::{App, Effect, ListPos, Loader, Tab, View};
 use crate::git::Target;
 use crate::git::branches::{Branch, Branches};
 use crate::git::feed::Entry;
+use crate::git::overlap::Overlaps;
 use crate::github::{ORIGIN, PullRequest, PullsError};
 use crate::search::fuzzy_match;
 use git2::Oid;
@@ -184,7 +185,12 @@ pub struct BranchesState {
     pub loaded: bool,
     /// Last branch load error.
     pub error: Option<String>,
+    /// Where lines of work collide, as last found.
+    pub overlaps: Overlaps,
+    /// Why collisions could not be found the last time.
+    pub overlap_error: Option<String>,
     load: Loader,
+    overlap_load: Loader,
     pulls_load: Loader,
     /// When branches were last requested (Unix seconds).
     last_load: Option<i64>,
@@ -353,11 +359,15 @@ impl App {
         match result {
             Ok(list) => {
                 let selected = self.branches.selected_key();
+                let stale = list != self.branches.list || self.branches.overlaps.unchecked > 0;
                 self.branches.list = list;
                 self.branches.loaded = true;
                 self.branches.error = None;
                 self.branches.reselect(selected.as_deref());
                 effects.extend(self.refresh_open_worktree());
+                if stale {
+                    effects.extend(self.request_overlaps());
+                }
             }
             Err(e) => self.branches.error = Some(e),
         }
@@ -365,6 +375,37 @@ impl App {
             effects.push(Effect::LoadBranches);
         }
         effects
+    }
+
+    /// Starts looking for collisions, unless there is nothing to compare.
+    fn request_overlaps(&mut self) -> Option<Effect> {
+        if self.branches.list.branches.len() < 2 {
+            self.branches.overlaps = Overlaps::default();
+            return None;
+        }
+        self.branches
+            .overlap_load
+            .request()
+            .then(|| self.overlaps_effect())
+    }
+
+    fn overlaps_effect(&self) -> Effect {
+        Effect::LoadOverlaps(Box::new(self.branches.list.clone()))
+    }
+
+    /// Takes in collisions, unless a newer list is already waiting for its own.
+    pub(super) fn on_overlaps(&mut self, result: Result<Overlaps, String>) -> Vec<Effect> {
+        if self.branches.overlap_load.finish() {
+            return vec![self.overlaps_effect()];
+        }
+        match result {
+            Ok(overlaps) => {
+                self.branches.overlaps = overlaps;
+                self.branches.overlap_error = None;
+            }
+            Err(e) => self.branches.overlap_error = Some(e),
+        }
+        Vec::new()
     }
 
     /// Reloads an open linked-worktree diff: with its latest changes, or
@@ -605,6 +646,7 @@ mod tests {
     use crate::git::RepoInfo;
     use crate::git::branches::Worktree;
     use crate::git::diff::FileDiff;
+    use crate::git::overlap::{Collision, Level};
     use crate::git::{FileStat, FileStatus};
 
     fn press(app: &mut App, code: KeyCode) -> Vec<Effect> {
@@ -643,6 +685,94 @@ mod tests {
             )),
             worktree: None,
         }
+    }
+
+    fn list_of(names: &[&str]) -> Branches {
+        Branches {
+            base: None,
+            branches: names.iter().map(|n| branch(n, 100)).collect(),
+        }
+    }
+
+    fn overlap_effect(names: &[&str]) -> Effect {
+        Effect::LoadOverlaps(Box::new(list_of(names)))
+    }
+
+    fn collisions(first: &str, second: &str) -> Overlaps {
+        Overlaps {
+            collisions: vec![Collision {
+                first: first.to_owned(),
+                second: second.to_owned(),
+                level: Level::Conflict,
+                files: Vec::new(),
+            }],
+            unchecked: 0,
+        }
+    }
+
+    #[test]
+    fn a_changed_list_looks_for_collisions_once() {
+        let mut app = app(false);
+        let names = ["a", "b"];
+        assert_eq!(
+            app.update(Msg::Branches(Ok(list_of(&names)))),
+            [overlap_effect(&names)]
+        );
+        assert_eq!(app.update(Msg::Overlaps(Ok(collisions("a", "b")))), []);
+        assert_eq!(app.branches.overlaps, collisions("a", "b"));
+        assert_eq!(app.update(Msg::Branches(Ok(list_of(&names)))), []);
+    }
+
+    #[test]
+    fn pairs_left_unchecked_carry_on_at_the_next_reload() {
+        let mut app = app(false);
+        let names = ["a", "b"];
+        app.update(Msg::Branches(Ok(list_of(&names))));
+        app.update(Msg::Overlaps(Ok(Overlaps {
+            unchecked: 1,
+            ..Overlaps::default()
+        })));
+        assert_eq!(
+            app.update(Msg::Branches(Ok(list_of(&names)))),
+            [overlap_effect(&names)]
+        );
+    }
+
+    #[test]
+    fn a_lone_line_of_work_has_nothing_to_collide_with() {
+        let mut app = app(false);
+        app.update(Msg::Branches(Ok(list_of(&["a", "b"]))));
+        app.update(Msg::Overlaps(Ok(collisions("a", "b"))));
+        assert_eq!(app.update(Msg::Branches(Ok(list_of(&["a"])))), []);
+        assert_eq!(app.branches.overlaps, Overlaps::default());
+    }
+
+    #[test]
+    fn a_result_for_an_old_list_gives_way_to_the_newest_list() {
+        let mut app = app(false);
+        app.update(Msg::Branches(Ok(list_of(&["a", "b"]))));
+        assert_eq!(app.update(Msg::Branches(Ok(list_of(&["a", "c"])))), []);
+        assert_eq!(
+            app.update(Msg::Overlaps(Ok(collisions("a", "b")))),
+            [overlap_effect(&["a", "c"])]
+        );
+        assert_eq!(app.branches.overlaps, Overlaps::default());
+        assert_eq!(app.update(Msg::Overlaps(Ok(collisions("a", "c")))), []);
+        assert_eq!(app.branches.overlaps, collisions("a", "c"));
+    }
+
+    #[test]
+    fn a_failed_search_keeps_the_last_collisions_until_one_works() {
+        let mut app = app(false);
+        app.update(Msg::Branches(Ok(list_of(&["a", "b"]))));
+        app.update(Msg::Overlaps(Ok(collisions("a", "b"))));
+        app.update(Msg::Branches(Ok(list_of(&["a", "b", "c"]))));
+        app.update(Msg::Overlaps(Err("boom".to_owned())));
+        assert_eq!(app.branches.overlap_error.as_deref(), Some("boom"));
+        assert_eq!(app.branches.overlaps, collisions("a", "b"));
+        app.update(Msg::Branches(Ok(list_of(&["a", "b"]))));
+        app.update(Msg::Overlaps(Ok(Overlaps::default())));
+        assert_eq!(app.branches.overlap_error, None);
     }
 
     fn checkout(name: &str, current: bool, dirty: bool) -> Branch {
