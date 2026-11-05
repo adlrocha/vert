@@ -52,6 +52,24 @@ pub struct Collision {
     pub files: Vec<SharedFile>,
 }
 
+impl Collision {
+    /// Whether the line of work called `name` is one of the two.
+    #[must_use]
+    pub fn involves(&self, name: &str) -> bool {
+        self.first == name || self.second == name
+    }
+
+    /// The line of work `name` collides with.
+    #[must_use]
+    pub fn other(&self, name: &str) -> &str {
+        if self.first == name {
+            &self.second
+        } else {
+            &self.first
+        }
+    }
+}
+
 /// Every collision between the lines of work of a repository.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Overlaps {
@@ -60,6 +78,27 @@ pub struct Overlaps {
     /// Pairs of lines of work left for a later pass because
     /// [`Options::max_checks`] ran out. They reach [`Level::Overlap`] at most.
     pub unchecked: usize,
+}
+
+impl Overlaps {
+    /// The collisions of the line of work called `name`, the most serious first.
+    pub fn of<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Collision> {
+        self.collisions.iter().filter(move |c| c.involves(name))
+    }
+
+    /// The most serious level `name` collides at, and how many lines of work
+    /// it collides with at that level.
+    #[must_use]
+    pub fn flag(&self, name: &str) -> Option<(Level, usize)> {
+        let level = self.of(name).map(|c| c.level).max()?;
+        Some((level, self.of(name).filter(|c| c.level == level).count()))
+    }
+
+    /// How many pairs collide at `level`.
+    #[must_use]
+    pub fn count(&self, level: Level) -> usize {
+        self.collisions.iter().filter(|c| c.level == level).count()
+    }
 }
 
 /// What to compare.
@@ -742,6 +781,22 @@ mod tests {
         find(&t.repo, &load(&t.repo), opts, &mut cache).expect("find");
         assert_eq!(cache.len(), 1);
         assert!(stale.iter().all(|k| !cache.contains_key(k)));
+    }
+
+    #[test]
+    fn a_row_reports_its_most_serious_level_and_how_many() {
+        let t = repo_with_base();
+        commit_on(&t, "a", "shared.txt", Some(&with_line(2, "two")));
+        commit_on(&t, "b", "shared.txt", Some(&with_line(11, "x")));
+        commit_on(&t, "c", "shared.txt", Some(&with_line(11, "y")));
+        let found = scan(&t, &[]);
+        assert_eq!(found.flag("a"), Some((Level::Overlap, 2)));
+        assert_eq!(found.flag("b"), Some((Level::Conflict, 1)));
+        assert_eq!(found.flag("nope"), None);
+        assert_eq!(found.count(Level::Conflict), 1);
+        assert_eq!(found.count(Level::Overlap), 2);
+        let c = found.of("c").next().expect("collision");
+        assert_eq!((c.other("c"), c.other("b")), ("b", "c"));
     }
 
     #[test]

@@ -1239,6 +1239,38 @@ mod render_tests {
     }
 
     #[test]
+    fn collisions_show_on_rows_and_in_the_totals() {
+        use crate::git::overlap::{Collision, Level, Overlaps};
+        let collision = |first: &str, second: &str, level| Collision {
+            first: first.to_owned(),
+            second: second.to_owned(),
+            level,
+            files: Vec::new(),
+        };
+        let mut app = branches_app();
+        assert!(!screen(&mut app, 120, 20).contains('⚠'));
+        app.update(Msg::Overlaps(Ok(Overlaps {
+            collisions: vec![
+                collision("agent/auth", "origin/feat", Level::Conflict),
+                collision("agent/auth", "main", Level::Overlap),
+            ],
+            unchecked: 2,
+        })));
+        let s = screen(&mut app, 120, 20);
+        let line = |name: &str| s.lines().find(|l| l.contains(name)).unwrap_or_default();
+        assert!(line("agent/auth").contains("⚠1"), "{s}");
+        assert!(line("origin/feat").contains("⚠1"), "{s}");
+        assert!(line(" main").contains("≈1"), "{s}");
+        assert!(!line("detached").contains('⚠'), "{s}");
+        assert!(s.contains("⚠ 1 conflict "), "{s}");
+        assert!(s.contains("≈ 1 overlap "), "{s}");
+        assert!(s.contains("2 unchecked"), "{s}");
+
+        app.update(Msg::Overlaps(Err("no repo".to_owned())));
+        assert!(screen(&mut app, 120, 20).contains("Collisions: no repo"));
+    }
+
+    #[test]
     fn branch_name_filter_and_removal_dialog_render() {
         let mut app = branches_app();
         // / narrows by name, with a cursor while editing.

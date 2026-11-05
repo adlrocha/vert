@@ -88,6 +88,12 @@ pub struct Context {
     pub branch_limit: usize,
     /// Branch ranges already diffed, shared across reloads.
     pub branch_cache: Arc<Mutex<git::branches::RangeCache>>,
+    /// Files that never count as a collision.
+    pub overlap_ignore: Vec<String>,
+    /// Maximum merge checks in one pass.
+    pub max_overlap_checks: usize,
+    /// Merge checks already run, shared across reloads.
+    pub overlap_cache: Arc<Mutex<git::overlap::MergeCache>>,
     /// GitHub access, or `None` when network access is off.
     pub github: Option<GitHub>,
     /// How to check for a newer vert, or `None` when that is off.
@@ -173,6 +179,24 @@ pub fn begin(effect: &Effect, ctx: &Context) {
     }
 }
 
+/// Finds where the lines of work in `list` collide.
+fn find_overlaps(
+    list: &git::branches::Branches,
+    ctx: &Context,
+) -> Result<git::overlap::Overlaps, String> {
+    let mut cache = ctx
+        .overlap_cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let opts = git::overlap::Options {
+        ignore: &ctx.overlap_ignore,
+        max_checks: ctx.max_overlap_checks,
+    };
+    git::open(&ctx.workdir)
+        .and_then(|repo| git::overlap::find(&repo, list, opts, &mut cache))
+        .map_err(|e| describe(&e))
+}
+
 /// Performs a background effect, returning the message with its outcome.
 ///
 /// Returns `None` for effects that are not background work (see
@@ -246,6 +270,7 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
                     .map_err(|e| describe(&e)),
             )
         }
+        Effect::LoadOverlaps(list) => Msg::Overlaps(find_overlaps(&list, ctx)),
         Effect::LoadPulls => Msg::Pulls(open_pulls(ctx)),
         Effect::Explain {
             key,
@@ -445,6 +470,9 @@ mod tests {
             base: None,
             branch_limit: 10,
             branch_cache: Arc::default(),
+            overlap_ignore: Vec::new(),
+            max_overlap_checks: 10,
+            overlap_cache: Arc::default(),
             github: None,
             tokens: TokenSource {
                 env: |_| None,
@@ -608,6 +636,25 @@ mod tests {
         let source = TokenSource::default();
         assert_eq!(source.gh, GH_PROGRAM);
         assert_eq!((source.env)("PATH"), std::env::var("PATH").ok());
+    }
+
+    #[test]
+    fn finds_collisions_and_reports_failures() {
+        let t = repo();
+        let c = ctx(&t);
+        let Some(Msg::Branches(Ok(list))) = run(Effect::LoadBranches, &c) else {
+            panic!("branches")
+        };
+        let effect = Effect::LoadOverlaps(Box::new(list));
+        let Some(Msg::Overlaps(Ok(found))) = run(effect.clone(), &c) else {
+            panic!("overlaps")
+        };
+        assert_eq!(found, git::overlap::Overlaps::default());
+        let gone = Context {
+            workdir: t.path().join("gone"),
+            ..ctx(&t)
+        };
+        assert!(matches!(run(effect, &gone), Some(Msg::Overlaps(Err(_)))));
     }
 
     #[test]

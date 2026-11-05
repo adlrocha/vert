@@ -8,11 +8,12 @@ use ratatui::widgets::{Clear, Paragraph};
 
 use super::feed::chips;
 use super::{
-    Hints, centered, empty_state, marker, pad, panel, spans_width, spinner, stat_spans, truncate,
-    width,
+    Hints, centered, empty_state, marker, pad, panel, plural, spans_width, spinner, stat_spans,
+    truncate, width,
 };
 use crate::age::relative;
 use crate::app::{App, PullStatus, Row, RowFilter};
+use crate::git::overlap::{Level, Overlaps};
 use crate::github::Checks;
 use crate::theme;
 
@@ -27,6 +28,10 @@ const HINTS: Hints = &[
     ("r", "refresh"),
     ("?", "keys"),
 ];
+/// Marks lines of work that would fail to merge.
+const CONFLICT_GLYPH: &str = "⚠";
+/// Marks lines of work that change the same file.
+const OVERLAP_GLYPH: &str = "≈";
 /// Width of the kind column (`worktree`, `branch`, …).
 const KIND_W: usize = 9;
 /// Widest the branch-name column grows.
@@ -101,13 +106,15 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &mut App) -> Hints {
     let selected = app.branches.pos.selected;
     let rows = app.branches.rows();
     let on_screen = &rows[offset..(offset + height).min(total)];
-    let columns = Columns::fit(on_screen);
+    let overlaps = &app.branches.overlaps;
+    let columns = Columns::fit(on_screen, overlaps);
     let lines: Vec<Line<'_>> = on_screen
         .iter()
         .enumerate()
         .map(|(i, r)| {
             row(
                 r,
+                flag(r, overlaps),
                 columns,
                 offset + i == selected,
                 usize::from(inner.width),
@@ -127,6 +134,7 @@ fn status_line(app: &App) -> Line<'static> {
         spans.push(Span::styled(base.clone(), theme::bold()));
         spans.push(Span::styled(" ·", theme::muted()));
     }
+    spans.extend(overlap_status(app));
     let (text, style) = match &app.branches.pull_status {
         PullStatus::Off => ("PRs off (--no-network)".to_owned(), theme::muted()),
         PullStatus::Waiting => ("PRs loading…".to_owned(), theme::muted()),
@@ -145,10 +153,63 @@ fn status_line(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Collision totals, pairs left unchecked and any error for the bottom border;
+/// nothing when none of those apply.
+fn overlap_status(app: &App) -> Vec<Span<'static>> {
+    let overlaps = &app.branches.overlaps;
+    let conflicts = overlaps.count(Level::Conflict);
+    let shared = overlaps.count(Level::Overlap);
+    let mut parts = Vec::new();
+    if let Some(why) = &app.branches.overlap_error {
+        parts.push((
+            format!("Collisions: {why}"),
+            Style::default().fg(theme::WARN),
+        ));
+    }
+    if conflicts > 0 {
+        parts.push((
+            format!("{CONFLICT_GLYPH} {}", plural(conflicts, "conflict")),
+            Style::default().fg(theme::REMOVED),
+        ));
+    }
+    if shared > 0 {
+        parts.push((
+            format!("{OVERLAP_GLYPH} {}", plural(shared, "overlap")),
+            theme::muted(),
+        ));
+    }
+    if overlaps.unchecked > 0 {
+        parts.push((format!("{} unchecked", overlaps.unchecked), theme::muted()));
+    }
+    parts
+        .into_iter()
+        .flat_map(|(text, style)| {
+            [
+                Span::styled(format!(" {text}"), style),
+                Span::styled(" ·", theme::muted()),
+            ]
+        })
+        .collect()
+}
+
+/// The collision marker of a row: its most serious level, and with how many
+/// lines of work.
+fn flag(r: &Row<'_>, overlaps: &Overlaps) -> Option<(String, Style)> {
+    let (level, count) = overlaps.flag(&r.branch?.name)?;
+    Some(match level {
+        Level::Conflict => (
+            format!("{CONFLICT_GLYPH}{count}"),
+            Style::default().fg(theme::REMOVED),
+        ),
+        Level::Overlap => (format!("{OVERLAP_GLYPH}{count}"), theme::muted()),
+    })
+}
+
 /// Widths of the variable columns, sized to the rows on screen.
 #[derive(Debug, Clone, Copy)]
 struct Columns {
     name: usize,
+    flag: usize,
     dirty: usize,
     track: usize,
     chips: usize,
@@ -156,10 +217,11 @@ struct Columns {
 }
 
 impl Columns {
-    fn fit(rows: &[Row<'_>]) -> Self {
+    fn fit(rows: &[Row<'_>], overlaps: &Overlaps) -> Self {
         let max = |f: &dyn Fn(&Row<'_>) -> usize| rows.iter().map(f).max().unwrap_or(0);
         Self {
             name: max(&|r| width(&name(r))).min(MAX_NAME_W),
+            flag: max(&|r| flag(r, overlaps).map_or(0, |(text, _)| width(&text))),
             dirty: max(&|r| width(&dirty(r))),
             track: max(&|r| width(&tracking(r))),
             chips: max(&|r| r.changes().map_or(0, |e| spans_width(&chips(e)))),
@@ -219,7 +281,14 @@ fn counts(r: &Row<'_>) -> (u64, u64) {
     }
 }
 
-fn row(r: &Row<'_>, c: Columns, selected: bool, width_total: usize, now: i64) -> Line<'static> {
+fn row(
+    r: &Row<'_>,
+    marked: Option<(String, Style)>,
+    c: Columns,
+    selected: bool,
+    width_total: usize,
+    now: i64,
+) -> Line<'static> {
     let (kind_text, kind_style) = kind(r);
     let name_style = if selected {
         theme::accent_bold()
@@ -233,6 +302,10 @@ fn row(r: &Row<'_>, c: Columns, selected: bool, width_total: usize, now: i64) ->
         Span::styled(pad(&name(r), c.name), name_style),
         Span::raw("  "),
     ];
+    if c.flag > 0 {
+        let (text, style) = marked.unwrap_or_default();
+        spans.push(Span::styled(pad(&text, c.flag + 2), style));
+    }
     if c.dirty > 0 {
         spans.push(Span::styled(
             pad(&dirty(r), c.dirty + 2),
