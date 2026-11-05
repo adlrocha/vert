@@ -4,6 +4,7 @@
 pub mod branches;
 pub mod diff;
 pub mod feed;
+pub mod overlap;
 
 use std::path::{Path, PathBuf};
 
