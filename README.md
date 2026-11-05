@@ -267,7 +267,7 @@ the event loop. This keeps all interaction logic testable without a terminal.
 
 | Module      | Responsibility                                                   |
 | ----------- | ---------------------------------------------------------------- |
-| `git`       | Feed entries (with a per-commit cache), branches and worktrees, structured diffs |
+| `git`       | Feed entries (with a per-commit cache), branches and worktrees, collisions between them, structured diffs |
 | `github`    | `origin` detection, token lookup, open pull requests and their diffs |
 | `explain`   | Prompts, agent routing, answer validation and caching, diagram layout |
 | `labels`    | Size, breadth and revert classification                          |

@@ -57,7 +57,8 @@ pub struct Collision {
 pub struct Overlaps {
     /// Collisions, the most serious first, then by name.
     pub collisions: Vec<Collision>,
-    /// Pairs compared by file only because [`Options::max_checks`] ran out.
+    /// Pairs of lines of work left for a later pass because
+    /// [`Options::max_checks`] ran out. They reach [`Level::Overlap`] at most.
     pub unchecked: usize,
 }
 
@@ -66,8 +67,8 @@ pub struct Overlaps {
 pub struct Options<'a> {
     /// Files that never count, by file name or repository-relative path.
     pub ignore: &'a [String],
-    /// Maximum pairs to run a merge check on in one pass. Results are cached,
-    /// so the next pass carries on with the pairs left over.
+    /// Maximum merge checks in one pass, one per distinct pair of tips. Results
+    /// are cached, so the next pass carries on with the pairs left over.
     pub max_checks: usize,
 }
 
@@ -113,11 +114,6 @@ impl<'a> Side<'a> {
 
     fn touched(&self) -> BTreeSet<&String> {
         self.committed.union(&self.dirty).collect()
-    }
-
-    /// The other side of `self`'s own remote copy, or the same checkout.
-    fn same_branch(&self, other: &Self) -> bool {
-        self.branch.branch.is_some() && self.branch.branch == other.branch.branch
     }
 
     /// What this side changes in a comparison whose committed part is `since`.
@@ -215,7 +211,7 @@ struct Pass<'a> {
 
 impl Pass<'_> {
     fn compare(&mut self, a: &Side<'_>, b: &Side<'_>) -> Result<Option<Collision>, GitError> {
-        if a.same_branch(b) || a.touched().is_disjoint(&b.touched()) {
+        if a.touched().is_disjoint(&b.touched()) {
             return Ok(None);
         }
         let none = BTreeSet::new();
@@ -240,8 +236,9 @@ impl Pass<'_> {
         Ok(collision(a, b, &changes, &m.conflicts))
     }
 
-    /// The merge check of a pair of tips: cached, or run if any are left.
-    /// `None` when the two share no history or no check was left to run.
+    /// The merge check of a pair of tips: cached, or run if any are left. Past
+    /// the limit, what each side changed still comes back, without conflicts.
+    /// `None` when the two share no history.
     fn merge(&mut self, x: Oid, y: Oid) -> Result<Option<Merge>, GitError> {
         let key = (x.min(y), x.max(y));
         if let Some(known) = self.used.get(&key) {
@@ -253,7 +250,7 @@ impl Pass<'_> {
         }
         if self.checks_left == 0 {
             self.unchecked += 1;
-            return Ok(None);
+            return diverged(self.repo, key.0, key.1);
         }
         self.checks_left -= 1;
         let merge = check_merge(self.repo, key.0, key.1)?;
@@ -291,8 +288,9 @@ fn collision(
     })
 }
 
-/// Merges `lower` and `higher` in memory, or `None` without shared history.
-fn check_merge(repo: &Repository, lower: Oid, higher: Oid) -> Result<Option<Merge>, GitError> {
+/// What `lower` and `higher` changed since they diverged, with no conflicts
+/// looked for yet, or `None` without shared history.
+fn diverged(repo: &Repository, lower: Oid, higher: Oid) -> Result<Option<Merge>, GitError> {
     let base = match repo.merge_base(lower, higher) {
         Ok(base) => base,
         Err(e) if e.code() == ErrorCode::NotFound => return Ok(None),
@@ -302,6 +300,18 @@ fn check_merge(repo: &Repository, lower: Oid, higher: Oid) -> Result<Option<Merg
                 source,
             });
         }
+    };
+    Ok(Some(Merge {
+        lower: changed_since(repo, base, lower)?,
+        higher: changed_since(repo, base, higher)?,
+        conflicts: BTreeSet::new(),
+    }))
+}
+
+/// Merges `lower` and `higher` in memory, or `None` without shared history.
+fn check_merge(repo: &Repository, lower: Oid, higher: Oid) -> Result<Option<Merge>, GitError> {
+    let Some(merge) = diverged(repo, lower, higher)? else {
+        return Ok(None);
     };
     let ours = repo.find_commit(lower).ctx("read branch tip")?;
     let theirs = repo.find_commit(higher).ctx("read branch tip")?;
@@ -320,11 +330,7 @@ fn check_merge(repo: &Repository, lower: Oid, higher: Oid) -> Result<Option<Merg
                 .map(|e| String::from_utf8_lossy(&e.path).into_owned()),
         );
     }
-    Ok(Some(Merge {
-        lower: changed_since(repo, base, lower)?,
-        higher: changed_since(repo, base, higher)?,
-        conflicts,
-    }))
+    Ok(Some(Merge { conflicts, ..merge }))
 }
 
 /// The paths changed between `base` and `head`, both sides of a rename included.
@@ -374,6 +380,7 @@ mod tests {
         t.write("shared.txt", LINES);
         t.write("other.txt", "other\n");
         t.commit("base");
+        t.rename_head_to_main();
         t
     }
 
@@ -576,25 +583,22 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_is_not_compared_with_its_own_remote_copy() {
+    fn branches_of_one_name_on_two_remotes_are_compared() {
         let t = repo_with_base();
-        commit_on(&t, "feat", "shared.txt", Some("local\n"));
-        commit_on(&t, "pushed", "shared.txt", Some("remote\n"));
-        let mut list = load(&t.repo);
-        let row = list
-            .branches
-            .iter_mut()
-            .find(|b| b.name == "pushed")
-            .expect("row");
-        row.name = "origin/feat".to_owned();
-        row.branch = Some("feat".to_owned());
-        row.remote = true;
-        let opts = Options {
-            ignore: &[],
-            max_checks: 100,
-        };
-        let found = find(&t.repo, &list, opts, &mut MergeCache::new()).expect("find");
-        assert_eq!(found, Overlaps::default());
+        let ours = commit_on(&t, "ours", "shared.txt", Some("ours\n"));
+        let theirs = commit_on(&t, "theirs", "shared.txt", Some("theirs\n"));
+        for (name, oid) in [("origin", ours), ("upstream", theirs)] {
+            t.repo
+                .reference(&format!("refs/remotes/{name}/feat"), oid, true, "test")
+                .expect("remote ref");
+        }
+        for local in ["ours", "theirs"] {
+            t.repo
+                .find_branch(local, BranchType::Local)
+                .and_then(|mut b| b.delete())
+                .expect("delete");
+        }
+        assert_eq!(only(&scan(&t, &[])).level, Level::Conflict);
     }
 
     #[test]
@@ -703,6 +707,23 @@ mod tests {
         let cached = pass(0);
         assert_eq!(cached.unchecked, 0);
         assert_eq!(only(&cached).level, Level::Conflict);
+    }
+
+    #[test]
+    fn a_stacked_branch_past_the_limit_is_not_blamed_for_what_it_inherited() {
+        let t = repo_with_base();
+        let tip = commit_on(&t, "lower", "shared.txt", Some("lower\n"));
+        let commit = t.repo.find_commit(tip).expect("commit");
+        t.repo.branch("upper", &commit, false).expect("branch");
+        commit_on(&t, "upper", "other.txt", Some("upper\n"));
+        let opts = Options {
+            ignore: &[],
+            max_checks: 0,
+        };
+        let list = load(&t.repo);
+        let found = find(&t.repo, &list, opts, &mut MergeCache::new()).expect("find");
+        assert_eq!(found.collisions, []);
+        assert_eq!(found.unchecked, 1);
     }
 
     #[test]
