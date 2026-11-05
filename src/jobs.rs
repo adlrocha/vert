@@ -179,6 +179,17 @@ pub fn begin(effect: &Effect, ctx: &Context) {
     }
 }
 
+/// Loads the diff of `entry`, keeping what the request asked for with it.
+fn diff_message(mut entry: Box<Entry>, refresh: bool, file: Option<String>, ctx: &Context) -> Msg {
+    let result = load_diff(&mut entry, ctx);
+    Msg::Diff {
+        entry,
+        result,
+        refresh,
+        file,
+    }
+}
+
 /// Finds where the lines of work in `list` collide.
 fn find_overlaps(
     list: &git::branches::Branches,
@@ -240,14 +251,11 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
                 .map_err(|e| describe(&e));
             Msg::Text { generation, result }
         }
-        Effect::LoadDiff { mut entry, refresh } => {
-            let result = load_diff(&mut entry, ctx);
-            Msg::Diff {
-                entry,
-                result,
-                refresh,
-            }
-        }
+        Effect::LoadDiff {
+            entry,
+            refresh,
+            file,
+        } => diff_message(entry, refresh, file, ctx),
         Effect::LoadBranches => {
             let mut cache = ctx
                 .branch_cache
@@ -552,6 +560,7 @@ mod tests {
             Effect::LoadDiff {
                 entry: Box::new(wt),
                 refresh: true,
+                file: None,
             },
             &c,
         )
@@ -691,11 +700,14 @@ mod tests {
             .expect("linked worktree is dirty");
         let root = dirty.root.clone();
         let Some(Msg::Diff {
-            result: Ok(files), ..
+            result: Ok(files),
+            file,
+            ..
         }) = run(
             Effect::LoadDiff {
                 entry: Box::new(dirty),
                 refresh: false,
+                file: Some("extra.txt".to_owned()),
             },
             &c,
         )
@@ -703,6 +715,7 @@ mod tests {
             panic!("diff")
         };
         assert_eq!(files[0].stat.path, "extra.txt");
+        assert_eq!(file.as_deref(), Some("extra.txt"));
         let Some(Msg::File {
             content: Ok(text),
             root: back,
@@ -817,6 +830,7 @@ mod tests {
                 Effect::LoadDiff {
                     entry: Box::new(crate::app::pull_entry(&pull)),
                     refresh: false,
+                    file: None,
                 },
                 c,
             ) else {

@@ -377,7 +377,6 @@ fn row(
     Line::from(spans)
 }
 
-/// The `d` key's confirmation: what will go, and what is risky about it.
 /// The glyph and style of a collision level.
 fn level_mark(level: Level) -> (&'static str, Style) {
     match level {
@@ -430,6 +429,7 @@ pub(super) fn draw_collisions(frame: &mut Frame<'_>, area: Rect, app: &mut App) 
     );
 }
 
+/// The `d` key's confirmation: what will go, and what is risky about it.
 pub(super) fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(removal) = &app.branches.confirm else {
         return;

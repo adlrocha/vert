@@ -791,6 +791,7 @@ mod render_tests {
             entry: Box::new(entry),
             result: files,
             refresh: false,
+            file: None,
         });
         for (w, h) in SIZES {
             screen(&mut app, w, h);
@@ -843,6 +844,7 @@ mod render_tests {
             entry: Box::new(app.feed.commits[0].clone()),
             result: Ok(Vec::new()),
             refresh: false,
+            file: None,
         });
         assert!(screen(&mut app, 100, 20).contains("No changes"));
     }
@@ -934,6 +936,7 @@ mod render_tests {
                 hunks: Vec::new(),
             }]),
             refresh: false,
+            file: None,
         });
         assert!(screen(&mut app, 140, 20).contains("← src/old.rs"));
         app.views.clear();
@@ -944,6 +947,7 @@ mod render_tests {
             entry: Box::new(wt),
             result: Ok(Vec::new()),
             refresh: false,
+            file: None,
         });
         assert!(screen(&mut app, 140, 20).contains("Uncommitted changes"));
     }
@@ -959,6 +963,7 @@ mod render_tests {
             entry: Box::new(entry),
             result: Ok(files.clone()),
             refresh: false,
+            file: None,
         });
         assert!(screen(&mut app, 140, 30).contains("x explain"));
         let effects = app.update(Msg::Key(KeyEvent::new(
@@ -1459,6 +1464,7 @@ mod render_tests {
             entry: Box::new(dirty),
             result: Ok(Vec::new()),
             refresh: false,
+            file: None,
         });
         let s = screen(&mut app, 140, 20);
         assert!(s.contains("Uncommitted changes in agent-wt"), "{s}");

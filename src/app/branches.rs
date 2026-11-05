@@ -8,7 +8,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{App, Effect, ListPos, Loader, Tab, View};
 use crate::git::Target;
 use crate::git::branches::{Branch, Branches};
-use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
 use crate::git::overlap::{Level, Overlaps};
 use crate::github::{ORIGIN, PullRequest, PullsError};
@@ -215,8 +214,6 @@ pub struct BranchesState {
     pub overlap_error: Option<String>,
     /// The open list of collisions.
     pub collisions: Option<CollisionList>,
-    /// The change about to open, and the file to select in it.
-    focus_file: Option<(String, String)>,
     load: Loader,
     overlap_load: Loader,
     pulls_load: Loader,
@@ -232,11 +229,7 @@ fn change_holding(branch: &Branch, path: &str) -> Option<Entry> {
     dirty
         .into_iter()
         .chain(&branch.changes)
-        .find(|e| {
-            e.files
-                .iter()
-                .any(|f| f.path == path || f.old_path.as_deref() == Some(path))
-        })
+        .find(|e| e.touches_path(path))
         .cloned()
 }
 
@@ -334,20 +327,6 @@ impl BranchesState {
             rows,
             pos: ListPos::default(),
         }
-    }
-
-    /// Where to start in the diff of change `id`: the file asked for, if the
-    /// diff has it, else the first.
-    pub(super) fn take_focus(&mut self, id: &str, files: &[FileDiff]) -> usize {
-        self.focus_file
-            .take()
-            .filter(|(wanted, _)| wanted == id)
-            .and_then(|(_, path)| {
-                files.iter().position(|f| {
-                    f.stat.path == path || f.stat.old_path.as_deref() == Some(path.as_str())
-                })
-            })
-            .unwrap_or(0)
     }
 
     fn selected_key(&self) -> Option<String> {
@@ -511,6 +490,7 @@ impl App {
         Some(Effect::LoadDiff {
             entry: Box::new(entry),
             refresh: true,
+            file: None,
         })
     }
 
@@ -620,10 +600,10 @@ impl App {
             self.notice = Some(format!("{} has moved on; nothing to open", list.name));
             return Vec::new();
         };
-        self.branches.focus_file = Some((entry.id.clone(), row.path.clone()));
         vec![Effect::LoadDiff {
             entry: Box::new(entry),
             refresh: false,
+            file: Some(row.path.clone()),
         }]
     }
 
@@ -659,6 +639,7 @@ impl App {
                 vec![Effect::LoadDiff {
                     entry: Box::new(e),
                     refresh: false,
+                    file: None,
                 }]
             })
             .unwrap_or_default()
@@ -956,7 +937,14 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         let effects = press(&mut app, KeyCode::Enter);
         assert_eq!(app.branches.collisions, None);
-        let [Effect::LoadDiff { entry, refresh }] = effects.as_slice() else {
+        let [
+            Effect::LoadDiff {
+                entry,
+                refresh,
+                file,
+            },
+        ] = effects.as_slice()
+        else {
             panic!("expected a diff: {effects:?}");
         };
         assert_eq!(entry.id, "branch:a");
@@ -965,23 +953,31 @@ mod tests {
             entry: entry.clone(),
             result: Ok(vec![file_diff("x.rs"), file_diff("a.rs")]),
             refresh: false,
+            file: file.clone(),
         });
         let detail = app.views.last().and_then(View::as_detail).expect("detail");
         assert_eq!(detail.pos.selected, 1);
     }
 
+    /// The file selected once a diff of `files` opens on `file`.
+    fn selected_in(files: Vec<FileDiff>, file: Option<&str>) -> usize {
+        let mut app = app(false);
+        app.update(Msg::Diff {
+            entry: Box::new(change("one", 100, Target::WorkingTree)),
+            result: Ok(files),
+            refresh: false,
+            file: file.map(str::to_owned),
+        });
+        let detail = app.views.last().and_then(View::as_detail).expect("detail");
+        detail.pos.selected
+    }
+
     #[test]
-    fn a_focus_only_applies_to_the_diff_it_was_meant_for() {
-        let mut state = BranchesState {
-            focus_file: Some(("one".to_owned(), "x.rs".to_owned())),
-            ..BranchesState::default()
-        };
-        let files = [file_diff("a.rs"), file_diff("x.rs")];
-        assert_eq!(state.take_focus("other", &files), 0);
-        assert_eq!(state.take_focus("one", &files), 0, "used up");
-        state.focus_file = Some(("one".to_owned(), "gone.rs".to_owned()));
-        assert_eq!(state.take_focus("one", &files), 0);
-        state.focus_file = Some(("one".to_owned(), "old.rs".to_owned()));
+    fn a_diff_opens_on_the_file_asked_for_if_it_has_it() {
+        let files = || vec![file_diff("a.rs"), file_diff("x.rs")];
+        assert_eq!(selected_in(files(), Some("x.rs")), 1);
+        assert_eq!(selected_in(files(), Some("gone.rs")), 0);
+        assert_eq!(selected_in(files(), None), 0);
         let moved = FileDiff {
             stat: FileStat {
                 old_path: Some("old.rs".to_owned()),
@@ -989,7 +985,26 @@ mod tests {
             },
             hunks: Vec::new(),
         };
-        assert_eq!(state.take_focus("one", &[file_diff("a.rs"), moved]), 1);
+        assert_eq!(
+            selected_in(vec![file_diff("a.rs"), moved], Some("old.rs")),
+            1
+        );
+    }
+
+    #[test]
+    fn another_diff_landing_first_keeps_the_file_asked_for() {
+        let mut app = app(false);
+        let diff = |id: &str, file: Option<&str>| Msg::Diff {
+            entry: Box::new(change(id, 100, Target::WorkingTree)),
+            result: Ok(vec![file_diff("a.rs"), file_diff("x.rs")]),
+            refresh: false,
+            file: file.map(str::to_owned),
+        };
+        app.update(diff("other", None));
+        app.update(diff("one", Some("x.rs")));
+        let detail = app.views.last().and_then(View::as_detail).expect("detail");
+        assert_eq!(detail.entry.id, "one");
+        assert_eq!(detail.pos.selected, 1);
     }
 
     #[test]
@@ -1274,6 +1289,7 @@ mod tests {
                 Effect::LoadDiff {
                     entry,
                     refresh: false,
+                    file: None,
                 },
             ] => entry.id.clone(),
             other => panic!("expected a diff, got {other:?}"),
@@ -1447,6 +1463,7 @@ mod tests {
             entry: entry.clone(),
             result: Ok(vec![file("a.rs")]),
             refresh: false,
+            file: None,
         });
         // The watcher can't see linked worktrees, so polling keeps going
         // behind the open diff; pull requests wait until it closes.
@@ -1459,6 +1476,7 @@ mod tests {
             Effect::LoadDiff {
                 entry: fresh,
                 refresh: true,
+                file: None,
             },
         ] = reload.as_slice()
         else {
@@ -1473,11 +1491,13 @@ mod tests {
             entry: Box::new(other),
             result: Ok(vec![file("zzz.rs")]),
             refresh: true,
+            file: None,
         });
         app.update(Msg::Diff {
             entry: fresh.clone(),
             result: Ok(vec![file("b.rs"), file("c.rs")]),
             refresh: true,
+            file: None,
         });
         let Some(View::Detail(d)) = app.views.last() else {
             panic!("detail")
@@ -1493,6 +1513,7 @@ mod tests {
             Effect::LoadDiff {
                 entry: clean,
                 refresh: true,
+                file: None,
             },
         ] = reload.as_slice()
         else {
@@ -1541,6 +1562,7 @@ mod tests {
                 hunks: Vec::new(),
             }]),
             refresh: false,
+            file: None,
         });
         let effects = press(&mut app, KeyCode::Char('e'));
         assert!(
@@ -1855,6 +1877,7 @@ mod tests {
             entry: Box::new(entry),
             result: Ok(Vec::new()),
             refresh: false,
+            file: None,
         });
         assert!(!app.views.is_empty());
         // esc leaves the view; the (invisible) filter does not swallow it.

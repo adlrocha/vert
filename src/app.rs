@@ -447,6 +447,8 @@ pub enum Msg {
         result: Result<Vec<FileDiff>, String>,
         /// Whether this refreshes an open detail view rather than opening one.
         refresh: bool,
+        /// The file to start on, if not the first.
+        file: Option<String>,
     },
     /// A file for the viewer was read.
     File {
@@ -511,6 +513,8 @@ pub enum Effect {
         entry: Box<Entry>,
         /// Whether to refresh the open detail view.
         refresh: bool,
+        /// The file to start on, if not the first.
+        file: Option<String>,
     },
     /// Read a file for the viewer.
     OpenFile {
@@ -725,10 +729,11 @@ impl App {
                 entry,
                 result,
                 refresh,
+                file,
             } => {
                 match result {
                     Ok(files) if refresh => self.refresh_detail(*entry, files),
-                    Ok(files) => self.open_detail(*entry, files),
+                    Ok(files) => self.open_detail(*entry, files, file.as_deref()),
                     Err(e) => self.notice = Some(format!("Could not load diff: {e}")),
                 }
                 Vec::new()
@@ -810,6 +815,7 @@ impl App {
                     effects.push(Effect::LoadDiff {
                         entry: Box::new(wt.clone()),
                         refresh: true,
+                        file: None,
                     });
                 }
             }
@@ -884,8 +890,11 @@ impl App {
         self.search.pos = ListPos::default();
     }
 
-    fn open_detail(&mut self, entry: Entry, files: Vec<FileDiff>) {
-        let selected = self.branches.take_focus(&entry.id, &files);
+    /// Opens the diff of `entry` on `file` if it has that file, else the first.
+    fn open_detail(&mut self, entry: Entry, files: Vec<FileDiff>, file: Option<&str>) {
+        let selected = file
+            .and_then(|path| files.iter().position(|f| f.stat.touches(path)))
+            .unwrap_or(0);
         let rendered = files
             .get(selected)
             .map(|f| build_diff(f, self.max_highlight))
@@ -1059,6 +1068,7 @@ impl App {
                     return vec![Effect::LoadDiff {
                         entry: Box::new(entry),
                         refresh: false,
+                        file: None,
                     }];
                 }
             }

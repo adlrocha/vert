@@ -145,7 +145,7 @@ fn new_commits_are_fresh_until_opened() {
     assert_eq!(app.feed.pos.selected, 0);
     let effects = app.update(key(KeyCode::Enter));
     assert!(
-        matches!(&effects[..], [Effect::LoadDiff { entry, refresh: false }] if entry.id == "c4")
+        matches!(&effects[..], [Effect::LoadDiff { entry, refresh: false, .. }] if entry.id == "c4")
     );
     assert!(app.feed.fresh.is_empty());
 }
@@ -199,6 +199,7 @@ fn worktree_entry_comes_first_and_refreshes_open_detail() {
         entry: Box::new(wt.clone()),
         result: Ok(vec![file_diff("src/a.rs"), file_diff("src/live.rs")]),
         refresh: false,
+        file: None,
     });
     if let Some(View::Detail(d)) = app.views.last_mut() {
         d.pos.selected = 1;
@@ -213,6 +214,7 @@ fn worktree_entry_comes_first_and_refreshes_open_detail() {
         entry: Box::new(wt),
         result: Ok(vec![file_diff("src/live.rs")]),
         refresh: true,
+        file: None,
     });
     let Some(View::Detail(d)) = app.views.last() else {
         panic!("detail")
@@ -231,6 +233,7 @@ fn worktree_diff_under_an_explanation_stays_live() {
         entry: Box::new(wt.clone()),
         result: Ok(vec![file_diff("src/a.rs")]),
         refresh: false,
+        file: None,
     });
     app.set_explainer(&Ok(crate::app::pi_for_tests()));
     app.update(ch('x'));
@@ -246,6 +249,7 @@ fn worktree_diff_under_an_explanation_stays_live() {
         entry: Box::new(wt),
         result: Ok(vec![file_diff("src/a.rs"), file_diff("src/live.rs")]),
         refresh: true,
+        file: None,
     });
     assert!(
         matches!(app.views.last(), Some(View::Explain(_))),
@@ -503,6 +507,7 @@ fn open_detail(app: &mut App) {
         entry: Box::new(entry("c3", 9_000, &["src/a.rs", "docs/x.md"])),
         result: Ok(vec![file_diff("src/a.rs"), file_diff("docs/x.md")]),
         refresh: false,
+        file: None,
     });
 }
 
@@ -589,6 +594,7 @@ fn diff_errors_become_notices() {
         entry: Box::new(entry("c1", 0, &[])),
         result: Err("nope".to_owned()),
         refresh: false,
+        file: None,
     });
     assert!(app.views.is_empty());
     assert!(app.notice.as_deref().is_some_and(|n| n.contains("nope")));
