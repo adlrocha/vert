@@ -8,8 +8,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{App, Effect, ListPos, Loader, Tab, View};
 use crate::git::Target;
 use crate::git::branches::{Branch, Branches};
+use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
-use crate::git::overlap::Overlaps;
+use crate::git::overlap::{Level, Overlaps};
 use crate::github::{ORIGIN, PullRequest, PullsError};
 use crate::search::fuzzy_match;
 use git2::Oid;
@@ -140,6 +141,29 @@ impl Row<'_> {
     }
 }
 
+/// One file a line of work collides on, with one other line of work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollisionRow {
+    /// The other line of work.
+    pub other: String,
+    /// Repository-relative path.
+    pub path: String,
+    /// How seriously they collide on it.
+    pub level: Level,
+}
+
+/// What the selected line of work collides with, open from the `c` key. It
+/// is a snapshot, so rows don't move while a reload lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollisionList {
+    /// The line of work.
+    pub name: String,
+    /// Its collisions, the most serious first.
+    pub rows: Vec<CollisionRow>,
+    /// Selection.
+    pub pos: ListPos,
+}
+
 /// A branch a confirmed removal deletes, snapshotted when it was confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchRemoval {
@@ -189,6 +213,10 @@ pub struct BranchesState {
     pub overlaps: Overlaps,
     /// Why collisions could not be found the last time.
     pub overlap_error: Option<String>,
+    /// The open list of collisions.
+    pub collisions: Option<CollisionList>,
+    /// The change about to open, and the file to select in it.
+    focus_file: Option<(String, String)>,
     load: Loader,
     overlap_load: Loader,
     pulls_load: Loader,
@@ -196,6 +224,20 @@ pub struct BranchesState {
     last_load: Option<i64>,
     /// When pull requests were last requested (Unix seconds).
     last_pulls: Option<i64>,
+}
+
+/// The change of `branch` that touches `path`: its uncommitted work first.
+fn change_holding(branch: &Branch, path: &str) -> Option<Entry> {
+    let dirty = branch.worktree.as_ref().and_then(|w| w.dirty.as_ref());
+    dirty
+        .into_iter()
+        .chain(&branch.changes)
+        .find(|e| {
+            e.files
+                .iter()
+                .any(|f| f.path == path || f.old_path.as_deref() == Some(path))
+        })
+        .cloned()
 }
 
 /// Whether a row's branch, checkout directory or pull request name fuzzily
@@ -272,6 +314,40 @@ impl BranchesState {
     #[must_use]
     pub const fn loading(&self) -> bool {
         self.load.in_flight || self.pulls_load.in_flight
+    }
+
+    fn collisions_of(&self, name: &str) -> CollisionList {
+        let mut rows: Vec<_> = self
+            .overlaps
+            .of(name)
+            .flat_map(|c| {
+                c.files.iter().map(|f| CollisionRow {
+                    other: c.other(name).to_owned(),
+                    path: f.path.clone(),
+                    level: f.level,
+                })
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.level));
+        CollisionList {
+            name: name.to_owned(),
+            rows,
+            pos: ListPos::default(),
+        }
+    }
+
+    /// Where to start in the diff of change `id`: the file asked for, if the
+    /// diff has it, else the first.
+    pub(super) fn take_focus(&mut self, id: &str, files: &[FileDiff]) -> usize {
+        self.focus_file
+            .take()
+            .filter(|(wanted, _)| wanted == id)
+            .and_then(|(_, path)| {
+                files.iter().position(|f| {
+                    f.stat.path == path || f.stat.old_path.as_deref() == Some(path.as_str())
+                })
+            })
+            .unwrap_or(0)
     }
 
     fn selected_key(&self) -> Option<String> {
@@ -486,12 +562,69 @@ impl App {
         if key.code == KeyCode::Char('d') {
             return self.ask_remove();
         }
+        if key.code == KeyCode::Char('c') {
+            self.open_collisions();
+            return Vec::new();
+        }
         if key.code == KeyCode::Esc && !self.branches.name_filter.is_empty() {
             self.branches.name_filter.clear();
             self.branches.pos = ListPos::default();
             return Vec::new();
         }
         self.open_selected(key.code)
+    }
+
+    /// Lists what the selected row collides with, or says there is nothing.
+    fn open_collisions(&mut self) {
+        let list = self
+            .branches
+            .rows()
+            .get(self.branches.pos.selected)
+            .and_then(|r| r.branch)
+            .map(|b| self.branches.collisions_of(&b.name))
+            .filter(|l| !l.rows.is_empty());
+        if list.is_none() {
+            self.notice = Some("No collisions on this line of work".to_owned());
+        }
+        self.branches.collisions = list;
+    }
+
+    /// Moves through the open list; `⏎` opens the file, anything else closes.
+    pub(super) fn on_collisions_key(&mut self, key: &KeyEvent) -> Vec<Effect> {
+        let Some(list) = self.branches.collisions.as_mut() else {
+            return Vec::new();
+        };
+        if list.pos.navigate(key, list.rows.len()) {
+            return Vec::new();
+        }
+        let list = self.branches.collisions.take();
+        if key.code == KeyCode::Enter {
+            return list.map_or_else(Vec::new, |l| self.open_collision(&l));
+        }
+        Vec::new()
+    }
+
+    /// Opens the diff of `list`'s line of work that holds the selected file.
+    fn open_collision(&mut self, list: &CollisionList) -> Vec<Effect> {
+        let Some(row) = list.rows.get(list.pos.selected) else {
+            return Vec::new();
+        };
+        let entry = self
+            .branches
+            .list
+            .branches
+            .iter()
+            .find(|b| b.name == list.name)
+            .and_then(|b| change_holding(b, &row.path));
+        let Some(entry) = entry else {
+            self.notice = Some(format!("{} has moved on; nothing to open", list.name));
+            return Vec::new();
+        };
+        self.branches.focus_file = Some((entry.id.clone(), row.path.clone()));
+        vec![Effect::LoadDiff {
+            entry: Box::new(entry),
+            refresh: false,
+        }]
     }
 
     /// Opens a diff of the selected row: `code` picks which, mirroring the
@@ -651,7 +784,7 @@ mod tests {
     use crate::git::RepoInfo;
     use crate::git::branches::Worktree;
     use crate::git::diff::FileDiff;
-    use crate::git::overlap::{Collision, Level};
+    use crate::git::overlap::{Collision, SharedFile};
     use crate::git::{FileStat, FileStatus};
 
     fn press(app: &mut App, code: KeyCode) -> Vec<Effect> {
@@ -713,6 +846,175 @@ mod tests {
             }],
             unchecked: 0,
         }
+    }
+
+    fn with_files(mut b: Branch, paths: &[&str]) -> Branch {
+        let files = paths.iter().map(|p| stat(p)).collect();
+        if let Some(e) = b.changes.as_mut() {
+            e.files = files;
+        }
+        b
+    }
+
+    fn stat(path: &str) -> FileStat {
+        FileStat {
+            path: (*path).to_owned(),
+            old_path: None,
+            status: FileStatus::Modified,
+            added: 1,
+            removed: 0,
+            binary: false,
+        }
+    }
+
+    fn file_diff(path: &str) -> FileDiff {
+        FileDiff {
+            stat: stat(path),
+            hunks: Vec::new(),
+        }
+    }
+
+    /// An app on the Branches tab with `a` selected: it conflicts with `b` on
+    /// `x.rs`, and overlaps it on `a.rs` and with `c` on `y.rs`.
+    fn colliding_app() -> App {
+        let mut app = app(false);
+        press(&mut app, KeyCode::Char('4'));
+        app.update(Msg::Branches(Ok(Branches {
+            base: None,
+            branches: vec![
+                with_files(branch("a", 300), &["a.rs", "x.rs", "y.rs"]),
+                branch("b", 200),
+                branch("c", 100),
+            ],
+        })));
+        let file = |path: &str, level| SharedFile {
+            path: path.to_owned(),
+            level,
+        };
+        app.update(Msg::Overlaps(Ok(Overlaps {
+            collisions: vec![
+                Collision {
+                    first: "a".to_owned(),
+                    second: "b".to_owned(),
+                    level: Level::Conflict,
+                    files: vec![file("a.rs", Level::Overlap), file("x.rs", Level::Conflict)],
+                },
+                Collision {
+                    first: "c".to_owned(),
+                    second: "a".to_owned(),
+                    level: Level::Overlap,
+                    files: vec![file("y.rs", Level::Overlap)],
+                },
+            ],
+            unchecked: 0,
+        })));
+        app
+    }
+
+    fn listed(app: &App) -> Vec<(String, String)> {
+        app.branches
+            .collisions
+            .iter()
+            .flat_map(|l| &l.rows)
+            .map(|r| (r.other.clone(), r.path.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn c_lists_the_collisions_of_a_row_most_serious_first() {
+        let mut app = colliding_app();
+        assert_eq!(press(&mut app, KeyCode::Char('c')), []);
+        let pair = |o: &str, p: &str| (o.to_owned(), p.to_owned());
+        assert_eq!(
+            listed(&app),
+            [pair("b", "x.rs"), pair("b", "a.rs"), pair("c", "y.rs")]
+        );
+        press(&mut app, KeyCode::Char('j'));
+        let selected = app.branches.collisions.as_ref().map(|l| l.pos.selected);
+        assert_eq!(selected, Some(1));
+        assert_eq!(press(&mut app, KeyCode::Esc), []);
+        assert_eq!(app.branches.collisions, None);
+    }
+
+    #[test]
+    fn c_says_so_when_a_row_collides_with_nothing() {
+        let mut app = app(false);
+        press(&mut app, KeyCode::Char('4'));
+        app.update(Msg::Branches(Ok(list_of(&["a"]))));
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.branches.collisions, None);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("No collisions on this line of work")
+        );
+    }
+
+    #[test]
+    fn enter_opens_the_diff_on_the_colliding_file() {
+        let mut app = colliding_app();
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('j'));
+        let effects = press(&mut app, KeyCode::Enter);
+        assert_eq!(app.branches.collisions, None);
+        let [Effect::LoadDiff { entry, refresh }] = effects.as_slice() else {
+            panic!("expected a diff: {effects:?}");
+        };
+        assert_eq!(entry.id, "branch:a");
+        assert!(!refresh);
+        app.update(Msg::Diff {
+            entry: entry.clone(),
+            result: Ok(vec![file_diff("x.rs"), file_diff("a.rs")]),
+            refresh: false,
+        });
+        let detail = app.views.last().and_then(View::as_detail).expect("detail");
+        assert_eq!(detail.pos.selected, 1);
+    }
+
+    #[test]
+    fn a_focus_only_applies_to_the_diff_it_was_meant_for() {
+        let mut state = BranchesState {
+            focus_file: Some(("one".to_owned(), "x.rs".to_owned())),
+            ..BranchesState::default()
+        };
+        let files = [file_diff("a.rs"), file_diff("x.rs")];
+        assert_eq!(state.take_focus("other", &files), 0);
+        assert_eq!(state.take_focus("one", &files), 0, "used up");
+        state.focus_file = Some(("one".to_owned(), "gone.rs".to_owned()));
+        assert_eq!(state.take_focus("one", &files), 0);
+        state.focus_file = Some(("one".to_owned(), "old.rs".to_owned()));
+        let moved = FileDiff {
+            stat: FileStat {
+                old_path: Some("old.rs".to_owned()),
+                ..stat("new.rs")
+            },
+            hunks: Vec::new(),
+        };
+        assert_eq!(state.take_focus("one", &[file_diff("a.rs"), moved]), 1);
+    }
+
+    #[test]
+    fn uncommitted_work_is_opened_when_it_holds_the_file() {
+        let mut dirty = checkout("a", false, true);
+        if let Some(e) = dirty.worktree.as_mut().and_then(|w| w.dirty.as_mut()) {
+            e.files = vec![stat("x.rs")];
+        }
+        let dirty = with_files(dirty, &["y.rs"]);
+        let id = |path| change_holding(&dirty, path).map(|e| e.id);
+        assert_eq!(id("x.rs").as_deref(), Some("worktree:a"));
+        assert_eq!(id("y.rs").as_deref(), Some("branch:a"));
+        assert_eq!(id("z.rs"), None);
+    }
+
+    #[test]
+    fn a_line_of_work_that_moved_on_opens_nothing() {
+        let mut app = colliding_app();
+        press(&mut app, KeyCode::Char('c'));
+        app.update(Msg::Branches(Ok(list_of(&["b", "c"]))));
+        assert_eq!(press(&mut app, KeyCode::Enter), []);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("a has moved on; nothing to open")
+        );
     }
 
     #[test]

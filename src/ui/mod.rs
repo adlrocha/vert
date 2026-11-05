@@ -61,6 +61,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.branches.confirm.is_some() {
         branches::draw_confirm(frame, frame.area(), app);
     }
+    if app.branches.collisions.is_some() {
+        branches::draw_collisions(frame, frame.area(), app);
+    }
     if app.help {
         draw_help(frame);
     }
@@ -197,6 +200,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("⏎", "uncommitted, else branch, else PR"),
             ("b", "branch vs base"),
             ("p", "pull request diff"),
+            ("c", "what this row collides with"),
             ("d", "remove worktree/branch"),
             ("f", "filter rows"),
             ("/", "narrow by name"),
@@ -1268,6 +1272,44 @@ mod render_tests {
 
         app.update(Msg::Overlaps(Err("no repo".to_owned())));
         assert!(screen(&mut app, 120, 20).contains("Collisions: no repo"));
+    }
+
+    #[test]
+    fn the_collision_list_renders_and_scrolls() {
+        use crate::app::{CollisionList, CollisionRow, ListPos};
+        use crate::git::overlap::Level;
+        let row = |i: usize, level| CollisionRow {
+            other: "agent/auth".to_owned(),
+            path: format!("src/file{i}.rs"),
+            level,
+        };
+        let mut app = branches_app();
+        app.branches.collisions = Some(CollisionList {
+            name: "main".to_owned(),
+            rows: (0..30)
+                .map(|i| {
+                    row(
+                        i,
+                        if i == 0 {
+                            Level::Conflict
+                        } else {
+                            Level::Overlap
+                        },
+                    )
+                })
+                .collect(),
+            pos: ListPos::default(),
+        });
+        let s = screen(&mut app, 120, 30);
+        assert!(s.contains("main collides with"), "{s}");
+        assert!(s.contains("⚠ agent/auth"), "{s}");
+        assert!(s.contains("≈ agent/auth"), "{s}");
+        assert!(s.contains("src/file0.rs"), "{s}");
+        assert!(!s.contains("src/file29.rs"), "{s}");
+        press(&mut app, KeyCode::Char('G'));
+        let s = screen(&mut app, 120, 30);
+        assert!(s.contains("src/file29.rs"), "{s}");
+        assert!(!s.contains("src/file0.rs"), "{s}");
     }
 
     #[test]

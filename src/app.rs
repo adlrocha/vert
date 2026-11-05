@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 pub use branches::{
-    BranchRemoval, BranchesState, PullStatus, Refresh, Removal, Row, RowFilter, pull_entry,
+    BranchRemoval, BranchesState, CollisionList, CollisionRow, PullStatus, Refresh, Removal, Row,
+    RowFilter, pull_entry,
 };
 #[cfg(test)]
 pub(crate) use explain::pi_for_tests;
@@ -884,14 +885,18 @@ impl App {
     }
 
     fn open_detail(&mut self, entry: Entry, files: Vec<FileDiff>) {
+        let selected = self.branches.take_focus(&entry.id, &files);
         let rendered = files
-            .first()
+            .get(selected)
             .map(|f| build_diff(f, self.max_highlight))
             .unwrap_or_default();
         self.views.push(View::Detail(Box::new(DetailView {
             entry,
             files,
-            pos: ListPos::default(),
+            pos: ListPos {
+                selected,
+                ..ListPos::default()
+            },
             focus: Focus::Files,
             scroll: 0,
             hscroll: 0,
@@ -971,6 +976,9 @@ impl App {
             return self.answer_remove(confirmed);
         }
         self.notice = None;
+        if self.branches.collisions.is_some() {
+            return self.on_collisions_key(&key);
+        }
         if !self.views.is_empty() {
             return self.on_view_key(&key);
         }
