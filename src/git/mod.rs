@@ -1,9 +1,10 @@
-//! Reading changes out of a git repository, and removing the lines of work
-//! that are done: worktrees and branches.
+//! Reading changes out of a git repository, finding where lines of work
+//! collide, and removing the ones that are done: worktrees and branches.
 
 pub mod branches;
 pub mod diff;
 pub mod feed;
+pub mod overlap;
 
 use std::path::{Path, PathBuf};
 
@@ -313,6 +314,20 @@ pub(crate) mod testutil {
 
         pub fn path(&self) -> &Path {
             self.dir.path()
+        }
+
+        /// Renames the current branch to `main`, whatever `init.defaultBranch`
+        /// made it. Needs a first commit.
+        pub fn rename_head_to_main(&self) {
+            let head = self.repo.head().expect("head");
+            let name = head.shorthand().expect("name");
+            if name != "main" {
+                self.repo
+                    .find_branch(name, git2::BranchType::Local)
+                    .expect("current branch")
+                    .rename("main", false)
+                    .expect("rename");
+            }
         }
 
         pub fn write(&self, rel: &str, content: &str) {

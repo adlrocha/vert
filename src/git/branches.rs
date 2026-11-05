@@ -510,24 +510,8 @@ mod tests {
     fn base_repo() -> TestRepo {
         let t = TestRepo::new();
         t.write("a.txt", "a\n");
-        let oid = t.commit_at("init", 1_000);
-        let name = t
-            .repo
-            .head()
-            .expect("head")
-            .shorthand()
-            .expect("name")
-            .to_owned();
-        if name != "main" {
-            let commit = t.repo.find_commit(oid).expect("commit");
-            t.repo.branch("main", &commit, true).expect("main");
-            t.repo.set_head("refs/heads/main").expect("set head");
-            t.repo
-                .find_branch(&name, BranchType::Local)
-                .expect("old")
-                .delete()
-                .expect("delete");
-        }
+        t.commit_at("init", 1_000);
+        t.rename_head_to_main();
         t
     }
 
