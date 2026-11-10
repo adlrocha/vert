@@ -86,7 +86,7 @@ fn run() -> Result<()> {
     let explainer = config.explainer(std::env::var_os("PATH").as_deref());
     app.set_explainer(&explainer);
     if let Some(start) = start {
-        effects.extend(app.start_at(start));
+        effects.extend(app.update(Msg::Start(start)));
     }
     let _watch = if config.no_watch {
         app.watch = WatchStatus::Disabled;

@@ -386,7 +386,7 @@ impl App {
 
     /// Opens on the Branches tab, then opens `start`'s diff as soon as the
     /// lines of work it needs have loaded.
-    pub fn start_at(&mut self, start: Start) -> Vec<Effect> {
+    pub(super) fn start_at(&mut self, start: Start) -> Vec<Effect> {
         self.branches.start = Some(start);
         self.enter_branches()
     }
@@ -394,13 +394,23 @@ impl App {
     /// Opens the line of work asked for on start, once enough has loaded to
     /// find it.
     fn try_start(&mut self) -> Vec<Effect> {
+        let Some(start) = self.branches.start.clone() else {
+            return Vec::new();
+        };
         let branches_known = self.branches.loaded || self.branches.error.is_some();
-        let effects = match self.branches.start.clone() {
-            None => return Vec::new(),
-            Some(_) if !branches_known => return Vec::new(),
-            Some(Start::Branch(name)) => self.start_branch(&name),
-            Some(Start::Pull(number)) => match &self.branches.pull_status {
-                PullStatus::Waiting => return Vec::new(),
+        let pulls_known = self.branches.pull_status != PullStatus::Waiting;
+        if !branches_known || (matches!(start, Start::Pull(_)) && !pulls_known) {
+            return Vec::new();
+        }
+        self.branches.start = None;
+        // Filters set while the first lists loaded mustn't hide the row
+        // asked for.
+        self.branches.filter = RowFilter::All;
+        self.branches.name_filter.clear();
+        self.branches.filter_editing = false;
+        match start {
+            Start::Branch(name) => self.start_branch(&name),
+            Start::Pull(number) => match &self.branches.pull_status {
                 PullStatus::Off => self.cant_open_pull(number, "network access is off"),
                 PullStatus::NoToken => self.cant_open_pull(
                     number,
@@ -410,11 +420,11 @@ impl App {
                     let why = why.clone();
                     self.cant_open_pull(number, &why)
                 }
-                PullStatus::Ready(_) | PullStatus::Failed(_) => self.start_pull(number),
+                PullStatus::Waiting | PullStatus::Ready(_) | PullStatus::Failed(_) => {
+                    self.start_pull(number)
+                }
             },
-        };
-        self.branches.start = None;
-        effects
+        }
     }
 
     fn start_branch(&mut self, name: &str) -> Vec<Effect> {
@@ -1467,7 +1477,7 @@ mod tests {
 
     fn started(start: Start) -> (App, Vec<Effect>) {
         let mut app = app(true);
-        let effects = app.start_at(start);
+        let effects = app.update(Msg::Start(start));
         assert_eq!(app.tab, Tab::Branches);
         assert_eq!(effects, [Effect::LoadBranches, Effect::LoadPulls]);
         (app, effects)
@@ -1489,6 +1499,32 @@ mod tests {
             assert_eq!(app.branches.start, None, "opened only once");
             assert_eq!(diffs(&app.update(Msg::Branches(Ok(the_list())))), NO_DIFF);
         }
+    }
+
+    #[test]
+    fn filters_set_while_loading_do_not_hide_the_row_asked_for() {
+        let (mut app, _) = started(Start::Pull(7));
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('z'));
+        app.update(Msg::Branches(Ok(the_list())));
+        assert_eq!(app.branches.name_filter, "z", "kept while waiting for PRs");
+        let effects = app.update(Msg::Pulls(Ok((
+            "o/r".to_owned(),
+            vec![pull(7, "feat", 50)],
+        ))));
+        assert_eq!(diffs(&effects), ["pr:7"]);
+        assert_eq!(app.branches.selected_key().as_deref(), Some("b:feat"));
+        assert_eq!(app.branches.filter, RowFilter::All);
+        assert_eq!(app.branches.name_filter, "");
+        assert!(!app.branches.filter_editing);
+
+        let (mut app, _) = started(Start::Branch("feat".to_owned()));
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(
+            diffs(&app.update(Msg::Branches(Ok(the_list())))),
+            ["branch:feat"]
+        );
     }
 
     #[test]
@@ -1571,7 +1607,10 @@ mod tests {
             assert_eq!(app.branches.start, None);
         }
         let mut offline = app(false);
-        assert_eq!(offline.start_at(Start::Pull(3)), [Effect::LoadBranches]);
+        assert_eq!(
+            offline.update(Msg::Start(Start::Pull(3))),
+            [Effect::LoadBranches]
+        );
         assert_eq!(
             diffs(&offline.update(Msg::Branches(Ok(the_list())))),
             NO_DIFF
