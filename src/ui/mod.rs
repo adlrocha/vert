@@ -244,7 +244,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("⏎", "go to the code"),
             ("J K", "scroll"),
             ("r", "ask the agent again"),
-            ("f", "have the agent fix a concern"),
+            ("f", "fix the selected pointer"),
         ],
     ),
     (

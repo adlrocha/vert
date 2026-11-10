@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Effect, Focus, ListPos, View, half_page, max_scroll};
-use crate::explain::{Answer, Diagram, Explainer, Explanation, Ref, diff_key, tree};
+use crate::explain::{Answer, Diagram, Explainer, Explanation, Note, Ref, diff_key, tree};
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
 use crate::ui::detail::build_diff;
@@ -141,6 +141,24 @@ pub fn targets(e: &Explanation, item: Item) -> Vec<&Ref> {
         Item::Concerns => e.concerns.iter().flat_map(|n| &n.refs).collect(),
         Item::Unexplained => e.unexplained.iter().collect(),
     }
+}
+
+/// The concern that [`targets`]`(e, Item::Concerns)[target]` belongs to;
+/// the only concern when none has a pointer. Kept beside `targets` so the
+/// two agree on how concerns flatten into pointers.
+#[must_use]
+pub fn concern_at(e: &Explanation, target: usize) -> Option<&Note> {
+    let mut seen = 0;
+    e.concerns
+        .iter()
+        .find(|n| {
+            seen += n.refs.len();
+            target < seen
+        })
+        .or(match e.concerns.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        })
 }
 
 /// The code pointer a diagram row offers: the first ref of a node drawn for

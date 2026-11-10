@@ -60,6 +60,23 @@ impl Hunk {
         self.first_added_line().or_else(|| self.first_new_line())
     }
 
+    /// The hunk's lines in diff form, each with its `+`, `-` or ` ` prefix
+    /// and a newline (no header).
+    #[must_use]
+    pub fn body(&self) -> String {
+        self.lines.iter().fold(String::new(), |mut body, l| {
+            let sign = match l.kind {
+                LineKind::Added => '+',
+                LineKind::Removed => '-',
+                LineKind::Context => ' ',
+            };
+            body.push(sign);
+            body.push_str(&l.content);
+            body.push('\n');
+            body
+        })
+    }
+
     /// Whether new-file line `line` falls within this hunk.
     #[must_use]
     pub fn holds_new_line(&self, line: u32) -> bool {
@@ -121,6 +138,7 @@ mod hunk_tests {
             (LineKind::Added, Some(5)),
             (LineKind::Context, Some(6)),
         ]);
+        assert_eq!(h.body(), " \n-\n+\n \n");
         assert_eq!(h.first_added_line(), Some(5));
         assert_eq!(h.first_new_line(), Some(4));
         assert_eq!(h.first_changed_line(), Some(5));

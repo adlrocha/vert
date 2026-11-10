@@ -655,15 +655,7 @@ pub fn prompt(entry: &Entry, files: &[FileDiff], max_diff_bytes: usize) -> Strin
         out.push_str(")\n");
         for (i, hunk) in file.hunks.iter().enumerate() {
             let _ = writeln!(out, "--- hunk {} {}", i + 1, hunk.header);
-            let body = hunk.lines.iter().fold(String::new(), |mut body, l| {
-                let sign = match l.kind {
-                    LineKind::Added => '+',
-                    LineKind::Removed => '-',
-                    LineKind::Context => ' ',
-                };
-                let _ = writeln!(body, "{sign}{}", l.content);
-                body
-            });
+            let body = hunk.body();
             if body.len() <= budget {
                 budget -= body.len();
                 out.push_str(&body);

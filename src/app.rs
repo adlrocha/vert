@@ -19,7 +19,9 @@ pub use branches::{
 };
 #[cfg(test)]
 pub(crate) use explain::pi_for_tests;
-pub use explain::{ExplainState, ExplainView, Item, Pane, Status, items, row_pointer, targets};
+pub use explain::{
+    ExplainState, ExplainView, Item, Pane, Status, concern_at, items, row_pointer, targets,
+};
 pub use fix::{Draft, FixState, Running};
 
 use crate::explain::Answer;

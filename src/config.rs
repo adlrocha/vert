@@ -132,9 +132,9 @@ pub struct Config {
     #[arg(long, global = true, value_enum, default_value_t = Choice::Auto, value_name = "AGENT", env = "VERT_EXPLAIN_AGENT")]
     pub explain_agent: Choice,
 
-    /// Model the agent explains with, in the agent's own naming (passed as
-    /// its `--model`, or to `--explain-cmd` in `VERT_EXPLAIN_MODEL`); unset
-    /// uses the agent's default.
+    /// Model the agent explains (`x`) and fixes (`f`) with, in the agent's
+    /// own naming (passed as its `--model`, or to `--explain-cmd` in
+    /// `VERT_EXPLAIN_MODEL`); unset uses the agent's default.
     #[arg(long, global = true, value_name = "MODEL", env = "VERT_EXPLAIN_MODEL")]
     pub explain_model: Option<String>,
 
@@ -147,8 +147,9 @@ pub struct Config {
     #[arg(long, global = true, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..), env = "VERT_EXPLAIN_TIMEOUT_SECS")]
     pub explain_timeout_secs: u64,
 
-    /// KiB of diff sent to the agent in full; later hunks are listed by
-    /// header only, for the agent to read itself.
+    /// KiB of diff sent to the agent in full: to explain, later hunks are
+    /// listed by header only; to fix, the excerpt stops at a line. Either
+    /// way the agent reads the rest itself.
     #[arg(long, global = true, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..), env = "VERT_EXPLAIN_MAX_DIFF_KB")]
     pub explain_max_diff_kb: u32,
 }

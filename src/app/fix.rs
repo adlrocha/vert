@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, Effect, Focus, Item, View, delete_word};
-use crate::explain::{Explanation, Note, Ref};
+use super::{App, Effect, Focus, Item, View, concern_at, delete_word};
+use crate::explain::Ref;
 use crate::fix::{Fixer, Request, excerpt};
 use crate::git::Target;
 use crate::git::branches::Branch;
@@ -54,22 +54,6 @@ pub struct FixState {
     /// Fixes in progress, oldest first.
     pub running: Vec<Running>,
     next: u64,
-}
-
-/// The concern the selected code pointer of the Concerns item belongs to;
-/// the only concern when none has a pointer.
-fn concern_at(e: &Explanation, target: usize) -> Option<&Note> {
-    let mut seen = 0;
-    e.concerns
-        .iter()
-        .find(|n| {
-            seen += n.refs.len();
-            target < seen
-        })
-        .or(match e.concerns.as_slice() {
-            [only] => Some(only),
-            _ => None,
-        })
 }
 
 impl App {
@@ -124,25 +108,28 @@ impl App {
             Target::Range { .. } => Err(format!("{} isn't a line of work vert knows", entry.short)),
             Target::PullRequest(number) => {
                 if !self.branches.loaded {
-                    return Err(
-                        "the lines of work are still loading; try again in a moment".to_owned()
-                    );
+                    return Err(self.branches.error.as_ref().map_or_else(
+                        || "the lines of work are still loading; try again in a moment".to_owned(),
+                        |e| format!("couldn't list the lines of work: {e}"),
+                    ));
                 }
                 // The pull request's own head, not the merged rows: those
                 // only link it to its branch once both lists have loaded.
+                let Some(pull) = self.branches.pulls.iter().find(|p| p.number == number) else {
+                    return Err(format!(
+                        "#{number} isn't an open pull request vert lists, so it can't tell its branch: open the branch (vert branch NAME) to fix it there"
+                    ));
+                };
                 let branches = &self.branches.list.branches;
-                let branch = self
-                    .branches
-                    .pulls
-                    .iter()
-                    .find(|p| p.number == number && !p.fork)
-                    .and_then(|p| {
-                        let remote = format!("{}/{}", crate::github::ORIGIN, p.head);
+                let remote = format!("{}/{}", crate::github::ORIGIN, pull.head);
+                let branch = (!pull.fork)
+                    .then(|| {
                         branches
                             .iter()
-                            .find(|b| !b.remote && b.branch.as_deref() == Some(p.head.as_str()))
+                            .find(|b| !b.remote && b.branch.as_deref() == Some(pull.head.as_str()))
                             .or_else(|| branches.iter().find(|b| b.remote && b.name == remote))
-                    });
+                    })
+                    .flatten();
                 branch.map_or_else(
                     || {
                         Err(format!(

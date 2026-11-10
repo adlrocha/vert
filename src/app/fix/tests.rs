@@ -352,7 +352,7 @@ fn fixes_go_to_the_checkout_of_the_line_of_work() {
         ),
         (
             Entry::blank(Target::PullRequest(99)),
-            Err("#99 isn't checked out here"),
+            Err("#99 isn't an open pull request vert lists"),
         ),
     ];
     for (entry, expected) in cases {
@@ -438,6 +438,15 @@ fn a_pull_request_finds_its_checkout_whichever_list_loads_first() {
     press(&mut app, KeyCode::Char('f'));
     assert_eq!(draft(&app).checkout, "agent-dir");
     press(&mut app, KeyCode::Esc);
+
+    // A branch scan that failed is not one still loading.
+    let mut failed = showing(crate::app::pull_entry(&pull(7, "agent")));
+    failed.update(Msg::Branches(Err("bad base".to_owned())));
+    press(&mut failed, KeyCode::Char('f'));
+    assert_eq!(
+        failed.notice.as_deref(),
+        Some("Can't fix: couldn't list the lines of work: bad base")
+    );
 
     // A fork's pull request with the same head name is not that branch.
     let mut fork = pull(9, "agent");
