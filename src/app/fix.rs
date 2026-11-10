@@ -124,22 +124,28 @@ impl App {
                 },
             )
         };
+        // A branch's changes are a range, or a bare commit when it shares no
+        // history with the base; either way the branch decides where it lives.
+        if let Some(name) = entry.id.strip_prefix("branch:") {
+            return self
+                .branches
+                .list
+                .branches
+                .iter()
+                .find(|b| b.name == name)
+                .map_or_else(
+                    || Err(format!("{name} isn't a line of work vert knows")),
+                    checkout_of,
+                );
+        }
         match entry.target {
             Target::WorkingTree | Target::Commit(_) => {
                 Ok((entry.root.clone(), named(&entry.root)))
             }
-            Target::Range { .. } => {
-                let name = entry.id.strip_prefix("branch:").unwrap_or(&entry.id);
-                self.branches
-                    .list
-                    .branches
-                    .iter()
-                    .find(|b| b.name == name)
-                    .map_or_else(
-                        || Err(format!("{name} isn't a line of work vert knows")),
-                        checkout_of,
-                    )
-            }
+            Target::Range { .. } => Err(format!(
+                "{} isn't a line of work vert knows",
+                entry.short
+            )),
             Target::PullRequest(number) => self
                 .branches
                 .rows()

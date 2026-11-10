@@ -318,7 +318,14 @@ fn feedback_on_a_hunk_is_written_sent_and_reported() {
 fn fixes_go_to_the_checkout_of_the_line_of_work() {
     // Where each change is fixed (root and name), or why it can't be.
     type Expected<'a> = Result<(Option<&'a str>, &'a str), &'a str>;
-    let cases: [(Entry, Expected<'_>); 7] = [
+    // A branch sharing no history with the base: its changes are a commit.
+    let mut unrelated = Entry::blank(Target::Commit(git2::Oid::ZERO_SHA1));
+    unrelated.id = "branch:loose".to_owned();
+    let mut unnamed = range("x");
+    unnamed.id = "a..b".to_owned();
+    let cases: [(Entry, Expected<'_>); 9] = [
+        (unrelated, Err("loose isn't checked out")),
+        (unnamed, Err("0000000 isn't a line of work")),
         (range("here"), Ok((None, "here"))),
         (range("agent"), Ok((Some("/wt/agent-dir"), "agent-dir"))),
         (range("loose"), Err("loose isn't checked out")),
@@ -399,6 +406,34 @@ fn fixes_in_different_checkouts_run_side_by_side() {
         .map(|r| r.checkout.as_str())
         .collect();
     assert_eq!(names, ["agent-dir", "here"]);
+}
+
+#[test]
+fn an_open_diff_of_vert_s_checkout_empties_once_it_is_clean() {
+    let mut app = showing(Entry::blank(Target::WorkingTree));
+    let effects = app.update(Msg::Worktree(Ok(None)));
+    let [
+        Effect::LoadDiff {
+            entry,
+            refresh: true,
+            file: None,
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected a refresh, got {effects:?}");
+    };
+    assert!(entry.is_own_worktree());
+    assert_eq!(entry.files, []);
+    app.update(Msg::Diff {
+        entry: entry.clone(),
+        result: Ok(Vec::new()),
+        refresh: true,
+        file: None,
+    });
+    let Some(View::Detail(d)) = app.views.last() else {
+        panic!("diff");
+    };
+    assert_eq!(d.files, []);
 }
 
 fn r(path: &str, hunk: Option<usize>) -> Ref {

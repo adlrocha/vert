@@ -566,8 +566,8 @@ impl Explainer {
         }
     }
 
-    /// Explains `entry`, whose diff is `files`, running the agent in `dir`.
-    /// A cached answer is used unless `fresh`.
+    /// Explains `entry`, whose diff is `files`, running the agent in `dir`
+    /// and tracking it in `groups`. A cached answer is used unless `fresh`.
     ///
     /// # Errors
     /// Returns a message for the user when the agent fails or its answer
@@ -578,6 +578,7 @@ impl Explainer {
         files: &[FileDiff],
         dir: &Path,
         fresh: bool,
+        groups: &agent::Groups,
     ) -> Result<Answer, String> {
         let prompt = prompt(entry, files, self.max_diff_bytes);
         let model = self.model.as_deref().unwrap_or_default();
@@ -595,15 +596,14 @@ impl Explainer {
                 cached: true,
             });
         }
-        let out = agent::run(
-            &self.agent,
-            agent::Access::ReadOnly,
-            self.model.as_deref(),
+        let how = agent::Run {
+            access: agent::Access::ReadOnly,
+            model: self.model.as_deref(),
             dir,
-            &prompt,
-            self.timeout,
-        )
-        .map_err(|e| e.to_string())?;
+            timeout: self.timeout,
+            groups,
+        };
+        let out = agent::run(&self.agent, how, &prompt).map_err(|e| e.to_string())?;
         let explanation = Explanation::validate(&out, files)
             .map_err(|e| format!("{}: {e}", self.agent.name()))?;
         if let Some(cache) = &self.cache {
@@ -932,8 +932,14 @@ mod tests {
         assert_eq!(prompt(&entry(), &sample(), 1), prompt(&entry(), &edited, 1));
         let ask = |files: &[FileDiff], intent: &str| {
             std::fs::write(dir.path().join("intent"), intent).expect("write");
-            ex.explain(&entry(), files, dir.path(), false)
-                .expect("explained")
+            ex.explain(
+                &entry(),
+                files,
+                dir.path(),
+                false,
+                &agent::Groups::default(),
+            )
+            .expect("explained")
         };
         assert!(!ask(&sample(), "first").cached);
         let second = ask(&edited, "second");
@@ -974,7 +980,15 @@ mod tests {
             max_diff_bytes: 1 << 20,
             cache: Some(cache::Cache::new(dir.path().join("cache"))),
         };
-        let run = |ex: &Explainer, fresh| ex.explain(&entry(), &files, dir.path(), fresh);
+        let run = |ex: &Explainer, fresh| {
+            ex.explain(
+                &entry(),
+                &files,
+                dir.path(),
+                fresh,
+                &agent::Groups::default(),
+            )
+        };
         let first = run(&ex, false).expect("explained");
         assert!(!first.cached);
         assert_eq!(first.explanation.intent, "Retry");

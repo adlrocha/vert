@@ -248,6 +248,15 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Fix",
+        &[
+            ("type", "what should change"),
+            ("⏎", "send to the agent"),
+            ("ctrl-w ctrl-u", "delete word / all"),
+            ("esc", "cancel"),
+        ],
+    ),
+    (
         "Search",
         &[
             ("type", "filter"),

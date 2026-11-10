@@ -305,8 +305,10 @@ impl Config {
     }
 
     /// How to fix changes, given the `PATH` to look for agents in. Fixes use
-    /// the agent and model explanations use, but always a known agent:
-    /// `--explain-cmd` only answers the explain prompt, so it is skipped.
+    /// the agent and model explanations use, but only an agent that keeps
+    /// its edits inside the checkout ([`agent::Agent::confines_edits`]):
+    /// `auto` picks the first of claude and codex, and pi and
+    /// `--explain-cmd` are never used.
     ///
     /// # Errors
     /// Explains, for the user, why fixes are unavailable.
@@ -314,13 +316,20 @@ impl Config {
         if self.no_network {
             return Err("network access is off (--no-network)".to_owned());
         }
-        let agent = agent::select(self.explain_agent, None, path).map_err(|why| {
-            if self.explain_agent == Choice::Auto {
-                "no coding agent found: install Claude Code, Codex or pi".to_owned()
-            } else {
-                why
+        let agent = match self.explain_agent {
+            Choice::Pi => {
+                return Err(
+                    "pi can't be kept inside the checkout, so it doesn't fix: set VERT_EXPLAIN_AGENT to claude or codex"
+                        .to_owned(),
+                );
             }
-        })?;
+            Choice::Auto => agent::select(Choice::Claude, None, path)
+                .or_else(|_| agent::select(Choice::Codex, None, path))
+                .map_err(|_| {
+                    "no agent that can fix found: install Claude Code or Codex".to_owned()
+                })?,
+            choice @ (Choice::Claude | Choice::Codex) => agent::select(choice, None, path)?,
+        };
         Ok(Fixer {
             agent,
             model: self.model(),
@@ -501,41 +510,66 @@ mod tests {
         assert!(Config::try_parse_from(["vert", "branch"]).is_err());
     }
 
-    #[test]
-    fn fixes_use_a_known_agent_unless_offline() {
+    /// A directory holding fake agents named `names`.
+    fn agents(names: &[&str]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
-        let pi = dir.path().join("pi");
-        std::fs::write(&pi, "#!/bin/sh\n").expect("write");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        for name in names {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "#!/bin/sh\n").expect("write");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
         }
-        let path = Some(dir.path().as_os_str());
-        let config = Config::parse_from([
-            "vert",
-            "--explain-agent",
-            "auto",
-            "--explain-cmd",
-            "llm",
-            "--explain-model",
-            " x/y ",
-            "--explain-timeout-secs",
-            "60",
-            "--explain-max-diff-kb",
-            "3",
-        ]);
-        let fixer = config.fixer(path).expect("pi is installed");
-        assert_eq!(fixer.agent, agent::Agent::Pi, "--explain-cmd is skipped");
+        dir
+    }
+
+    #[test]
+    fn fixes_use_an_agent_that_stays_in_the_checkout() {
+        let fixer_with = |installed: &[&str], args: &[&str]| {
+            let dir = agents(installed);
+            let config = Config::parse_from(["vert"].iter().chain(args));
+            config.fixer(Some(dir.path().as_os_str()))
+        };
+        let explicit = ["--explain-cmd", "llm", "--explain-agent"];
+        let auto = [&explicit[..], &["auto"]].concat();
+        let fixer = fixer_with(
+            &["pi", "codex", "claude"],
+            &[
+                &auto[..],
+                &[
+                    "--explain-model",
+                    " x/y ",
+                    "--explain-timeout-secs",
+                    "60",
+                    "--explain-max-diff-kb",
+                    "3",
+                ],
+            ]
+            .concat(),
+        )
+        .expect("claude is installed");
+        assert_eq!(
+            fixer.agent,
+            agent::Agent::Claude,
+            "--explain-cmd is skipped"
+        );
         assert_eq!(fixer.model.as_deref(), Some("x/y"));
         assert_eq!(fixer.timeout, Duration::from_secs(60));
         assert_eq!(fixer.max_excerpt_bytes, 3072);
-        assert!(
-            config
-                .fixer(None)
-                .is_err_and(|e| e.contains("no coding agent"))
-        );
-        let offline = Config::parse_from(["vert", "--no-network"]).fixer(path);
+        let codex = fixer_with(&["pi", "codex"], &auto).expect("codex");
+        assert_eq!(codex.agent, agent::Agent::Codex, "pi is passed over");
+        let none = fixer_with(&["pi"], &auto).expect_err("only pi");
+        assert!(none.contains("install Claude Code or Codex"), "{none}");
+        let chosen = fixer_with(&["claude", "codex"], &[&explicit[..], &["codex"]].concat());
+        assert_eq!(chosen.map(|f| f.agent), Ok(agent::Agent::Codex));
+        let missing = fixer_with(&["codex"], &[&explicit[..], &["claude"]].concat());
+        assert!(missing.is_err_and(|e| e.contains("claude is not on PATH")));
+        let pi = fixer_with(&["pi"], &[&explicit[..], &["pi"]].concat()).expect_err("pi");
+        assert!(pi.contains("pi can't be kept inside the checkout"), "{pi}");
+        let offline = fixer_with(&["claude"], &["--no-network"]);
         assert!(offline.is_err_and(|e| e.contains("--no-network")));
     }
 

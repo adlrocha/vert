@@ -66,10 +66,10 @@ in, and what deserves a second look.
   ones that name nothing, and lists the hunks nothing explains, which is
   where to look first. See [Explanations](#explanations).
 - **Fixes:** press `f` on a hunk, or on a concern in an explanation, write
-  what should change (a concern starts as its own text), and the same
-  agent makes the edit in that line of work's checkout. It edits files and
-  never commits, so the fix shows up live as uncommitted changes. See
-  [Fixes](#fixes).
+  what should change (a concern starts as its own text), and Claude Code
+  or Codex makes the edit in that line of work's checkout, confined to
+  it. It never commits, so the fix lands in the checkout's uncommitted
+  changes. See [Fixes](#fixes).
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter. `e` opens `$VISUAL`/`$EDITOR` at that line
   (vim, nvim, helix, VS Code, Cursor, …).
@@ -249,12 +249,18 @@ For the full output, run the command from the table above in a terminal.
 
 ### Fixes
 
-Press `f` in a diff and write what should change. The coding agent that
-explains changes then acts on it in the checkout the change belongs to,
-while you keep reviewing. The header shows `fixing in <checkout>` until it
-is done, and the footer shows the agent's one-line summary of what it
-changed. Its edits land as uncommitted changes, so an open diff of that
-checkout shows them as they are made. Nothing is committed.
+Press `f` in a diff and write what should change. The coding agent then
+acts on it in the checkout the change belongs to, while you keep
+reviewing. The header shows `fixing in <checkout>` until it is done, and
+the footer shows the agent's one-line summary of what it changed.
+
+**Where the fix shows up.** The agent edits files and never commits, so
+its edits are that checkout's uncommitted changes: the *Uncommitted
+changes* entry of the feed for vert's own checkout, or the checkout's row
+in the Branches tab (`⏎` opens its uncommitted work). An open diff of
+those uncommitted changes refreshes as the agent edits. A commit, branch
+or pull-request diff shows committed content, so it stays as it was until
+the fix is committed.
 
 **What the agent is told.** The change it is looking at, where your
 feedback points, the hunk there, and your words. What `f` points at
@@ -274,24 +280,28 @@ out anywhere is refused, because there is nowhere to edit it; check it out
 in a worktree first. One fix runs per checkout at a time; checkouts don't
 wait for each other.
 
-**How the agent is run.** The same agent and model as explanations
-(`VERT_EXPLAIN_AGENT`, `VERT_EXPLAIN_MODEL`), with the same timeout, but
-always one of the known agents: `--explain-cmd` only knows how to answer
-the explain prompt, so fixes use the first of `claude`, `codex` and `pi`
-on `PATH` when it is set. The agent can read and edit files and nothing
-else. Claude Code and pi have no shell, and Codex runs in its workspace
-sandbox:
+**Which agent, and what it may do.** The code under review can contain
+instructions aimed at the agent (an `AGENTS.md`, a comment), so a fix only
+runs with an agent that keeps its edits inside the checkout by itself, not
+only because the prompt asks:
 
-| Agent       | Runs as                                                                                                        |
-| ----------- | -------------------------------------------------------------------------------------------------------------- |
-| Claude Code | `claude -p --output-format text --no-session-persistence --tools Read,Grep,Glob,Edit,Write --permission-mode acceptEdits` |
-| Codex       | `codex exec --sandbox workspace-write --skip-git-repo-check --ephemeral --color never -`                       |
-| pi          | `pi -p --no-session --tools read,grep,find,ls,edit,write`                                                      |
+| Agent       | Runs as                                                                                                                                       | Kept inside the checkout by                                   |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Claude Code | `claude -p --output-format text --no-session-persistence --restricted --strict-mcp-config --tools Read,Grep,Glob,Edit,Write --permission-mode acceptEdits` | `--restricted`: file tools confined to the checkout, no tool that runs code, no MCP servers, and the checkout's own settings ignored |
+| Codex       | `codex exec --sandbox workspace-write --skip-git-repo-check --ephemeral --color never -`                                                      | its workspace-write sandbox: it can run commands, but writes only inside the checkout, with no network |
+
+The agent and model are the ones explanations use (`VERT_EXPLAIN_AGENT`,
+`VERT_EXPLAIN_MODEL`), with the same timeout. `auto` picks the first of
+`claude` and `codex` on `PATH`. pi can't be confined this way, so it
+explains but doesn't fix: with `VERT_EXPLAIN_AGENT=pi`, `f` says so. A
+`--explain-cmd` only knows how to answer the explain prompt, so fixes skip
+it and use `auto`'s choice.
 
 The hunk sent is capped at `--explain-max-diff-kb`; the agent reads the
-file itself for the rest. `--no-network` turns fixes off along with
-explanations. If another agent is working in the same checkout, the two
-can edit the same files; fix a checkout whose agent is idle.
+file itself for the rest. Quitting vert stops any agent still working.
+`--no-network` turns fixes off along with explanations. If another agent
+is working in the same checkout, the two can edit the same files; fix a
+checkout whose agent is idle.
 
 ### Options
 
@@ -317,7 +327,7 @@ can edit the same files; fix a checkout whose agent is idle.
 | `--github-timeout-secs`  | 15      | GitHub request timeout                          |
 | `--no-network`           | off     | Never contact GitHub, and no explanations or fixes |
 | `--no-update-check`      | off     | Never ask GitHub whether a newer vert exists    |
-| `--explain-agent` / `VERT_EXPLAIN_AGENT` | `auto` | Agent for `x` and `f`: `auto`, `claude`, `codex` or `pi` |
+| `--explain-agent` / `VERT_EXPLAIN_AGENT` | `auto` | Agent for `x` and `f`: `auto`, `claude`, `codex` or `pi` (pi doesn't fix) |
 | `--explain-model` / `VERT_EXPLAIN_MODEL` | agent's default | Model the agent uses, in its own naming |
 | `--explain-cmd` / `VERT_EXPLAIN_CMD` | — | Shell command to use instead of a known agent |
 | `--explain-timeout-secs` / `VERT_EXPLAIN_TIMEOUT_SECS` | 600 | How long an agent may take to explain or fix |

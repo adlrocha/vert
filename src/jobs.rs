@@ -107,6 +107,8 @@ pub struct Context {
     pub explain: Option<Explainer>,
     /// How to fix changes, or `None` when that is unavailable.
     pub fix: Option<Fixer>,
+    /// The coding agents running now, stopped when vert exits.
+    pub agents: crate::explain::agent::Groups,
 }
 
 impl Context {
@@ -373,7 +375,15 @@ fn explain(
         .explain
         .as_ref()
         .ok_or_else(|| "explanations are unavailable".to_owned())
-        .and_then(|ex| ex.explain(entry, files, ctx.dir(entry.root.as_deref()), fresh));
+        .and_then(|ex| {
+            ex.explain(
+                entry,
+                files,
+                ctx.dir(entry.root.as_deref()),
+                fresh,
+                &ctx.agents,
+            )
+        });
     Msg::Explained { key, result }
 }
 
@@ -384,7 +394,7 @@ fn fix(ctx: &Context, id: u64, root: Option<&Path>, request: &crate::fix::Reques
         .fix
         .as_ref()
         .ok_or_else(|| "fixes are unavailable".to_owned())
-        .and_then(|fixer| fixer.fix(request, ctx.dir(root)));
+        .and_then(|fixer| fixer.fix(request, ctx.dir(root), &ctx.agents));
     Msg::Fixed { id, result }
 }
 
@@ -504,6 +514,7 @@ mod tests {
             token: Arc::default(),
             explain: None,
             fix: None,
+            agents: crate::explain::agent::Groups::default(),
         }
     }
 

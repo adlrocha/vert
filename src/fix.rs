@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::explain::agent::{self, Access, Agent};
+use crate::explain::agent::{self, Access, Agent, Groups};
 use crate::git::diff::{FileDiff, LineKind};
 use crate::highlight::sanitize;
 
@@ -167,21 +167,21 @@ impl Fixer {
         }
     }
 
-    /// Asks the agent to act on `request`, editing files in `dir`, and
-    /// returns its one-line summary of what it did.
+    /// Asks the agent to act on `request`, editing files in `dir` and
+    /// tracked in `groups`, and returns its one-line summary of what it did.
     ///
     /// # Errors
     /// Returns a message for the user when the agent fails or times out.
-    pub fn fix(&self, request: &Request, dir: &Path) -> Result<String, String> {
-        let out = agent::run(
-            &self.agent,
-            Access::Edit,
-            self.model.as_deref(),
+    pub fn fix(&self, request: &Request, dir: &Path, groups: &Groups) -> Result<String, String> {
+        let how = agent::Run {
+            access: Access::Edit,
+            model: self.model.as_deref(),
             dir,
-            &prompt(request, self.max_excerpt_bytes),
-            self.timeout,
-        )
-        .map_err(|e| e.to_string())?;
+            timeout: self.timeout,
+            groups,
+        };
+        let out = agent::run(&self.agent, how, &prompt(request, self.max_excerpt_bytes))
+            .map_err(|e| e.to_string())?;
         Ok(summary(&out))
     }
 }
@@ -280,7 +280,7 @@ mod tests {
         };
         assert_eq!(fixer.label(), "--explain-cmd");
         assert_eq!(
-            fixer.fix(&request(), dir.path()),
+            fixer.fix(&request(), dir.path(), &Groups::default()),
             Ok("wrote out.txt".to_owned())
         );
         assert!(dir.path().join("out.txt").exists());
@@ -291,7 +291,9 @@ mod tests {
             ..fixer
         };
         assert_eq!(failing.label(), "--explain-cmd · m");
-        let err = failing.fix(&request(), dir.path()).expect_err("fails");
+        let err = failing
+            .fix(&request(), dir.path(), &Groups::default())
+            .expect_err("fails");
         assert!(err.ends_with("nope"), "{err}");
     }
 }

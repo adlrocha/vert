@@ -3,15 +3,20 @@
 //!
 //! Every agent gets the prompt on standard input, runs in the change's
 //! checkout and answers on standard output. Claude Code, Codex and pi are
-//! limited to read-only tools to explain a change, and to file-editing tools
-//! (no shell for Claude Code and pi; Codex's workspace sandbox) to fix one.
-//! A custom command runs unconfined, with the user's own permissions.
+//! limited to read-only tools to explain a change. To fix one, Claude Code
+//! gets file tools confined to the checkout (`--restricted`, no shell, no
+//! MCP servers) and Codex its workspace-write sandbox; pi can't be confined,
+//! so it doesn't fix. A custom command runs unconfined, with the user's own
+//! permissions.
+
+use std::collections::BTreeSet;
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,14 +55,17 @@ pub enum Access {
     Edit,
 }
 
-/// A coding agent vert can ask.
+/// A coding agent vert can ask. The tools each gets follow the [`Access`]
+/// it runs with (see [`Agent::command`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Agent {
-    /// Claude Code, limited to its Read, Grep and Glob tools.
+    /// Claude Code: Read, Grep and Glob to explain; with Edit and Write,
+    /// confined to the checkout, to fix.
     Claude,
-    /// Codex in its read-only sandbox.
+    /// Codex: its read-only sandbox to explain, its workspace-write one to fix.
     Codex,
-    /// pi, limited to its read, grep, find and ls tools.
+    /// pi: read, grep, find and ls. It can't be confined to a checkout, so it
+    /// never fixes.
     Pi,
     /// A shell command that reads the prompt on stdin and answers on stdout.
     Custom(String),
@@ -76,6 +84,20 @@ impl Agent {
             Self::Pi => "pi",
             Self::Custom(_) => "--explain-cmd",
         }
+    }
+
+    /// Whether the agent's edits are kept inside the checkout it runs in by
+    /// the agent itself, not only by asking it to: what a fix needs, since
+    /// the checkout under review may hold instructions aimed at the agent.
+    ///
+    /// ```
+    /// use vert::explain::agent::Agent;
+    /// assert!(Agent::Claude.confines_edits() && Agent::Codex.confines_edits());
+    /// assert!(!Agent::Pi.confines_edits());
+    /// ```
+    #[must_use]
+    pub const fn confines_edits(&self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
     }
 
     /// Identifies the agent in cached answers; stable across releases.
@@ -127,6 +149,10 @@ impl Agent {
                     "--output-format",
                     "text",
                     "--no-session-persistence",
+                    // Confines the file tools to the checkout, drops every
+                    // tool that runs code, and ignores the checkout's settings.
+                    "--restricted",
+                    "--strict-mcp-config",
                     "--tools",
                     "Read,Grep,Glob,Edit,Write",
                     "--permission-mode",
@@ -242,6 +268,66 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+/// The process groups of the agents running now, so they can all be stopped
+/// when vert exits instead of working on unwatched.
+#[derive(Debug, Clone, Default)]
+pub struct Groups(Arc<Mutex<BTreeSet<u32>>>);
+
+impl Groups {
+    fn insert(&self, pid: u32) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pid);
+    }
+
+    fn remove(&self, pid: u32) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&pid);
+    }
+
+    /// How many agents are running.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+
+    /// Whether no agent is running.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Stops every running agent and whatever it started.
+    pub fn stop_all(&self) {
+        let pids = std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner));
+        for pid in pids {
+            kill_group(pid);
+        }
+    }
+}
+
+/// Records a running agent's process group in [`Groups`] until dropped.
+struct Tracked<'a> {
+    groups: &'a Groups,
+    pid: u32,
+}
+
+impl<'a> Tracked<'a> {
+    fn new(groups: &'a Groups, pid: u32) -> Self {
+        groups.insert(pid);
+        Self { groups, pid }
+    }
+}
+
+impl Drop for Tracked<'_> {
+    fn drop(&mut self) {
+        self.groups.remove(self.pid);
+    }
+}
+
 /// Why asking an agent failed.
 #[derive(Debug, Error)]
 pub enum RunError {
@@ -281,19 +367,35 @@ pub enum RunError {
     },
 }
 
-/// Runs `agent` on `model` in `dir` with `access`, writing `prompt` to its
-/// standard input, and returns what it printed. It is stopped after `timeout`.
+/// How to run one agent: what it may do, on which model, where, and for how
+/// long, tracked in `groups` while it runs.
+#[derive(Debug, Clone, Copy)]
+pub struct Run<'a> {
+    /// What the agent may do.
+    pub access: Access,
+    /// The model, or `None` for the agent's default.
+    pub model: Option<&'a str>,
+    /// The checkout it runs in.
+    pub dir: &'a Path,
+    /// How long it may take.
+    pub timeout: Duration,
+    /// Where its process group is recorded while it runs.
+    pub groups: &'a Groups,
+}
+
+/// Runs `agent` as `how` says, writing `prompt` to its standard input, and
+/// returns what it printed. It is stopped after the timeout.
 ///
 /// # Errors
 /// Returns [`RunError`] when it cannot start, fails or runs out of time.
-pub fn run(
-    agent: &Agent,
-    access: Access,
-    model: Option<&str>,
-    dir: &Path,
-    prompt: &str,
-    timeout: Duration,
-) -> Result<String, RunError> {
+pub fn run(agent: &Agent, how: Run<'_>, prompt: &str) -> Result<String, RunError> {
+    let Run {
+        access,
+        model,
+        dir,
+        timeout,
+        groups,
+    } = how;
     let name = agent.name().to_owned();
     let mut command = agent.command(access, model);
     // Its own process group, so a timeout stops whatever the agent started.
@@ -309,6 +411,7 @@ pub fn run(
             name: name.clone(),
             source,
         })?;
+    let _tracked = Tracked::new(groups, child.id());
     if let Some(mut stdin) = child.stdin.take() {
         let prompt = prompt.to_owned();
         // An agent that exits without reading everything closes the pipe;
@@ -490,6 +593,15 @@ mod tests {
         let claude = args_with(&Agent::Claude, Access::Edit, Some("opus"));
         assert!(claude.contains(&"Read,Grep,Glob,Edit,Write".to_owned()));
         assert!(
+            claude.contains(&"--restricted".to_owned()),
+            "file tools stay in the checkout"
+        );
+        assert!(
+            claude.contains(&"--strict-mcp-config".to_owned()),
+            "no MCP servers"
+        );
+        assert!(!args(&Agent::Claude).contains(&"--restricted".to_owned()));
+        assert!(
             claude
                 .windows(2)
                 .any(|w| w == ["--permission-mode", "acceptEdits"])
@@ -556,6 +668,59 @@ mod tests {
         assert!(select(Choice::Auto, None, Some(dir.path().as_os_str())).is_err());
     }
 
+    /// Runs `agent` read-only, checking it is forgotten once done.
+    fn run_ro(
+        agent: &Agent,
+        model: Option<&str>,
+        dir: &Path,
+        prompt: &str,
+        timeout: Duration,
+    ) -> Result<String, RunError> {
+        let groups = Groups::default();
+        let how = Run {
+            access: Access::ReadOnly,
+            model,
+            dir,
+            timeout,
+            groups: &groups,
+        };
+        let out = run(agent, how, prompt);
+        assert!(groups.is_empty(), "the agent is forgotten once it is done");
+        out
+    }
+
+    #[test]
+    fn running_agents_can_all_be_stopped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let groups = Groups::default();
+        let marker = dir.path().join("late");
+        let worker = {
+            let (groups, path) = (groups.clone(), dir.path().to_path_buf());
+            thread::spawn(move || {
+                let how = Run {
+                    access: Access::Edit,
+                    model: None,
+                    dir: &path,
+                    timeout: Duration::from_secs(20),
+                    groups: &groups,
+                };
+                run(&sh("sleep 2; touch late"), how, "")
+            })
+        };
+        let start = Instant::now();
+        while groups.is_empty() && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(groups.len(), 1, "the agent is tracked while it runs");
+        groups.stop_all();
+        assert!(groups.is_empty());
+        let stopped = worker.join().expect("joined");
+        assert!(stopped.is_err(), "{stopped:?}");
+        assert!(start.elapsed() < Duration::from_secs(2), "stopped at once");
+        thread::sleep(Duration::from_millis(2500));
+        assert!(!marker.exists(), "nothing it started went on");
+    }
+
     fn sh(cmd: &str) -> Agent {
         Agent::Custom(cmd.to_owned())
     }
@@ -564,9 +729,8 @@ mod tests {
     fn runs_with_the_prompt_on_stdin_in_the_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("marker"), "here").expect("write");
-        let out = run(
+        let out = run_ro(
             &sh("cat marker; echo; tr a-z A-Z; printf %s \"$VERT_EXPLAIN_MODEL\""),
-            Access::ReadOnly,
             Some("m1"),
             dir.path(),
             "hello",
@@ -580,9 +744,8 @@ mod tests {
     fn reports_failures_timeouts_and_missing_programs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let secs = Duration::from_secs(10);
-        let failed = run(
+        let failed = run_ro(
             &sh("echo out; echo bad >&2; exit 3"),
-            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -594,16 +757,9 @@ mod tests {
             text.contains("exit status: 3") && text.ends_with(": bad"),
             "{text}"
         );
-        let quiet = run(
-            &sh("echo only stdout; exit 1"),
-            Access::ReadOnly,
-            None,
-            dir.path(),
-            "",
-            secs,
-        )
-        .expect_err("fails")
-        .to_string();
+        let quiet = run_ro(&sh("echo only stdout; exit 1"), None, dir.path(), "", secs)
+            .expect_err("fails")
+            .to_string();
         assert!(
             quiet.ends_with("only stdout"),
             "stdout when stderr is empty: {quiet}"
@@ -616,9 +772,8 @@ mod tests {
         let secs = Duration::from_secs(10);
         // A child left behind in the agent's group is stopped with it.
         let start = Instant::now();
-        let left = run(
+        let left = run_ro(
             &sh("sleep 30 & echo partial"),
-            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -635,13 +790,12 @@ mod tests {
         // (`setsid` is Linux-only).
         let has_setsid = std::env::var_os("PATH").is_some_and(|p| on_path("setsid", &p));
         let start = Instant::now();
-        let escaped = run(
+        let escaped = run_ro(
             &sh(if has_setsid {
                 "setsid sleep 30 & echo partial"
             } else {
                 "sleep 30"
             }),
-            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -656,9 +810,8 @@ mod tests {
         );
         // The leftover child was stopped with the agent.
         let marker = dir.path().join("still-running");
-        let _ = run(
+        let _ = run_ro(
             &sh("(sleep 1; touch still-running) & sleep 30"),
-            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -667,9 +820,8 @@ mod tests {
         thread::sleep(Duration::from_millis(1500));
         assert!(!marker.exists(), "the whole group was stopped");
 
-        let slow = run(
+        let slow = run_ro(
             &sh("sleep 5"),
-            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -679,9 +831,8 @@ mod tests {
         .to_string();
         assert!(slow.contains("didn't answer within 0s"), "{slow}");
 
-        let missing = run(
+        let missing = run_ro(
             &sh("x"),
-            Access::ReadOnly,
             None,
             &dir.path().join("gone"),
             "",
@@ -695,15 +846,7 @@ mod tests {
 
         // An agent that ignores its input still answers.
         assert_eq!(
-            run(
-                &sh("echo ok"),
-                Access::ReadOnly,
-                None,
-                dir.path(),
-                &"x".repeat(1 << 20),
-                secs
-            )
-            .expect("ok"),
+            run_ro(&sh("echo ok"), None, dir.path(), &"x".repeat(1 << 20), secs).expect("ok"),
             "ok\n"
         );
     }
@@ -715,9 +858,8 @@ mod tests {
         let (text, cut) = drain_up_to(&b"abcd"[..], 4).recv().expect("drained");
         assert_eq!((text.as_str(), cut), ("abcd", false));
         let dir = tempfile::tempdir().expect("tempdir");
-        let big = run(
+        let big = run_ro(
             &sh("head -c 17000000 /dev/zero"),
-            Access::ReadOnly,
             None,
             dir.path(),
             "",

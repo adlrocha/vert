@@ -832,13 +832,18 @@ impl App {
                 self.reselect(selected.as_deref());
                 self.recompute_hotspots();
                 // The diff stays live under views stacked on it (an
-                // explanation), not only while it is on top.
+                // explanation), not only while it is on top, and empties
+                // once the checkout is clean (a fix that undid the change).
                 if let Some(d) = self.views.iter().rev().find_map(View::as_detail)
                     && d.entry.is_own_worktree()
-                    && let Some(wt) = &self.feed.worktree
                 {
+                    let entry = self.feed.worktree.clone().unwrap_or_else(|| {
+                        let mut clean = d.entry.clone();
+                        clean.clear_files();
+                        clean
+                    });
                     effects.push(Effect::LoadDiff {
-                        entry: Box::new(wt.clone()),
+                        entry: Box::new(entry),
                         refresh: true,
                         file: None,
                     });

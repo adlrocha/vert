@@ -127,6 +127,7 @@ fn run() -> Result<()> {
             token: Arc::default(),
             explain: explainer.ok(),
             fix: fixer.ok(),
+            agents: vert::explain::agent::Groups::default(),
         },
         tx: tx.clone(),
         gate: Arc::new(InputGate::default()),
@@ -136,6 +137,8 @@ fn run() -> Result<()> {
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, &mut app, &rt, &rx, effects);
     ratatui::restore();
+    // Agents still explaining or fixing would work on unwatched.
+    rt.jobs.agents.stop_all();
     result
 }
 
