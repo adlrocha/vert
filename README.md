@@ -288,7 +288,7 @@ only because the prompt asks:
 | Agent       | Runs as                                                                                                                                       | Kept inside the checkout by                                   |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
 | Claude Code | `claude -p --output-format text --no-session-persistence --restricted --strict-mcp-config --tools Read,Grep,Glob,Edit,Write --permission-mode acceptEdits` | `--restricted`: file tools confined to the checkout, no tool that runs code, no MCP servers, and the checkout's own settings ignored |
-| Codex       | `codex exec --sandbox workspace-write --skip-git-repo-check --ephemeral --color never -`                                                      | its workspace-write sandbox: it can run commands, but writes only inside the checkout, with no network |
+| Codex       | `codex exec --sandbox workspace-write -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=true --skip-git-repo-check --ephemeral --color never -` | its workspace-write sandbox, with `/tmp` and `$TMPDIR` taken out of it: it can run commands, but writes only inside the checkout, with no network |
 
 The agent and model are the ones explanations use (`VERT_EXPLAIN_AGENT`,
 `VERT_EXPLAIN_MODEL`), with the same timeout. `auto` picks the first of

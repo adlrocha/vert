@@ -386,13 +386,88 @@ fn fixes_go_to_the_checkout_of_the_line_of_work() {
     assert_eq!(draft(&app).checkout, "agent-dir");
     assert_eq!(
         draft(&app).request.change,
-        "Uncommitted changes in the working tree"
+        "working Uncommitted changes in the working tree"
     );
     // One vert no longer lists is named by its path.
     dirty.root = Some(PathBuf::from("/elsewhere"));
     let mut app = showing(dirty);
     press(&mut app, KeyCode::Char('f'));
     assert_eq!(draft(&app).checkout, "/elsewhere");
+}
+
+#[test]
+fn the_place_and_the_excerpt_name_the_same_hunk() {
+    let mut app = showing(commit());
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("diff");
+    };
+    d.focus = Focus::Diff;
+    // The last row before the second hunk starts: no line of its own in the
+    // first hunk, and the next new line is the second hunk's.
+    d.scroll = d.rendered.hunk_starts[1] - 1;
+    press(&mut app, KeyCode::Char('f'));
+    assert_eq!(
+        draft(&app).request.excerpt,
+        "@@ -1 +1,2 @@\n keep\n+first\n"
+    );
+    assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs:2"));
+    press(&mut app, KeyCode::Esc);
+    // Above the first hunk: the first hunk.
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("diff");
+    };
+    d.scroll = 0;
+    press(&mut app, KeyCode::Char('f'));
+    assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs:1"));
+}
+
+#[test]
+fn a_pull_request_finds_its_checkout_whichever_list_loads_first() {
+    let mut app = showing(crate::app::pull_entry(&pull(7, "agent")));
+    app.set_refresh(crate::app::Refresh {
+        branches: Some(5),
+        pulls: Some(60),
+    });
+    app.update(Msg::Pulls(Ok(("o/r".to_owned(), vec![pull(7, "agent")]))));
+    press(&mut app, KeyCode::Char('f'));
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Can't fix: the lines of work are still loading; try again in a moment")
+    );
+    with_lines_of_work(&mut app);
+    press(&mut app, KeyCode::Char('f'));
+    assert_eq!(draft(&app).checkout, "agent-dir");
+    press(&mut app, KeyCode::Esc);
+
+    // A fork's pull request with the same head name is not that branch.
+    let mut fork = pull(9, "agent");
+    fork.fork = true;
+    let mut app = showing(crate::app::pull_entry(&fork));
+    with_lines_of_work(&mut app);
+    app.update(Msg::Pulls(Ok(("o/r".to_owned(), vec![fork]))));
+    press(&mut app, KeyCode::Char('f'));
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("#9 isn't checked out"))
+    );
+
+    // A branch only on origin, checked out nowhere.
+    let mut app = showing(crate::app::pull_entry(&pull(5, "remote")));
+    with_lines_of_work(&mut app);
+    let mut remote = branch("origin/remote", None);
+    remote.remote = true;
+    remote.branch = Some("remote".to_owned());
+    app.branches.list.branches.push(remote);
+    app.branches.pulls.push(pull(5, "remote"));
+    press(&mut app, KeyCode::Char('f'));
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("origin/remote isn't checked out")),
+        "{:?}",
+        app.notice
+    );
 }
 
 #[test]

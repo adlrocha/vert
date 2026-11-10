@@ -626,12 +626,7 @@ pub fn prompt(entry: &Entry, files: &[FileDiff], max_diff_bytes: usize) -> Strin
     out.push_str("\n\n");
     out.push_str(INSTRUCTIONS);
     out.push_str("\n\n# The change\n\n");
-    let title = if entry.is_worktree() {
-        "Uncommitted changes in the working tree"
-    } else {
-        entry.summary.as_str()
-    };
-    let _ = writeln!(out, "{} {title}", entry.short);
+    let _ = writeln!(out, "{}", entry.headline());
     if !entry.body.trim().is_empty() {
         let _ = writeln!(out, "\n{}", entry.body.trim());
     }

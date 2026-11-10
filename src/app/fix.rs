@@ -14,7 +14,7 @@ use crate::explain::{Explanation, Note, Ref};
 use crate::fix::{Fixer, Request, excerpt};
 use crate::git::Target;
 use crate::git::branches::Branch;
-use crate::git::diff::{FileDiff, LineKind};
+use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
 use crate::highlight::sanitize;
 
@@ -56,17 +56,6 @@ pub struct FixState {
     next: u64,
 }
 
-/// The line a hunk is about: its first added line, else its first line in
-/// the new file.
-fn hunk_line(file: &FileDiff, hunk: usize) -> Option<u32> {
-    let lines = &file.hunks.get(hunk)?.lines;
-    lines
-        .iter()
-        .find(|l| l.kind == LineKind::Added)
-        .or_else(|| lines.iter().find(|l| l.new_no.is_some()))
-        .and_then(|l| l.new_no)
-}
-
 /// The concern the selected code pointer of the Concerns item belongs to;
 /// the only concern when none has a pointer.
 fn concern_at(e: &Explanation, target: usize) -> Option<&Note> {
@@ -81,15 +70,6 @@ fn concern_at(e: &Explanation, target: usize) -> Option<&Note> {
             [only] => Some(only),
             _ => None,
         })
-}
-
-/// How the change is described to the agent.
-fn describe(entry: &Entry) -> String {
-    if entry.is_worktree() {
-        "Uncommitted changes in the working tree".to_owned()
-    } else {
-        format!("{} {}", entry.short, entry.summary)
-    }
 }
 
 impl App {
@@ -140,27 +120,38 @@ impl App {
                 );
         }
         match entry.target {
-            Target::WorkingTree | Target::Commit(_) => {
-                Ok((entry.root.clone(), named(&entry.root)))
-            }
-            Target::Range { .. } => Err(format!(
-                "{} isn't a line of work vert knows",
-                entry.short
-            )),
-            Target::PullRequest(number) => self
-                .branches
-                .rows()
-                .iter()
-                .find(|r| r.pull.is_some_and(|p| p.number == number))
-                .and_then(|r| r.branch)
-                .map_or_else(
+            Target::WorkingTree | Target::Commit(_) => Ok((entry.root.clone(), named(&entry.root))),
+            Target::Range { .. } => Err(format!("{} isn't a line of work vert knows", entry.short)),
+            Target::PullRequest(number) => {
+                if !self.branches.loaded {
+                    return Err(
+                        "the lines of work are still loading; try again in a moment".to_owned()
+                    );
+                }
+                // The pull request's own head, not the merged rows: those
+                // only link it to its branch once both lists have loaded.
+                let branches = &self.branches.list.branches;
+                let branch = self
+                    .branches
+                    .pulls
+                    .iter()
+                    .find(|p| p.number == number && !p.fork)
+                    .and_then(|p| {
+                        let remote = format!("{}/{}", crate::github::ORIGIN, p.head);
+                        branches
+                            .iter()
+                            .find(|b| !b.remote && b.branch.as_deref() == Some(p.head.as_str()))
+                            .or_else(|| branches.iter().find(|b| b.remote && b.name == remote))
+                    });
+                branch.map_or_else(
                     || {
                         Err(format!(
                             "#{number} isn't checked out here: check out its branch in a worktree to fix it"
                         ))
                     },
                     checkout_of,
-                ),
+                )
+            }
         }
     }
 
@@ -200,7 +191,7 @@ impl App {
             root,
             checkout,
             request: Request {
-                change: describe(entry),
+                change: entry.headline(),
                 place,
                 excerpt: file.map(|f| excerpt(f, hunk)).unwrap_or_default(),
                 feedback: String::new(),
@@ -217,11 +208,26 @@ impl App {
         };
         let entry = d.entry.clone();
         let file = d.files.get(d.pos.selected).cloned();
-        let (hunk, line) = if d.focus == Focus::Diff {
-            let hunk = d.rendered.hunk_starts.iter().rposition(|&s| s <= d.scroll);
-            (hunk, d.rendered.new_line_at(d.scroll))
-        } else {
-            (None, None)
+        // The hunk the top row is in, and a line of that same hunk: the row's
+        // own line, or the hunk's first changed one when the row has none in
+        // it (a separator, a trailing removed line).
+        let (hunk, line) = match (&file, d.focus) {
+            (Some(f), Focus::Diff) => {
+                let hunk = d
+                    .rendered
+                    .hunk_starts
+                    .iter()
+                    .rposition(|&s| s <= d.scroll)
+                    .unwrap_or(0);
+                let line = f.hunks.get(hunk).and_then(|h| {
+                    d.rendered
+                        .new_line_at(d.scroll)
+                        .filter(|&l| h.holds_new_line(l))
+                        .or_else(|| h.first_changed_line())
+                });
+                (Some(hunk), line)
+            }
+            _ => (None, None),
         };
         self.draft_fix(&entry, file.as_ref(), hunk, line, String::new());
         Vec::new()
@@ -246,7 +252,10 @@ impl App {
             .and_then(|r: &Ref| v.files.iter().find(|f| f.stat.path == r.path))
             .cloned();
         let hunk = target.as_ref().and_then(|r| r.hunk);
-        let line = file.as_ref().zip(hunk).and_then(|(f, h)| hunk_line(f, h));
+        let line = file
+            .as_ref()
+            .zip(hunk)
+            .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
         self.draft_fix(&entry, file.as_ref(), hunk, line, text);
         Vec::new()
     }

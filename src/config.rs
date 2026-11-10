@@ -127,7 +127,8 @@ pub struct Config {
     pub no_update_check: bool,
 
     /// Coding agent that explains (`x` in a diff) and fixes (`f`) changes;
-    /// `auto` picks the first of claude, codex and pi found on PATH.
+    /// `auto` picks the first of claude, codex and pi found on PATH to
+    /// explain, and of claude and codex to fix. pi explains only.
     #[arg(long, global = true, value_enum, default_value_t = Choice::Auto, value_name = "AGENT", env = "VERT_EXPLAIN_AGENT")]
     pub explain_agent: Choice,
 

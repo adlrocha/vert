@@ -172,10 +172,16 @@ impl Agent {
                         "never",
                         "-",
                     ],
+                    // workspace-write also opens /tmp and $TMPDIR unless
+                    // told not to; only the checkout stays writable.
                     Access::Edit => &[
                         "exec",
                         "--sandbox",
                         "workspace-write",
+                        "-c",
+                        "sandbox_workspace_write.exclude_slash_tmp=true",
+                        "-c",
+                        "sandbox_workspace_write.exclude_tmpdir_env_var=true",
                         "--skip-git-repo-check",
                         "--ephemeral",
                         "--color",
@@ -632,6 +638,13 @@ mod tests {
                 .windows(2)
                 .any(|w| w == ["--sandbox", "workspace-write"])
         );
+        for exclude in ["exclude_slash_tmp", "exclude_tmpdir_env_var"] {
+            let setting = format!("sandbox_workspace_write.{exclude}=true");
+            assert!(
+                codex.windows(2).any(|w| w == ["-c", setting.as_str()]),
+                "{exclude}"
+            );
+        }
         assert_eq!(codex[codex.len() - 3..], ["--model", "o3", "-"]);
         assert_eq!(
             args_with(&Agent::Pi, Access::Edit, None),
