@@ -1,11 +1,12 @@
 //! Command-line configuration.
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
+use crate::app::Start;
 use crate::explain::agent::{self, Choice};
 use crate::explain::{Explainer, cache::Cache};
 use crate::labels::{LabelError, Labeler};
@@ -14,67 +15,72 @@ use crate::labels::{LabelError, Labeler};
 #[derive(Debug, Clone, Parser)]
 #[command(name = "vert", version, about)]
 pub struct Config {
+    /// Open straight on one line of work instead of the feed.
+    #[command(subcommand)]
+    pub open: Option<Open>,
+
     /// Any path inside the git repository to explore.
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
     /// Maximum number of commits loaded into the feed (and used for hotspots).
-    #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, global = true, default_value_t = 500, value_parser = clap::value_parser!(u32).range(1..))]
     pub limit: u32,
 
     /// Directory depth that defines a module (1 = top-level folders).
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
+    #[arg(long, global = true, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
     pub module_depth: u16,
 
     /// Changes touching at least this many modules are labelled "wide".
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..))]
+    #[arg(long, global = true, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..))]
     pub wide_modules: u16,
 
     /// Changed lines (added + removed) at which a change is "medium".
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, global = true, default_value_t = 50)]
     pub medium_lines: u64,
 
     /// Changed lines at which a change is "large".
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, global = true, default_value_t = 200)]
     pub large_lines: u64,
 
     /// Changed lines at which a change is "xl".
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, global = true, default_value_t = 1000)]
     pub xl_lines: u64,
 
     /// Quiet period before reacting to file-system changes, in milliseconds.
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, global = true, default_value_t = 300)]
     pub debounce_ms: u64,
 
     /// Maximum number of content-search matches to collect.
-    #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, global = true, default_value_t = 2000, value_parser = clap::value_parser!(u32).range(1..))]
     pub max_search_results: u32,
 
     /// Files or diffs longer than this many lines are shown without syntax colours.
-    #[arg(long, default_value_t = 20_000)]
+    #[arg(long, global = true, default_value_t = 20_000)]
     pub max_highlight_lines: usize,
 
     /// Files larger than this many KiB are not opened in the viewer.
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, global = true, default_value_t = 4096)]
     pub max_file_kb: u64,
 
     /// Disable live file watching.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub no_watch: bool,
 
     /// Branch that other branches are compared against (default: the remote's
     /// default branch, else main or master).
-    #[arg(long, value_name = "BRANCH")]
+    #[arg(long, global = true, value_name = "BRANCH")]
     pub base: Option<String>,
 
     /// Maximum branches without a worktree to show (most recent first).
-    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, global = true, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
     pub max_branches: u32,
 
     /// Files that never count as a collision between branches: file names or
     /// repository-relative paths, separated by commas.
     #[arg(
         long,
+        global = true,
         value_name = "FILES",
         value_delimiter = ',',
         default_value = "Cargo.lock,package-lock.json,pnpm-lock.yaml,yarn.lock,go.sum,uv.lock,poetry.lock"
@@ -83,64 +89,121 @@ pub struct Config {
 
     /// Maximum pairs of branches to run a merge check on in one pass. Pairs
     /// past the limit show as overlaps until a later pass reaches them.
-    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, global = true, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..))]
     pub max_overlap_checks: u32,
 
     /// How often the Branches tab rescans branches and worktrees, in seconds.
-    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, global = true, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..))]
     pub branch_refresh_secs: u32,
 
     /// How often the Branches tab refreshes open pull requests, in seconds.
-    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, global = true, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..))]
     pub pr_refresh_secs: u32,
 
     /// Maximum open pull requests to list.
-    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+    #[arg(long, global = true, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
     pub max_prs: u16,
 
     /// GitHub REST API base URL (for GitHub Enterprise: `https://HOST/api/v3`).
-    #[arg(long, default_value = "https://api.github.com", value_name = "URL")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "https://api.github.com",
+        value_name = "URL"
+    )]
     pub github_api: String,
 
     /// Seconds before a GitHub request gives up.
-    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, global = true, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
     pub github_timeout_secs: u64,
 
     /// Never contact GitHub (pull requests are not shown), and explain no changes.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub no_network: bool,
 
     /// Never ask GitHub whether a newer vert exists.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub no_update_check: bool,
 
     /// Coding agent that explains a change (`x` in a diff); `auto` picks the
     /// first of claude, codex and pi found on PATH.
-    #[arg(long, value_enum, default_value_t = Choice::Auto, value_name = "AGENT", env = "VERT_EXPLAIN_AGENT")]
+    #[arg(long, global = true, value_enum, default_value_t = Choice::Auto, value_name = "AGENT", env = "VERT_EXPLAIN_AGENT")]
     pub explain_agent: Choice,
 
     /// Model the agent explains with, in the agent's own naming (passed as
     /// its `--model`, or to `--explain-cmd` in `VERT_EXPLAIN_MODEL`); unset
     /// uses the agent's default.
-    #[arg(long, value_name = "MODEL", env = "VERT_EXPLAIN_MODEL")]
+    #[arg(long, global = true, value_name = "MODEL", env = "VERT_EXPLAIN_MODEL")]
     pub explain_model: Option<String>,
 
     /// Shell command that explains changes instead of a known agent: it reads
     /// the prompt on stdin and prints its answer.
-    #[arg(long, value_name = "CMD", env = "VERT_EXPLAIN_CMD")]
+    #[arg(long, global = true, value_name = "CMD", env = "VERT_EXPLAIN_CMD")]
     pub explain_cmd: Option<String>,
 
     /// Seconds an agent may take to explain a change.
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..), env = "VERT_EXPLAIN_TIMEOUT_SECS")]
+    #[arg(long, global = true, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..), env = "VERT_EXPLAIN_TIMEOUT_SECS")]
     pub explain_timeout_secs: u64,
 
     /// KiB of diff sent to the agent in full; later hunks are listed by
     /// header only, for the agent to read itself.
-    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..), env = "VERT_EXPLAIN_MAX_DIFF_KB")]
+    #[arg(long, global = true, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..), env = "VERT_EXPLAIN_MAX_DIFF_KB")]
     pub explain_max_diff_kb: u32,
 }
 
+/// A line of work to open on start, with the diff already showing.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum Open {
+    /// Open a pull request's diff on the Branches tab.
+    Pr {
+        /// The pull request's number.
+        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        number: u64,
+        /// Any path inside the git repository.
+        path: Option<PathBuf>,
+    },
+    /// Open a branch or worktree on the Branches tab: its uncommitted work,
+    /// else what it adds since it left the base branch, else its pull request.
+    Branch {
+        /// The branch, remote branch or worktree directory name.
+        name: String,
+        /// Any path inside the git repository.
+        path: Option<PathBuf>,
+    },
+}
+
 impl Config {
+    /// The path to explore: the one given after `pr`/`branch`, else the main one.
+    #[must_use]
+    pub fn repo_path(&self) -> &Path {
+        match &self.open {
+            Some(Open::Pr { path: Some(p), .. } | Open::Branch { path: Some(p), .. }) => p,
+            _ => &self.path,
+        }
+    }
+
+    /// The line of work to open on start, if one was asked for.
+    ///
+    /// # Errors
+    /// Explains why it can't be opened: a pull request needs GitHub.
+    pub fn start(&self) -> Result<Option<Start>, String> {
+        match &self.open {
+            None => Ok(None),
+            Some(Open::Pr { .. }) if self.no_network => {
+                Err("`vert pr` reads the pull request from GitHub; drop --no-network".to_owned())
+            }
+            Some(Open::Pr { number, .. }) => Ok(Some(Start::Pull(*number))),
+            Some(Open::Branch { name, .. }) => {
+                let name = name.trim();
+                if name.is_empty() {
+                    Err("`vert branch` needs a branch or worktree name".to_owned())
+                } else {
+                    Ok(Some(Start::Branch(name.to_owned())))
+                }
+            }
+        }
+    }
+
     /// Builds the [`Labeler`] described by this configuration.
     ///
     /// # Errors
@@ -371,6 +434,37 @@ mod tests {
         assert!(off.contains("--no-network"), "{off}");
         assert!(Config::try_parse_from(["vert", "--explain-agent", "gpt"]).is_err());
         assert!(Config::try_parse_from(["vert", "--explain-timeout-secs", "0"]).is_err());
+    }
+
+    #[test]
+    fn opens_a_pull_request_or_branch_on_start() {
+        let plain = Config::parse_from(["vert", "~/code/app"]);
+        assert_eq!(plain.start(), Ok(None));
+        assert_eq!(plain.repo_path(), Path::new("~/code/app"));
+
+        let pr = Config::parse_from(["vert", "pr", "12"]);
+        assert_eq!(pr.start(), Ok(Some(Start::Pull(12))));
+        assert_eq!(pr.repo_path(), Path::new("."));
+        // Options and the repository path work after the subcommand too.
+        let pr = Config::parse_from(["vert", "pr", "12", "../app", "--limit", "7"]);
+        assert_eq!(pr.repo_path(), Path::new("../app"));
+        assert_eq!(pr.limit, 7);
+        let pr = Config::parse_from(["vert", "--limit", "8", "pr", "3"]);
+        assert_eq!((pr.limit, pr.start()), (8, Ok(Some(Start::Pull(3)))));
+        let before = Config::parse_from(["vert", "../app", "pr", "4"]);
+        assert_eq!(before.repo_path(), Path::new("../app"));
+        assert_eq!(before.start(), Ok(Some(Start::Pull(4))));
+
+        let offline = Config::parse_from(["vert", "pr", "12", "--no-network"]);
+        assert!(offline.start().is_err_and(|e| e.contains("--no-network")));
+        assert!(Config::try_parse_from(["vert", "pr", "0"]).is_err());
+        assert!(Config::try_parse_from(["vert", "pr", "abc"]).is_err());
+        assert!(Config::try_parse_from(["vert", "pr"]).is_err());
+
+        let branch = Config::parse_from(["vert", "branch", " feat/x ", "--no-network"]);
+        assert_eq!(branch.start(), Ok(Some(Start::Branch("feat/x".to_owned()))));
+        assert!(Config::parse_from(["vert", "branch", " "]).start().is_err());
+        assert!(Config::try_parse_from(["vert", "branch"]).is_err());
     }
 
     #[test]

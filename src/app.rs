@@ -14,7 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 pub use branches::{
     BranchRemoval, BranchesState, CollisionList, CollisionRow, PullStatus, Refresh, Removal, Row,
-    RowFilter, pull_entry,
+    RowFilter, Start, pull_entry,
 };
 #[cfg(test)]
 pub(crate) use explain::pi_for_tests;
