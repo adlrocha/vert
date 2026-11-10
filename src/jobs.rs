@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::app::{Effect, Msg, UpdateStatus};
 use crate::explain::Explainer;
+use crate::fix::Fixer;
 use crate::git::Target;
 use crate::git::feed::Entry;
 use crate::github::{self, Client, Endpoint, GhError, PullsError, Slug};
@@ -104,6 +105,8 @@ pub struct Context {
     pub token: Arc<Mutex<Option<github::Token>>>,
     /// How to explain changes, or `None` when that is unavailable.
     pub explain: Option<Explainer>,
+    /// How to fix changes, or `None` when that is unavailable.
+    pub fix: Option<Fixer>,
 }
 
 impl Context {
@@ -286,6 +289,7 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
             files,
             fresh,
         } => explain(ctx, key, &entry, &files, fresh),
+        Effect::Fix { id, root, request } => fix(ctx, id, root.as_deref(), &request),
         Effect::Remove { worktree, branch } => {
             let (removed, error) = remove(
                 open(),
@@ -371,6 +375,17 @@ fn explain(
         .ok_or_else(|| "explanations are unavailable".to_owned())
         .and_then(|ex| ex.explain(entry, files, ctx.dir(entry.root.as_deref()), fresh));
     Msg::Explained { key, result }
+}
+
+/// Asks the configured agent to act on `request`, editing the checkout at
+/// `root` (vert's own when `None`).
+fn fix(ctx: &Context, id: u64, root: Option<&Path>, request: &crate::fix::Request) -> Msg {
+    let result = ctx
+        .fix
+        .as_ref()
+        .ok_or_else(|| "fixes are unavailable".to_owned())
+        .and_then(|fixer| fixer.fix(request, ctx.dir(root)));
+    Msg::Fixed { id, result }
 }
 
 /// Open pull requests of the repository `origin` points at.
@@ -488,6 +503,7 @@ mod tests {
             },
             token: Arc::default(),
             explain: None,
+            fix: None,
         }
     }
 
@@ -1102,6 +1118,50 @@ mod tests {
         assert_eq!(answer.explanation.intent, "linked-wt");
         assert_eq!(answer.explanation.unexplained.len(), 1);
         assert!(!answer.cached);
+    }
+
+    #[test]
+    fn fixes_edit_the_checkout_they_are_sent_to() {
+        let t = repo();
+        let mut c = ctx(&t);
+        let request = crate::fix::Request {
+            change: "abc Add".to_owned(),
+            place: None,
+            excerpt: String::new(),
+            feedback: "write the marker".to_owned(),
+        };
+        let fix = |c: &Context, root: Option<PathBuf>| {
+            run(
+                Effect::Fix {
+                    id: 4,
+                    root,
+                    request: request.clone(),
+                },
+                c,
+            )
+        };
+        let Some(Msg::Fixed { id: 4, result }) = fix(&c, None) else {
+            panic!("answered")
+        };
+        assert_eq!(result, Err("fixes are unavailable".to_owned()));
+
+        c.fix = Some(crate::fix::Fixer {
+            agent: crate::explain::agent::Agent::Custom(
+                "grep -q 'write the marker' && touch marker && echo 'SUMMARY: wrote it'".to_owned(),
+            ),
+            model: None,
+            timeout: Duration::from_secs(10),
+            max_excerpt_bytes: 1024,
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let Some(Msg::Fixed { result, .. }) = fix(&c, Some(dir.path().to_path_buf())) else {
+            panic!("answered")
+        };
+        assert_eq!(result, Ok("wrote it".to_owned()));
+        assert!(dir.path().join("marker").exists(), "the linked worktree");
+        assert!(!t.path().join("marker").exists());
+        fix(&c, None);
+        assert!(t.path().join("marker").exists(), "vert's own checkout");
     }
 
     #[test]

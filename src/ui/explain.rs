@@ -19,6 +19,7 @@ pub const EXPLAIN_HINTS: Hints = &[
     ("⏎", "go to code"),
     ("J/K", "scroll"),
     ("r", "ask again"),
+    ("f", "fix"),
     ("esc", "back"),
 ];
 

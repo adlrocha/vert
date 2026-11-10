@@ -24,6 +24,7 @@ pub const DETAIL_HINTS: Hints = &[
     ("⏎", "view file"),
     ("e", "edit"),
     ("x", "explain"),
+    ("f", "fix"),
     ("esc", "back"),
 ];
 
