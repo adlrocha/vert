@@ -103,9 +103,22 @@ From a clone you can also run `./install.sh --source .` or `cargo install --path
 ## Usage
 
 ```sh
-vert            # the repository containing the current directory
-vert ~/code/app # or any path inside a repository
+vert                    # the repository containing the current directory
+vert ~/code/app         # or any path inside a repository
+vert pr 42              # open pull request #42's diff
+vert branch agent/auth  # open a branch or worktree's diff
 ```
+
+`vert pr` and `vert branch` start on the Branches tab and open that line of
+work's diff straight away, so `esc` takes you to the rest of the lines of
+work. A listed pull request or a matched branch leaves its row selected.
+`vert pr` opens any pull request by number, including closed ones and ones
+past `--max-prs`, which have no row. It needs GitHub access, so it refuses
+`--no-network`.
+`vert branch` takes a branch name (`feat/x` or `origin/feat/x`) or a
+worktree's directory name, and opens what `⏎` would: uncommitted work first,
+then the branch against the base, then its pull request. Both take a path
+and any option after the name too: `vert pr 42 ~/code/app --base develop`.
 
 Press `?` inside vert for all keys. The essentials:
 

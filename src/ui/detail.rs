@@ -337,10 +337,13 @@ fn draw_summary(frame: &mut Frame<'_>, area: Rect, d: &DetailView, now: i64) {
     if !e.author.is_empty() {
         meta.push(Span::styled(format!(" · {}", e.author), theme::muted()));
     }
-    meta.push(Span::styled(
-        format!(" · {} · ", ago(now, e.time)),
-        theme::muted(),
-    ));
+    // A pull request opened by number alone has no time to show.
+    let when = if e.time > 0 {
+        format!(" · {} · ", ago(now, e.time))
+    } else {
+        " · ".to_owned()
+    };
+    meta.push(Span::styled(when, theme::muted()));
     meta.extend(stat_spans(e.added, e.removed));
     meta.push(Span::styled(
         format!(

@@ -67,14 +67,15 @@ impl Runtime {
 fn run() -> Result<()> {
     let config = Config::parse();
     let labeler = config.labeler().context("invalid label thresholds")?;
-    let repo = git::open(&config.path)?;
+    let start = config.start().map_err(anyhow::Error::msg)?;
+    let repo = git::open(config.repo_path())?;
     let workdir = git::workdir(&repo)?;
     let info = git::info(&repo);
     let layout = watch::Layout::of(&repo)?;
     drop(repo);
 
     let (tx, rx) = mpsc::channel();
-    let (mut app, effects) = App::new(
+    let (mut app, mut effects) = App::new(
         info,
         usize::from(config.module_depth),
         config.max_highlight_lines,
@@ -84,6 +85,9 @@ fn run() -> Result<()> {
     app.set_refresh(config.refresh());
     let explainer = config.explainer(std::env::var_os("PATH").as_deref());
     app.set_explainer(&explainer);
+    if let Some(start) = start {
+        effects.extend(app.update(Msg::Start(start)));
+    }
     let _watch = if config.no_watch {
         app.watch = WatchStatus::Disabled;
         None

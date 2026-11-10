@@ -783,6 +783,24 @@ mod render_tests {
     }
 
     #[test]
+    fn a_pull_request_opened_by_number_shows_no_age() {
+        let (_t, mut app) = real_app();
+        let mut entry = git::feed::Entry::blank(git::Target::PullRequest(13));
+        entry.summary = "Pull request #13".to_owned();
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        app.update(Msg::Diff {
+            entry: Box::new(entry),
+            result: git::diff::parse(diff).map_err(|e| e.to_string()),
+            refresh: false,
+            file: None,
+        });
+        let s = screen(&mut app, 120, 20);
+        assert!(s.contains("Pull request #13"), "{s}");
+        assert!(s.contains("#13 · +"), "{s}");
+        assert!(!s.contains(" ago"), "{s}");
+    }
+
+    #[test]
     fn detail_and_file_views_render() {
         let (t, mut app) = real_app();
         let entry = app.feed.commits[0].clone();

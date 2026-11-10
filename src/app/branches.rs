@@ -88,6 +88,15 @@ pub enum PullStatus {
     Failed(String),
 }
 
+/// A line of work to open once it has loaded: `vert pr` and `vert branch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Start {
+    /// A pull request, by number.
+    Pull(u64),
+    /// A branch, remote branch or worktree directory, by name.
+    Branch(String),
+}
+
 /// One line of work: a branch or checkout, its pull request, or both.
 #[derive(Debug, Clone, Copy)]
 pub struct Row<'a> {
@@ -214,6 +223,8 @@ pub struct BranchesState {
     pub overlap_error: Option<String>,
     /// The open list of collisions.
     pub collisions: Option<CollisionList>,
+    /// The line of work to open once it has loaded.
+    pub start: Option<Start>,
     load: Loader,
     overlap_load: Loader,
     pulls_load: Loader,
@@ -231,6 +242,15 @@ fn change_holding(branch: &Branch, path: &str) -> Option<Entry> {
         .chain(&branch.changes)
         .find(|e| e.touches_path(path))
         .cloned()
+}
+
+/// The row `name` refers to: a branch by its full name first, then by its
+/// name without a remote, then a checkout by its directory name.
+fn row_named(rows: &[Row<'_>], name: &str) -> Option<usize> {
+    let by = |hit: &dyn Fn(&Branch) -> bool| rows.iter().position(|r| r.branch.is_some_and(hit));
+    by(&|b| b.name == name)
+        .or_else(|| by(&|b| b.branch.as_deref() == Some(name)))
+        .or_else(|| by(&|b| b.worktree.as_ref().is_some_and(|w| w.name == name)))
 }
 
 /// Whether a row's branch, checkout directory or pull request name fuzzily
@@ -364,6 +384,94 @@ impl App {
         };
     }
 
+    /// Opens on the Branches tab, then opens `start`'s diff as soon as the
+    /// lines of work it needs have loaded.
+    pub(super) fn start_at(&mut self, start: Start) -> Vec<Effect> {
+        self.branches.start = Some(start);
+        self.enter_branches()
+    }
+
+    /// Opens the line of work asked for on start, once enough has loaded to
+    /// find it.
+    fn try_start(&mut self) -> Vec<Effect> {
+        let Some(start) = self.branches.start.clone() else {
+            return Vec::new();
+        };
+        let branches_known = self.branches.loaded || self.branches.error.is_some();
+        let pulls_known = self.branches.pull_status != PullStatus::Waiting;
+        if !branches_known || (matches!(start, Start::Pull(_)) && !pulls_known) {
+            return Vec::new();
+        }
+        self.branches.start = None;
+        // Filters set while the first lists loaded mustn't hide the row
+        // asked for.
+        self.branches.filter = RowFilter::All;
+        self.branches.name_filter.clear();
+        self.branches.filter_editing = false;
+        match start {
+            Start::Branch(name) => self.start_branch(&name),
+            Start::Pull(number) => match &self.branches.pull_status {
+                PullStatus::Off => self.cant_open_pull(number, "network access is off"),
+                PullStatus::NoToken => self.cant_open_pull(
+                    number,
+                    "no GitHub token: set GH_TOKEN or run `gh auth login`",
+                ),
+                PullStatus::Unsupported(why) => {
+                    let why = why.clone();
+                    self.cant_open_pull(number, &why)
+                }
+                PullStatus::Waiting | PullStatus::Ready(_) | PullStatus::Failed(_) => {
+                    self.start_pull(number)
+                }
+            },
+        }
+    }
+
+    fn start_branch(&mut self, name: &str) -> Vec<Effect> {
+        let found = row_named(&self.branches.rows(), name);
+        let Some(i) = found else {
+            self.notice = Some(match &self.branches.error {
+                Some(e) if !self.branches.loaded => format!("Can't find {name}: {e}"),
+                _ => format!(
+                    "No branch or worktree named {name} (only the newest branches are listed: --max-branches)"
+                ),
+            });
+            return Vec::new();
+        };
+        self.branches.pos.selected = i;
+        let effects = self.open_selected(KeyCode::Enter);
+        if effects.is_empty() {
+            self.notice = Some(format!("{name} has no changes to show yet"));
+        }
+        effects
+    }
+
+    /// Opens pull request `number`: on its row when it is listed, else by
+    /// number alone (a closed one, or one past `--max-prs`).
+    fn start_pull(&mut self, number: u64) -> Vec<Effect> {
+        let found = self
+            .branches
+            .rows()
+            .iter()
+            .position(|r| r.pull.is_some_and(|p| p.number == number));
+        if let Some(i) = found {
+            self.branches.pos.selected = i;
+            return self.open_selected(KeyCode::Char('p'));
+        }
+        let mut entry = Entry::blank(Target::PullRequest(number));
+        entry.summary = format!("Pull request #{number}");
+        vec![Effect::LoadDiff {
+            entry: Box::new(entry),
+            refresh: false,
+            file: None,
+        }]
+    }
+
+    fn cant_open_pull(&mut self, number: u64, why: &str) -> Vec<Effect> {
+        self.notice = Some(format!("Can't open #{number}: {why}"));
+        Vec::new()
+    }
+
     pub(super) fn request_branches(&mut self) -> Vec<Effect> {
         self.branches.last_load = Some(self.now);
         if self.branches.load.request() {
@@ -429,6 +537,7 @@ impl App {
         if follow_up {
             effects.push(Effect::LoadBranches);
         }
+        effects.extend(self.try_start());
         effects
     }
 
@@ -517,11 +626,13 @@ impl App {
             Err(PullsError::Failed(why)) => PullStatus::Failed(why),
         };
         self.branches.reselect(selected.as_deref());
-        if follow_up {
+        let mut effects = if follow_up {
             vec![Effect::LoadPulls]
         } else {
             Vec::new()
-        }
+        };
+        effects.extend(self.try_start());
+        effects
     }
 
     pub(super) fn enter_branches(&mut self) -> Vec<Effect> {
@@ -1325,6 +1436,188 @@ mod tests {
         assert!(
             press(&mut app, KeyCode::Enter).is_empty(),
             "nothing selected"
+        );
+    }
+
+    const NO_DIFF: [&str; 0] = [];
+
+    /// The ids of the diffs `effects` open.
+    fn diffs(effects: &[Effect]) -> Vec<String> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LoadDiff {
+                    entry,
+                    refresh: false,
+                    file: None,
+                } => Some(entry.id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn the_list() -> Branches {
+        let mut remote = branch("origin/shared", 400);
+        remote.remote = true;
+        remote.branch = Some("shared".to_owned());
+        let mut detached = checkout("scratch-dir", false, false);
+        detached.name = "scratch".to_owned();
+        detached.branch = None;
+        Branches {
+            base: Some("main".to_owned()),
+            branches: vec![
+                checkout("main", true, false),
+                checkout("agent", false, true),
+                detached,
+                branch("feat", 500),
+                remote,
+            ],
+        }
+    }
+
+    fn started(start: Start) -> (App, Vec<Effect>) {
+        let mut app = app(true);
+        let effects = app.update(Msg::Start(start));
+        assert_eq!(app.tab, Tab::Branches);
+        assert_eq!(effects, [Effect::LoadBranches, Effect::LoadPulls]);
+        (app, effects)
+    }
+
+    #[test]
+    fn a_branch_asked_for_on_start_opens_once_branches_load() {
+        for (name, row, opened) in [
+            ("agent", "b:agent", "worktree:agent"),
+            ("feat", "b:feat", "branch:feat"),
+            ("shared", "b:origin/shared", "branch:origin/shared"),
+            ("origin/shared", "b:origin/shared", "branch:origin/shared"),
+            ("scratch-dir", "b:scratch", "branch:scratch-dir"),
+        ] {
+            let (mut app, _) = started(Start::Branch(name.to_owned()));
+            let effects = app.update(Msg::Branches(Ok(the_list())));
+            assert_eq!(diffs(&effects), [opened], "{name}");
+            assert_eq!(app.branches.selected_key().as_deref(), Some(row), "{name}");
+            assert_eq!(app.branches.start, None, "opened only once");
+            assert_eq!(diffs(&app.update(Msg::Branches(Ok(the_list())))), NO_DIFF);
+        }
+    }
+
+    #[test]
+    fn filters_set_while_loading_do_not_hide_the_row_asked_for() {
+        let (mut app, _) = started(Start::Pull(7));
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('z'));
+        app.update(Msg::Branches(Ok(the_list())));
+        assert_eq!(app.branches.name_filter, "z", "kept while waiting for PRs");
+        let effects = app.update(Msg::Pulls(Ok((
+            "o/r".to_owned(),
+            vec![pull(7, "feat", 50)],
+        ))));
+        assert_eq!(diffs(&effects), ["pr:7"]);
+        assert_eq!(app.branches.selected_key().as_deref(), Some("b:feat"));
+        assert_eq!(app.branches.filter, RowFilter::All);
+        assert_eq!(app.branches.name_filter, "");
+        assert!(!app.branches.filter_editing);
+
+        let (mut app, _) = started(Start::Branch("feat".to_owned()));
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(
+            diffs(&app.update(Msg::Branches(Ok(the_list())))),
+            ["branch:feat"]
+        );
+    }
+
+    #[test]
+    fn a_branch_that_is_not_there_or_empty_says_so() {
+        let (mut app, _) = started(Start::Branch("nope".to_owned()));
+        assert_eq!(diffs(&app.update(Msg::Branches(Ok(the_list())))), NO_DIFF);
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("No branch or worktree named nope")),
+            "{:?}",
+            app.notice
+        );
+        assert_eq!(app.branches.start, None);
+
+        let (mut app, _) = started(Start::Branch("fresh".to_owned()));
+        let mut list = the_list();
+        let mut fresh = checkout("fresh", false, false);
+        fresh.changes = None;
+        list.branches.push(fresh);
+        assert_eq!(diffs(&app.update(Msg::Branches(Ok(list)))), NO_DIFF);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("fresh has no changes to show yet")
+        );
+
+        let (mut app, _) = started(Start::Branch("feat".to_owned()));
+        app.update(Msg::Branches(Err("broken".to_owned())));
+        assert_eq!(app.notice.as_deref(), Some("Can't find feat: broken"));
+        assert_eq!(app.branches.start, None);
+    }
+
+    #[test]
+    fn a_pull_request_asked_for_on_start_waits_for_both_lists() {
+        let pulls = || {
+            Msg::Pulls(Ok((
+                "o/r".to_owned(),
+                vec![pull(7, "feat", 50), pull(8, "remote-only", 300)],
+            )))
+        };
+        // Pull requests first, then branches.
+        let (mut app, _) = started(Start::Pull(7));
+        assert_eq!(diffs(&app.update(pulls())), NO_DIFF, "branches pending");
+        assert_eq!(diffs(&app.update(Msg::Branches(Ok(the_list())))), ["pr:7"]);
+        assert_eq!(app.branches.selected_key().as_deref(), Some("b:feat"));
+        // Branches first, then pull requests.
+        let (mut app, _) = started(Start::Pull(8));
+        assert_eq!(diffs(&app.update(Msg::Branches(Ok(the_list())))), NO_DIFF);
+        assert_eq!(diffs(&app.update(pulls())), ["pr:8"]);
+        assert_eq!(app.branches.selected_key().as_deref(), Some("p:8"));
+        assert_eq!(diffs(&app.update(pulls())), NO_DIFF, "opened only once");
+        // Not among the open ones: opened by number.
+        let (mut app, _) = started(Start::Pull(99));
+        app.update(Msg::Branches(Ok(the_list())));
+        assert_eq!(diffs(&app.update(pulls())), ["pr:99"]);
+        // A failed listing still tries the diff, whose error is reported.
+        let (mut app, _) = started(Start::Pull(5));
+        app.update(Msg::Branches(Ok(the_list())));
+        let failed = app.update(Msg::Pulls(Err(PullsError::Failed("503".to_owned()))));
+        assert_eq!(diffs(&failed), ["pr:5"]);
+    }
+
+    #[test]
+    fn a_pull_request_that_cannot_be_read_says_why() {
+        for (error, says) in [
+            (PullsError::NoToken, "gh auth login"),
+            (
+                PullsError::Unsupported("origin is not on github.com".to_owned()),
+                "origin is not on github.com",
+            ),
+        ] {
+            let (mut app, _) = started(Start::Pull(3));
+            app.update(Msg::Branches(Ok(the_list())));
+            assert_eq!(diffs(&app.update(Msg::Pulls(Err(error)))), NO_DIFF);
+            let notice = app.notice.clone().unwrap_or_default();
+            assert!(
+                notice.starts_with("Can't open #3: ") && notice.contains(says),
+                "{notice}"
+            );
+            assert_eq!(app.branches.start, None);
+        }
+        let mut offline = app(false);
+        assert_eq!(
+            offline.update(Msg::Start(Start::Pull(3))),
+            [Effect::LoadBranches]
+        );
+        assert_eq!(
+            diffs(&offline.update(Msg::Branches(Ok(the_list())))),
+            NO_DIFF
+        );
+        assert_eq!(
+            offline.notice.as_deref(),
+            Some("Can't open #3: network access is off")
         );
     }
 

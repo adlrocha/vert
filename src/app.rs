@@ -14,7 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 pub use branches::{
     BranchRemoval, BranchesState, CollisionList, CollisionRow, PullStatus, Refresh, Removal, Row,
-    RowFilter, pull_entry,
+    RowFilter, Start, pull_entry,
 };
 #[cfg(test)]
 pub(crate) use explain::pi_for_tests;
@@ -474,6 +474,8 @@ pub enum Msg {
     },
     /// The update check answered.
     Update(UpdateStatus),
+    /// Open this line of work as soon as it has loaded (`vert pr`, `vert branch`).
+    Start(Start),
     /// An agent answered about a change.
     Explained {
         /// The diff it was asked about (see [`crate::explain::diff_key`]).
@@ -756,6 +758,7 @@ impl App {
                 self.update = Some(status);
                 Vec::new()
             }
+            Msg::Start(start) => self.start_at(start),
             Msg::Explained { key, result } => {
                 self.on_explained(key, result);
                 Vec::new()
