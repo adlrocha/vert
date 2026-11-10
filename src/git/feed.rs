@@ -134,6 +134,29 @@ impl Entry {
         self.target == Target::WorkingTree
     }
 
+    /// One line naming the change for an agent: its short id and summary,
+    /// or what uncommitted changes are.
+    ///
+    /// ```
+    /// use vert::git::{Target, feed::Entry};
+    /// let mut e = Entry::blank(Target::PullRequest(4));
+    /// e.summary = "Add login".into();
+    /// assert_eq!(e.headline(), "#4 Add login");
+    /// assert_eq!(
+    ///     Entry::blank(Target::WorkingTree).headline(),
+    ///     "working Uncommitted changes in the working tree"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn headline(&self) -> String {
+        let title = if self.is_worktree() {
+            "Uncommitted changes in the working tree"
+        } else {
+            self.summary.as_str()
+        };
+        format!("{} {title}", self.short)
+    }
+
     /// Whether this holds the uncommitted changes of vert's own checkout.
     #[must_use]
     pub fn is_own_worktree(&self) -> bool {

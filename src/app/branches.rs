@@ -272,11 +272,24 @@ fn tip_of(entry: Option<&Entry>) -> Option<Oid> {
 }
 
 impl BranchesState {
-    /// Rows shown under the current filter: checkouts first, then branches
-    /// and pull requests by latest activity. A pull request joins at most one
-    /// branch row: a local branch or an `origin` one with its head's name.
+    /// Rows shown under the current filter: [`all_rows`](Self::all_rows)
+    /// narrowed by the kind and name filters.
     #[must_use]
     pub fn rows(&self) -> Vec<Row<'_>> {
+        self.all_rows()
+            .into_iter()
+            .filter(|r| self.filter.keeps(r))
+            .filter(|r| named_like(r, &self.name_filter))
+            .collect()
+    }
+
+    /// Every row, whatever the filters: checkouts first, then branches and
+    /// pull requests by latest activity. A pull request joins at most one
+    /// branch row: a local branch or an `origin` one with its head's name,
+    /// never for a fork's pull request. This is the one place a pull
+    /// request is matched to its branch.
+    #[must_use]
+    pub fn all_rows(&self) -> Vec<Row<'_>> {
         let mut matched = vec![false; self.pulls.len()];
         let mut checkouts = Vec::new();
         let mut rest = Vec::new();
@@ -315,12 +328,7 @@ impl BranchesState {
                 }),
         );
         rest.sort_by_key(|r| std::cmp::Reverse(r.time()));
-        checkouts
-            .into_iter()
-            .chain(rest)
-            .filter(|r| self.filter.keeps(r))
-            .filter(|r| named_like(r, &self.name_filter))
-            .collect()
+        checkouts.into_iter().chain(rest).collect()
     }
 
     /// Whether a load is in flight.
@@ -580,9 +588,8 @@ impl App {
     /// Reloads an open linked-worktree diff: with its latest changes, or
     /// empty once the worktree is clean. A removed worktree is left alone.
     fn refresh_open_worktree(&self) -> Option<Effect> {
-        let Some(View::Detail(d)) = self.views.last() else {
-            return None;
-        };
+        // Also under a view stacked on the diff (an explanation, a file).
+        let d = self.views.iter().rev().find_map(View::as_detail)?;
         let root = d.entry.root.as_ref().filter(|_| d.entry.is_worktree())?;
         let checkout = self
             .branches
@@ -1814,6 +1821,24 @@ mod tests {
         };
         assert_eq!(clean.id, entry.id);
         assert!(clean.files.is_empty() && clean.added == 0 && clean.removed == 0);
+
+        // A view stacked on the diff (a file opened from it) doesn't stop it.
+        app.update(Msg::File {
+            path: "a.rs".to_owned(),
+            content: Ok(String::new()),
+            line: 1,
+            marks: std::collections::BTreeSet::new(),
+            root: entry.root.clone(),
+        });
+        let reload = app.update(Msg::Branches(Ok(Branches {
+            base: None,
+            branches: vec![checkout("agent", false, true)],
+        })));
+        assert!(
+            matches!(reload.as_slice(), [Effect::LoadDiff { refresh: true, entry: e, .. }] if e.id == entry.id),
+            "{reload:?}"
+        );
+        app.views.pop();
 
         // A removed worktree has nothing left to diff.
         let reload = app.update(Msg::Branches(Ok(Branches::default())));

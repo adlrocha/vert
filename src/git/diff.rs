@@ -37,6 +37,58 @@ pub struct Hunk {
     pub lines: Vec<DiffLine>,
 }
 
+impl Hunk {
+    /// The new-file line of the first added line.
+    #[must_use]
+    pub fn first_added_line(&self) -> Option<u32> {
+        self.lines
+            .iter()
+            .find(|l| l.kind == LineKind::Added)
+            .and_then(|l| l.new_no)
+    }
+
+    /// The first line this hunk has in the new file.
+    #[must_use]
+    pub fn first_new_line(&self) -> Option<u32> {
+        self.lines.iter().find_map(|l| l.new_no)
+    }
+
+    /// The line this hunk is about: its first added line, else its first
+    /// line in the new file.
+    #[must_use]
+    pub fn first_changed_line(&self) -> Option<u32> {
+        self.first_added_line().or_else(|| self.first_new_line())
+    }
+
+    /// The hunk's lines in diff form, each with its `+`, `-` or ` ` prefix
+    /// and a newline (no header).
+    #[must_use]
+    pub fn body(&self) -> String {
+        self.lines.iter().fold(String::new(), |mut body, l| {
+            let sign = match l.kind {
+                LineKind::Added => '+',
+                LineKind::Removed => '-',
+                LineKind::Context => ' ',
+            };
+            body.push(sign);
+            body.push_str(&l.content);
+            body.push('\n');
+            body
+        })
+    }
+
+    /// Whether new-file line `line` falls within this hunk.
+    #[must_use]
+    pub fn holds_new_line(&self, line: u32) -> bool {
+        let mut lines = self.lines.iter().filter_map(|l| l.new_no);
+        let first = lines.next();
+        let last = lines.next_back().or(first);
+        first
+            .zip(last)
+            .is_some_and(|(a, b)| (a..=b).contains(&line))
+    }
+}
+
 /// The diff of one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
@@ -51,12 +103,53 @@ impl FileDiff {
     /// the first line of the first hunk, else 1.
     #[must_use]
     pub fn first_changed_line(&self) -> u32 {
-        let lines = || self.hunks.iter().flat_map(|h| &h.lines);
-        lines()
-            .find(|l| l.kind == LineKind::Added)
-            .or_else(|| lines().find(|l| l.new_no.is_some()))
-            .and_then(|l| l.new_no)
+        self.hunks
+            .iter()
+            .find_map(Hunk::first_added_line)
+            .or_else(|| self.hunks.iter().find_map(Hunk::first_new_line))
             .unwrap_or(1)
+    }
+}
+
+#[cfg(test)]
+mod hunk_tests {
+    use super::*;
+
+    fn hunk(lines: &[(LineKind, Option<u32>)]) -> Hunk {
+        Hunk {
+            header: String::new(),
+            lines: lines
+                .iter()
+                .map(|&(kind, new_no)| DiffLine {
+                    kind,
+                    old_no: None,
+                    new_no,
+                    content: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_hunk_knows_its_lines() {
+        let h = hunk(&[
+            (LineKind::Context, Some(4)),
+            (LineKind::Removed, None),
+            (LineKind::Added, Some(5)),
+            (LineKind::Context, Some(6)),
+        ]);
+        assert_eq!(h.body(), " \n-\n+\n \n");
+        assert_eq!(h.first_added_line(), Some(5));
+        assert_eq!(h.first_new_line(), Some(4));
+        assert_eq!(h.first_changed_line(), Some(5));
+        assert!(h.holds_new_line(4) && h.holds_new_line(6));
+        assert!(!h.holds_new_line(3) && !h.holds_new_line(7));
+        let context = hunk(&[(LineKind::Context, Some(9))]);
+        assert_eq!(context.first_changed_line(), Some(9));
+        assert!(context.holds_new_line(9));
+        let removed = hunk(&[(LineKind::Removed, None)]);
+        assert_eq!(removed.first_changed_line(), None);
+        assert!(!removed.holds_new_line(1));
     }
 }
 

@@ -5,6 +5,7 @@ mod branches;
 pub mod detail;
 mod explain;
 mod feed;
+mod fix;
 mod hotspots;
 mod search;
 
@@ -64,6 +65,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.branches.collisions.is_some() {
         branches::draw_collisions(frame, frame.area(), app);
     }
+    if app.fix.draft.is_some() {
+        fix::draw_draft(frame, frame.area(), app);
+    }
     if app.help {
         draw_help(frame);
     }
@@ -92,6 +96,17 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
             format!("✦ {} new  ", app.feed.fresh.len()),
             Style::default().fg(theme::HIGHLIGHT),
         ));
+    }
+    match app.fix.running.as_slice() {
+        [] => {}
+        [one] => right.push(Span::styled(
+            format!("{} fixing in {}  ", spinner(app.tick), one.checkout),
+            Style::default().fg(theme::INFO),
+        )),
+        many => right.push(Span::styled(
+            format!("{} {} fixes  ", spinner(app.tick), many.len()),
+            Style::default().fg(theme::INFO),
+        )),
     }
     if app.feed.loading() {
         right.push(Span::styled(
@@ -160,6 +175,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, hints: Hints, notice: Option<&
     }
     frame.render_widget(Line::from(spans), area);
     if let Some(notice) = notice {
+        // A long notice (an agent's summary) keeps its start, where it says
+        // what happened, and loses its end.
+        let notice = truncate(notice, usize::from(area.width).saturating_sub(2));
         frame.render_widget(
             Line::from(Span::styled(
                 format!("{notice} "),
@@ -215,6 +233,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("← →", "scroll sideways"),
             ("⏎ e", "view / edit file"),
             ("x", "explain the change"),
+            ("f", "have the agent fix the file or hunk"),
         ],
     ),
     (
@@ -225,6 +244,16 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("⏎", "go to the code"),
             ("J K", "scroll"),
             ("r", "ask the agent again"),
+            ("f", "fix the selected pointer"),
+        ],
+    ),
+    (
+        "Fix",
+        &[
+            ("type", "what should change"),
+            ("⏎", "send to the agent"),
+            ("ctrl-w ctrl-u", "delete word / all"),
+            ("esc", "cancel"),
         ],
     ),
     (
@@ -798,6 +827,67 @@ mod render_tests {
         assert!(s.contains("Pull request #13"), "{s}");
         assert!(s.contains("#13 · +"), "{s}");
         assert!(!s.contains(" ago"), "{s}");
+    }
+
+    #[test]
+    fn the_fix_prompt_and_running_fixes_render() {
+        let (t, mut app) = real_app();
+        app.set_fixer(&Ok(crate::fix::Fixer {
+            agent: crate::explain::agent::Agent::Claude,
+            model: Some("sonnet".to_owned()),
+            timeout: std::time::Duration::from_secs(1),
+            max_excerpt_bytes: 1024,
+        }));
+        let entry = app.feed.commits[0].clone();
+        let files = git::diff::load(&t.repo, entry.target).map_err(|e| e.to_string());
+        app.update(Msg::Diff {
+            entry: Box::new(entry),
+            result: files,
+            refresh: false,
+            file: None,
+        });
+        assert!(screen(&mut app, 140, 30).contains("f fix"));
+        press(&mut app, KeyCode::Char('f'));
+        for c in "split this into two functions, one per concern, "
+            .repeat(4)
+            .chars()
+        {
+            press(&mut app, KeyCode::Char(c));
+        }
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains(" Fix "), "{s}");
+        assert!(s.contains("claude · sonnet edits this checkout"), "{s}");
+        assert!(s.contains("docs/guide.md"), "{s}");
+        assert!(
+            s.contains("one per concern, ▏"),
+            "the cursor follows the text: {s}"
+        );
+        assert!(s.contains("⏎ send · esc cancel"), "{s}");
+
+        press(&mut app, KeyCode::Enter);
+        let s = screen(&mut app, 140, 30);
+        assert!(!s.contains(" Fix "), "{s}");
+        assert!(s.contains("fixing in this checkout"), "{s}");
+        app.fix.running.push(crate::app::Running {
+            id: 99,
+            root: Some("/wt/x".into()),
+            checkout: "x".to_owned(),
+        });
+        assert!(screen(&mut app, 140, 30).contains("2 fixes"));
+        app.notice = Some(format!("Fixed in x: {}", "long ".repeat(40)));
+        let footer = screen(&mut app, 60, 10)
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            footer.trim_start().starts_with("Fixed in x: long"),
+            "{footer}"
+        );
+        assert!(footer.contains('…'), "{footer}");
     }
 
     #[test]

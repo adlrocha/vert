@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use crate::app::Start;
 use crate::explain::agent::{self, Choice};
 use crate::explain::{Explainer, cache::Cache};
+use crate::fix::Fixer;
 use crate::labels::{LabelError, Labeler};
 
 /// Understand what your agents are building: a live, navigable view of a git repo's changes.
@@ -117,7 +118,7 @@ pub struct Config {
     #[arg(long, global = true, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
     pub github_timeout_secs: u64,
 
-    /// Never contact GitHub (pull requests are not shown), and explain no changes.
+    /// Never contact GitHub (pull requests are not shown), and explain or fix no changes.
     #[arg(long, global = true)]
     pub no_network: bool,
 
@@ -125,14 +126,15 @@ pub struct Config {
     #[arg(long, global = true)]
     pub no_update_check: bool,
 
-    /// Coding agent that explains a change (`x` in a diff); `auto` picks the
-    /// first of claude, codex and pi found on PATH.
+    /// Coding agent that explains (`x` in a diff) and fixes (`f`) changes;
+    /// `auto` picks the first of claude, codex and pi found on PATH to
+    /// explain, and of claude and codex to fix. pi explains only.
     #[arg(long, global = true, value_enum, default_value_t = Choice::Auto, value_name = "AGENT", env = "VERT_EXPLAIN_AGENT")]
     pub explain_agent: Choice,
 
-    /// Model the agent explains with, in the agent's own naming (passed as
-    /// its `--model`, or to `--explain-cmd` in `VERT_EXPLAIN_MODEL`); unset
-    /// uses the agent's default.
+    /// Model the agent explains (`x`) and fixes (`f`) with, in the agent's
+    /// own naming (passed as its `--model`, or to `--explain-cmd` in
+    /// `VERT_EXPLAIN_MODEL`); unset uses the agent's default.
     #[arg(long, global = true, value_name = "MODEL", env = "VERT_EXPLAIN_MODEL")]
     pub explain_model: Option<String>,
 
@@ -141,12 +143,13 @@ pub struct Config {
     #[arg(long, global = true, value_name = "CMD", env = "VERT_EXPLAIN_CMD")]
     pub explain_cmd: Option<String>,
 
-    /// Seconds an agent may take to explain a change.
+    /// Seconds an agent may take to explain or fix a change.
     #[arg(long, global = true, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..), env = "VERT_EXPLAIN_TIMEOUT_SECS")]
     pub explain_timeout_secs: u64,
 
-    /// KiB of diff sent to the agent in full; later hunks are listed by
-    /// header only, for the agent to read itself.
+    /// KiB of diff sent to the agent in full: to explain, later hunks are
+    /// listed by header only; to fix, the excerpt stops at a line. Either
+    /// way the agent reads the rest itself.
     #[arg(long, global = true, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..), env = "VERT_EXPLAIN_MAX_DIFF_KB")]
     pub explain_max_diff_kb: u32,
 }
@@ -294,21 +297,50 @@ impl Config {
             return Err("network access is off (--no-network)".to_owned());
         }
         let agent = agent::select(self.explain_agent, self.explain_cmd.as_deref(), path)?;
-        let model = self
-            .explain_model
+        Ok(Explainer {
+            agent,
+            model: self.model(),
+            timeout: Duration::from_secs(self.explain_timeout_secs),
+            max_diff_bytes: self.max_diff_bytes(),
+            cache: Some(Cache::new(cache_dir().join("vert/explain"))),
+        })
+    }
+
+    /// How to fix changes, given the `PATH` to look for agents in. Fixes use
+    /// the agent and model explanations use, but only an agent that keeps
+    /// its edits inside the checkout ([`agent::Agent::confines_edits`]):
+    /// `auto` picks the first of claude and codex, and pi and
+    /// `--explain-cmd` are never used.
+    ///
+    /// # Errors
+    /// Explains, for the user, why fixes are unavailable.
+    pub fn fixer(&self, path: Option<&OsStr>) -> Result<Fixer, String> {
+        if self.no_network {
+            return Err("network access is off (--no-network)".to_owned());
+        }
+        let agent = agent::select_editor(self.explain_agent, path)?;
+        Ok(Fixer {
+            agent,
+            model: self.model(),
+            timeout: Duration::from_secs(self.explain_timeout_secs),
+            max_excerpt_bytes: self.max_diff_bytes(),
+        })
+    }
+
+    /// The model asked for, unless blank.
+    fn model(&self) -> Option<String> {
+        self.explain_model
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty())
-            .map(str::to_owned);
-        Ok(Explainer {
-            agent,
-            model,
-            timeout: Duration::from_secs(self.explain_timeout_secs),
-            max_diff_bytes: usize::try_from(self.explain_max_diff_kb)
-                .unwrap_or(usize::MAX)
-                .saturating_mul(1024),
-            cache: Some(Cache::new(cache_dir().join("vert/explain"))),
-        })
+            .map(str::to_owned)
+    }
+
+    /// `--explain-max-diff-kb` in bytes.
+    fn max_diff_bytes(&self) -> usize {
+        usize::try_from(self.explain_max_diff_kb)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(1024)
     }
 
     /// Search-result cap as a `usize`.
@@ -465,6 +497,69 @@ mod tests {
         assert_eq!(branch.start(), Ok(Some(Start::Branch("feat/x".to_owned()))));
         assert!(Config::parse_from(["vert", "branch", " "]).start().is_err());
         assert!(Config::try_parse_from(["vert", "branch"]).is_err());
+    }
+
+    /// A directory holding fake agents named `names`.
+    fn agents(names: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in names {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "#!/bin/sh\n").expect("write");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+        }
+        dir
+    }
+
+    #[test]
+    fn fixes_use_an_agent_that_stays_in_the_checkout() {
+        let fixer_with = |installed: &[&str], args: &[&str]| {
+            let dir = agents(installed);
+            let config = Config::parse_from(["vert"].iter().chain(args));
+            config.fixer(Some(dir.path().as_os_str()))
+        };
+        let explicit = ["--explain-cmd", "llm", "--explain-agent"];
+        let auto = [&explicit[..], &["auto"]].concat();
+        let fixer = fixer_with(
+            &["pi", "codex", "claude"],
+            &[
+                &auto[..],
+                &[
+                    "--explain-model",
+                    " x/y ",
+                    "--explain-timeout-secs",
+                    "60",
+                    "--explain-max-diff-kb",
+                    "3",
+                ],
+            ]
+            .concat(),
+        )
+        .expect("claude is installed");
+        assert_eq!(
+            fixer.agent,
+            agent::Agent::Claude,
+            "--explain-cmd is skipped"
+        );
+        assert_eq!(fixer.model.as_deref(), Some("x/y"));
+        assert_eq!(fixer.timeout, Duration::from_secs(60));
+        assert_eq!(fixer.max_excerpt_bytes, 3072);
+        let codex = fixer_with(&["pi", "codex"], &auto).expect("codex");
+        assert_eq!(codex.agent, agent::Agent::Codex, "pi is passed over");
+        let none = fixer_with(&["pi"], &auto).expect_err("only pi");
+        assert!(none.contains("install Claude Code or Codex"), "{none}");
+        let chosen = fixer_with(&["claude", "codex"], &[&explicit[..], &["codex"]].concat());
+        assert_eq!(chosen.map(|f| f.agent), Ok(agent::Agent::Codex));
+        let missing = fixer_with(&["codex"], &[&explicit[..], &["claude"]].concat());
+        assert!(missing.is_err_and(|e| e.contains("claude is not on PATH")));
+        let pi = fixer_with(&["pi"], &[&explicit[..], &["pi"]].concat()).expect_err("pi");
+        assert!(pi.contains("pi can't be kept inside the checkout"), "{pi}");
+        let offline = fixer_with(&["claude"], &["--no-network"]);
+        assert!(offline.is_err_and(|e| e.contains("--no-network")));
     }
 
     #[test]

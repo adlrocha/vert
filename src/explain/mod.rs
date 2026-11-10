@@ -566,8 +566,8 @@ impl Explainer {
         }
     }
 
-    /// Explains `entry`, whose diff is `files`, running the agent in `dir`.
-    /// A cached answer is used unless `fresh`.
+    /// Explains `entry`, whose diff is `files`, running the agent in `dir`
+    /// and tracking it in `groups`. A cached answer is used unless `fresh`.
     ///
     /// # Errors
     /// Returns a message for the user when the agent fails or its answer
@@ -578,6 +578,7 @@ impl Explainer {
         files: &[FileDiff],
         dir: &Path,
         fresh: bool,
+        groups: &agent::Groups,
     ) -> Result<Answer, String> {
         let prompt = prompt(entry, files, self.max_diff_bytes);
         let model = self.model.as_deref().unwrap_or_default();
@@ -595,14 +596,14 @@ impl Explainer {
                 cached: true,
             });
         }
-        let out = agent::run(
-            &self.agent,
-            self.model.as_deref(),
+        let how = agent::Run {
+            access: agent::Access::ReadOnly,
+            model: self.model.as_deref(),
             dir,
-            &prompt,
-            self.timeout,
-        )
-        .map_err(|e| e.to_string())?;
+            timeout: self.timeout,
+            groups,
+        };
+        let out = agent::run(&self.agent, how, &prompt).map_err(|e| e.to_string())?;
         let explanation = Explanation::validate(&out, files)
             .map_err(|e| format!("{}: {e}", self.agent.name()))?;
         if let Some(cache) = &self.cache {
@@ -625,12 +626,7 @@ pub fn prompt(entry: &Entry, files: &[FileDiff], max_diff_bytes: usize) -> Strin
     out.push_str("\n\n");
     out.push_str(INSTRUCTIONS);
     out.push_str("\n\n# The change\n\n");
-    let title = if entry.is_worktree() {
-        "Uncommitted changes in the working tree"
-    } else {
-        entry.summary.as_str()
-    };
-    let _ = writeln!(out, "{} {title}", entry.short);
+    let _ = writeln!(out, "{}", entry.headline());
     if !entry.body.trim().is_empty() {
         let _ = writeln!(out, "\n{}", entry.body.trim());
     }
@@ -659,15 +655,7 @@ pub fn prompt(entry: &Entry, files: &[FileDiff], max_diff_bytes: usize) -> Strin
         out.push_str(")\n");
         for (i, hunk) in file.hunks.iter().enumerate() {
             let _ = writeln!(out, "--- hunk {} {}", i + 1, hunk.header);
-            let body = hunk.lines.iter().fold(String::new(), |mut body, l| {
-                let sign = match l.kind {
-                    LineKind::Added => '+',
-                    LineKind::Removed => '-',
-                    LineKind::Context => ' ',
-                };
-                let _ = writeln!(body, "{sign}{}", l.content);
-                body
-            });
+            let body = hunk.body();
             if body.len() <= budget {
                 budget -= body.len();
                 out.push_str(&body);
@@ -931,8 +919,14 @@ mod tests {
         assert_eq!(prompt(&entry(), &sample(), 1), prompt(&entry(), &edited, 1));
         let ask = |files: &[FileDiff], intent: &str| {
             std::fs::write(dir.path().join("intent"), intent).expect("write");
-            ex.explain(&entry(), files, dir.path(), false)
-                .expect("explained")
+            ex.explain(
+                &entry(),
+                files,
+                dir.path(),
+                false,
+                &agent::Groups::default(),
+            )
+            .expect("explained")
         };
         assert!(!ask(&sample(), "first").cached);
         let second = ask(&edited, "second");
@@ -973,7 +967,15 @@ mod tests {
             max_diff_bytes: 1 << 20,
             cache: Some(cache::Cache::new(dir.path().join("cache"))),
         };
-        let run = |ex: &Explainer, fresh| ex.explain(&entry(), &files, dir.path(), fresh);
+        let run = |ex: &Explainer, fresh| {
+            ex.explain(
+                &entry(),
+                &files,
+                dir.path(),
+                fresh,
+                &agent::Groups::default(),
+            )
+        };
         let first = run(&ex, false).expect("explained");
         assert!(!first.cached);
         assert_eq!(first.explanation.intent, "Retry");

@@ -802,3 +802,21 @@ fn file_view_ignores_unbound_keys() {
     })));
     assert_eq!(app.views.len(), 2);
 }
+
+#[test]
+fn deleting_a_word_after_a_wide_space_keeps_the_text_whole() {
+    let (mut app, _) = App::new(info(), 1, 100, 1_000, false);
+    app.update(ch('3'));
+    for c in "a\u{a0}b".chars() {
+        app.update(ch(c));
+    }
+    app.update(ctrl('w'));
+    assert_eq!(app.search.query, "a\u{a0}");
+    app.update(ctrl('w'));
+    assert_eq!(app.search.query, "");
+    for c in "src/ma".chars() {
+        app.update(ch(c));
+    }
+    app.update(ctrl('w'));
+    assert_eq!(app.search.query, "src/", "a slash ends a word too");
+}

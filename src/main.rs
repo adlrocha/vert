@@ -88,6 +88,8 @@ fn run() -> Result<()> {
     if let Some(start) = start {
         effects.extend(app.update(Msg::Start(start)));
     }
+    let fixer = config.fixer(std::env::var_os("PATH").as_deref());
+    app.set_fixer(&fixer);
     let _watch = if config.no_watch {
         app.watch = WatchStatus::Disabled;
         None
@@ -124,6 +126,8 @@ fn run() -> Result<()> {
             tokens: jobs::TokenSource::default(),
             token: Arc::default(),
             explain: explainer.ok(),
+            fix: fixer.ok(),
+            agents: vert::explain::agent::Groups::default(),
         },
         tx: tx.clone(),
         gate: Arc::new(InputGate::default()),
@@ -133,6 +137,8 @@ fn run() -> Result<()> {
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, &mut app, &rt, &rx, effects);
     ratatui::restore();
+    // Agents still explaining or fixing would work on unwatched.
+    rt.jobs.agents.stop_all();
     result
 }
 

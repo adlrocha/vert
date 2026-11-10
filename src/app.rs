@@ -6,6 +6,7 @@
 
 mod branches;
 mod explain;
+mod fix;
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
@@ -18,7 +19,10 @@ pub use branches::{
 };
 #[cfg(test)]
 pub(crate) use explain::pi_for_tests;
-pub use explain::{ExplainState, ExplainView, Item, Pane, Status, items, row_pointer, targets};
+pub use explain::{
+    ExplainState, ExplainView, Item, Pane, Status, concern_at, items, row_pointer, targets,
+};
+pub use fix::{Draft, FixState, Running};
 
 use crate::explain::Answer;
 use crate::git::RepoInfo;
@@ -483,6 +487,13 @@ pub enum Msg {
         /// The explanation, or why there is none.
         result: Result<Answer, String>,
     },
+    /// An agent finished acting on feedback.
+    Fixed {
+        /// The request (see [`Effect::Fix`]).
+        id: u64,
+        /// What the agent said it did, or why it failed.
+        result: Result<String, String>,
+    },
 }
 
 /// Side effects requested by [`App::update`].
@@ -558,6 +569,15 @@ pub enum Effect {
         /// Ask even if an answer is cached.
         fresh: bool,
     },
+    /// Ask a coding agent to act on feedback, editing files in a checkout.
+    Fix {
+        /// Identifies the request in [`Msg::Fixed`].
+        id: u64,
+        /// The linked worktree to edit, or `None` for vert's own checkout.
+        root: Option<PathBuf>,
+        /// The feedback and where it points.
+        request: crate::fix::Request,
+    },
 }
 
 /// What the once-a-day update check found out about vert itself.
@@ -589,6 +609,8 @@ pub struct App {
     refresh: Refresh,
     /// Explanations of changes.
     pub explain: ExplainState,
+    /// Fixes asked of the agent.
+    pub fix: FixState,
     /// Stacked views (detail, file); the last one is on screen.
     pub views: Vec<View>,
     /// Whether the help overlay is shown.
@@ -648,6 +670,7 @@ impl App {
             branches: BranchesState::default(),
             refresh: Refresh::default(),
             explain: ExplainState::default(),
+            fix: FixState::default(),
             views: Vec::new(),
             help: false,
             watch: WatchStatus::Live,
@@ -763,6 +786,7 @@ impl App {
                 self.on_explained(key, result);
                 Vec::new()
             }
+            Msg::Fixed { id, result } => self.on_fixed(id, result),
             Msg::Removed { removed, error } => {
                 let effects = self.request_branches();
                 self.notice =
@@ -810,13 +834,18 @@ impl App {
                 self.reselect(selected.as_deref());
                 self.recompute_hotspots();
                 // The diff stays live under views stacked on it (an
-                // explanation), not only while it is on top.
+                // explanation), not only while it is on top, and empties
+                // once the checkout is clean (a fix that undid the change).
                 if let Some(d) = self.views.iter().rev().find_map(View::as_detail)
                     && d.entry.is_own_worktree()
-                    && let Some(wt) = &self.feed.worktree
                 {
+                    let entry = self.feed.worktree.clone().unwrap_or_else(|| {
+                        let mut clean = d.entry.clone();
+                        clean.clear_files();
+                        clean
+                    });
                     effects.push(Effect::LoadDiff {
-                        entry: Box::new(wt.clone()),
+                        entry: Box::new(entry),
                         refresh: true,
                         file: None,
                     });
@@ -988,6 +1017,9 @@ impl App {
             return self.answer_remove(confirmed);
         }
         self.notice = None;
+        if self.fix.draft.is_some() {
+            return self.on_draft_key(&key);
+        }
         if self.branches.collisions.is_some() {
             return self.on_collisions_key(&key);
         }
@@ -1205,11 +1237,7 @@ impl App {
                 self.query_changed()
             }
             KeyCode::Char('w') if ctrl => {
-                let trimmed = self.search.query.trim_end().len();
-                let cut = self.search.query[..trimmed]
-                    .rfind(|c: char| c.is_whitespace() || c == '/')
-                    .map_or(0, |i| i + 1);
-                self.search.query.truncate(cut);
+                delete_word(&mut self.search.query, |c| c.is_whitespace() || c == '/');
                 self.query_changed()
             }
             KeyCode::Backspace => {
@@ -1272,12 +1300,28 @@ impl App {
         let max = self.max_highlight;
         match self.views.last_mut() {
             Some(View::Detail(_)) if key.code == KeyCode::Char('x') => self.open_explain(),
+            Some(View::Detail(_)) if key.code == KeyCode::Char('f') => self.draft_fix_from_detail(),
+            Some(View::Explain(_)) if key.code == KeyCode::Char('f') => {
+                self.draft_fix_from_explain()
+            }
             Some(View::Detail(d)) => detail_key(d, key, max),
             Some(View::File(f)) => file_key(f, key),
             Some(View::Explain(_)) => self.on_explain_key(key),
             None => Vec::new(),
         }
     }
+}
+
+/// Deletes the last word of `text` (`ctrl-w`): trailing whitespace, then
+/// back to just after the last character `ends_word` matches.
+fn delete_word(text: &mut String, ends_word: impl Fn(char) -> bool) {
+    let trimmed = text.trim_end().len();
+    let cut = text[..trimmed]
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| ends_word(c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    text.truncate(cut);
 }
 
 /// Furthest scroll position: the last line sits at the bottom of the viewport.
