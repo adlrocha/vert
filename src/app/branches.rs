@@ -272,11 +272,24 @@ fn tip_of(entry: Option<&Entry>) -> Option<Oid> {
 }
 
 impl BranchesState {
-    /// Rows shown under the current filter: checkouts first, then branches
-    /// and pull requests by latest activity. A pull request joins at most one
-    /// branch row: a local branch or an `origin` one with its head's name.
+    /// Rows shown under the current filter: [`all_rows`](Self::all_rows)
+    /// narrowed by the kind and name filters.
     #[must_use]
     pub fn rows(&self) -> Vec<Row<'_>> {
+        self.all_rows()
+            .into_iter()
+            .filter(|r| self.filter.keeps(r))
+            .filter(|r| named_like(r, &self.name_filter))
+            .collect()
+    }
+
+    /// Every row, whatever the filters: checkouts first, then branches and
+    /// pull requests by latest activity. A pull request joins at most one
+    /// branch row: a local branch or an `origin` one with its head's name,
+    /// never for a fork's pull request. This is the one place a pull
+    /// request is matched to its branch.
+    #[must_use]
+    pub fn all_rows(&self) -> Vec<Row<'_>> {
         let mut matched = vec![false; self.pulls.len()];
         let mut checkouts = Vec::new();
         let mut rest = Vec::new();
@@ -315,12 +328,7 @@ impl BranchesState {
                 }),
         );
         rest.sort_by_key(|r| std::cmp::Reverse(r.time()));
-        checkouts
-            .into_iter()
-            .chain(rest)
-            .filter(|r| self.filter.keeps(r))
-            .filter(|r| named_like(r, &self.name_filter))
-            .collect()
+        checkouts.into_iter().chain(rest).collect()
     }
 
     /// Whether a load is in flight.

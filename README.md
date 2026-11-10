@@ -277,7 +277,10 @@ its uncommitted work and its commits, a linked worktree for that
 worktree's changes and its branch, and for a pull request, the worktree
 its branch is checked out in. A branch or pull request that isn't checked
 out anywhere is refused, because there is nowhere to edit it; check it out
-in a worktree first. One fix runs per checkout at a time; checkouts don't
+in a worktree first. A pull request can be fixed when it is an open one
+vert lists, not from a fork, with its branch checked out; for any other
+(closed, past `--max-prs`), open its branch with `vert branch NAME` and
+fix it from there. One fix runs per checkout at a time; checkouts don't
 wait for each other.
 
 **Which agent, and what it may do.** The code under review can contain
@@ -287,19 +290,22 @@ only because the prompt asks:
 
 | Agent       | Runs as                                                                                                                                       | Kept inside the checkout by                                   |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| Claude Code | `claude -p --output-format text --no-session-persistence --restricted --strict-mcp-config --tools Read,Grep,Glob,Edit,Write --permission-mode acceptEdits` | `--restricted`: file tools confined to the checkout, no tool that runs code, no MCP servers, and the checkout's own settings ignored |
+| Claude Code | `claude -p --output-format text --no-session-persistence --restricted --strict-mcp-config --tools Read,Grep,Glob,Edit,Write --permission-mode acceptEdits` | `--restricted`: file tools confined to the checkout and kept off `.git` (a write to `.git/hooks` is refused), no tool that runs code, no MCP servers, and the checkout's own settings ignored |
 | Codex       | `codex exec --sandbox workspace-write -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=true --skip-git-repo-check --ephemeral --color never -` | its workspace-write sandbox, with `/tmp` and `$TMPDIR` taken out of it: it can run commands, but writes only inside the checkout, never to `.git` (so no commit, stash or reset), and has no network |
 
 Inside the checkout the agent can change any file, so it could also undo
 uncommitted work you have there; it is asked to touch only what the
-feedback is about, and neither agent can write to `.git`.
+feedback is about, and neither agent can write to `.git` (checked by
+hand for both: Claude Code is refused `.git/hooks`, and Codex's sandbox
+makes `git commit`, `stash` and `reset` fail).
 
 The agent and model are the ones explanations use (`VERT_EXPLAIN_AGENT`,
 `VERT_EXPLAIN_MODEL`), with the same timeout. `auto` picks the first of
 `claude` and `codex` on `PATH`. pi can't be confined this way, so it
 explains but doesn't fix: with `VERT_EXPLAIN_AGENT=pi`, `f` says so. A
 `--explain-cmd` only knows how to answer the explain prompt, so fixes skip
-it and use `auto`'s choice.
+it and use the agent `--explain-agent` names (with `auto`, the first of
+`claude` and `codex`).
 
 The hunk sent is capped at `--explain-max-diff-kb`; the agent reads the
 file itself for the rest. Quitting vert stops any agent still working.
@@ -335,7 +341,7 @@ checkout whose agent is idle.
 | `--explain-model` / `VERT_EXPLAIN_MODEL` | agent's default | Model the agent uses, in its own naming |
 | `--explain-cmd` / `VERT_EXPLAIN_CMD` | — | Shell command to use instead of a known agent |
 | `--explain-timeout-secs` / `VERT_EXPLAIN_TIMEOUT_SECS` | 600 | How long an agent may take to explain or fix |
-| `--explain-max-diff-kb` / `VERT_EXPLAIN_MAX_DIFF_KB` | 256 | Diff sent in full; later hunks go by header only |
+| `--explain-max-diff-kb` / `VERT_EXPLAIN_MAX_DIFF_KB` | 256 | Diff sent in full; to explain, later hunks go by header only; to fix, the excerpt stops at a line |
 
 ## Development
 

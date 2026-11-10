@@ -26,11 +26,9 @@ pub struct Draft {
     pub root: Option<PathBuf>,
     /// That checkout, named for the user.
     pub checkout: String,
-    /// What the agent is told about the change, where and what to do; the
-    /// feedback is filled in from `text` on sending.
+    /// What the agent will be told: the change, where, and the feedback
+    /// as typed so far (trimmed on sending).
     pub request: Request,
-    /// The feedback typed so far.
-    pub text: String,
 }
 
 /// A fix the agent is working on.
@@ -113,23 +111,19 @@ impl App {
                         |e| format!("couldn't list the lines of work: {e}"),
                     ));
                 }
-                // The pull request's own head, not the merged rows: those
-                // only link it to its branch once both lists have loaded.
-                let Some(pull) = self.branches.pulls.iter().find(|p| p.number == number) else {
+                if !self.branches.pulls.iter().any(|p| p.number == number) {
                     return Err(format!(
                         "#{number} isn't an open pull request vert lists, so it can't tell its branch: open the branch (vert branch NAME) to fix it there"
                     ));
-                };
-                let branches = &self.branches.list.branches;
-                let remote = format!("{}/{}", crate::github::ORIGIN, pull.head);
-                let branch = (!pull.fork)
-                    .then(|| {
-                        branches
-                            .iter()
-                            .find(|b| !b.remote && b.branch.as_deref() == Some(pull.head.as_str()))
-                            .or_else(|| branches.iter().find(|b| b.remote && b.name == remote))
-                    })
-                    .flatten();
+                }
+                // Both lists have loaded, so the rows link the pull request
+                // to its branch (never a fork's), whatever the tab's filters.
+                let branch = self
+                    .branches
+                    .all_rows()
+                    .into_iter()
+                    .find(|r| r.pull.is_some_and(|p| p.number == number))
+                    .and_then(|r| r.branch);
                 branch.map_or_else(
                     || {
                         Err(format!(
@@ -181,9 +175,8 @@ impl App {
                 change: entry.headline(),
                 place,
                 excerpt: file.map(|f| excerpt(f, hunk)).unwrap_or_default(),
-                feedback: String::new(),
+                feedback: text,
             },
-            text,
         });
     }
 
@@ -258,11 +251,13 @@ impl App {
             KeyCode::Esc => self.fix.draft = None,
             KeyCode::Enter => return self.send_fix(),
             KeyCode::Backspace => {
-                draft.text.pop();
+                draft.request.feedback.pop();
             }
-            KeyCode::Char('u') if ctrl => draft.text.clear(),
-            KeyCode::Char('w') if ctrl => delete_word(&mut draft.text, char::is_whitespace),
-            KeyCode::Char(c) if !ctrl => draft.text.push(c),
+            KeyCode::Char('u') if ctrl => draft.request.feedback.clear(),
+            KeyCode::Char('w') if ctrl => {
+                delete_word(&mut draft.request.feedback, char::is_whitespace);
+            }
+            KeyCode::Char(c) if !ctrl => draft.request.feedback.push(c),
             _ => {}
         }
         Vec::new()
@@ -274,7 +269,7 @@ impl App {
         let Some(draft) = self.fix.draft.as_ref() else {
             return Vec::new();
         };
-        if draft.text.trim().is_empty() {
+        if draft.request.feedback.trim().is_empty() {
             self.notice = Some("Write what the agent should do first".to_owned());
             return Vec::new();
         }
@@ -300,7 +295,7 @@ impl App {
             id,
             root: draft.root,
             request: Request {
-                feedback: draft.text.trim().to_owned(),
+                feedback: draft.request.feedback.trim().to_owned(),
                 ..draft.request
             },
         }]

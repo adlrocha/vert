@@ -39,7 +39,7 @@ pub(super) fn draw_draft(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Line::from(Span::styled(truncate(place, inner), theme::muted())),
         Line::raw(""),
     ];
-    let typed = format!("{}▏", draft.text);
+    let typed = format!("{}▏", draft.request.feedback);
     let wrapped = wrap(&typed, inner);
     let skip = wrapped.len().saturating_sub(MAX_TEXT_LINES);
     lines.extend(

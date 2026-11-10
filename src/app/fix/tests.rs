@@ -242,20 +242,20 @@ fn feedback_on_a_hunk_is_written_sent_and_reported() {
     typed(&mut app, "use a constant herx");
     press(&mut app, KeyCode::Backspace);
     typed(&mut app, "e  ");
-    assert_eq!(draft(&app).text, "use a constant here  ");
+    assert_eq!(draft(&app).request.feedback, "use a constant here  ");
     ctrl(&mut app, 'w');
-    assert_eq!(draft(&app).text, "use a constant ");
+    assert_eq!(draft(&app).request.feedback, "use a constant ");
     ctrl(&mut app, 'u');
-    assert_eq!(draft(&app).text, "");
+    assert_eq!(draft(&app).request.feedback, "");
     // A space wider than a byte, pasted from a page, ends a word too.
     typed(&mut app, "keep\u{a0}drop");
     ctrl(&mut app, 'w');
-    assert_eq!(draft(&app).text, "keep\u{a0}");
+    assert_eq!(draft(&app).request.feedback, "keep\u{a0}");
     ctrl(&mut app, 'u');
     typed(&mut app, " name the 41 ");
     ctrl(&mut app, 'x');
     assert_eq!(
-        draft(&app).text,
+        draft(&app).request.feedback,
         " name the 41 ",
         "other shortcuts do nothing"
     );
@@ -435,6 +435,8 @@ fn a_pull_request_finds_its_checkout_whichever_list_loads_first() {
         Some("Can't fix: the lines of work are still loading; try again in a moment")
     );
     with_lines_of_work(&mut app);
+    // The Branches tab's filters don't hide the pull request's branch.
+    "nothing-matches".clone_into(&mut app.branches.name_filter);
     press(&mut app, KeyCode::Char('f'));
     assert_eq!(draft(&app).checkout, "agent-dir");
     press(&mut app, KeyCode::Esc);
@@ -600,27 +602,27 @@ fn a_concern_becomes_the_feedback() {
     let mut app = explaining(concerns.clone());
     select(&mut app, 2, 0);
     press(&mut app, KeyCode::Char('f'));
-    assert_eq!(draft(&app).text, "Off by one");
+    assert_eq!(draft(&app).request.feedback, "Off by one");
     assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs:41"));
     press(&mut app, KeyCode::Esc);
     assert!(matches!(app.views.last(), Some(View::Explain(_))));
 
     select(&mut app, 2, 1);
     press(&mut app, KeyCode::Char('f'));
-    assert_eq!(draft(&app).text, "Off by one");
+    assert_eq!(draft(&app).request.feedback, "Off by one");
     assert_eq!(draft(&app).request.place.as_deref(), Some("docs/x.md"));
     press(&mut app, KeyCode::Esc);
 
     select(&mut app, 2, 2);
     press(&mut app, KeyCode::Char('f'));
-    assert_eq!(draft(&app).text, "Missing test");
+    assert_eq!(draft(&app).request.feedback, "Missing test");
     assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs:2"));
     press(&mut app, KeyCode::Esc);
 
     // A step: its code, and no words to start from.
     select(&mut app, 1, 0);
     press(&mut app, KeyCode::Char('f'));
-    assert_eq!(draft(&app).text, "");
+    assert_eq!(draft(&app).request.feedback, "");
     assert_eq!(draft(&app).request.place.as_deref(), Some("docs/x.md:2"));
     press(&mut app, KeyCode::Esc);
 
@@ -640,7 +642,7 @@ fn a_concern_without_code_still_becomes_the_feedback() {
     let mut app = explaining(vec![lone.clone()]);
     select(&mut app, 2, 0);
     press(&mut app, KeyCode::Char('f'));
-    assert_eq!(draft(&app).text, "Is this wanted?");
+    assert_eq!(draft(&app).request.feedback, "Is this wanted?");
     assert_eq!(draft(&app).request.place, None);
     press(&mut app, KeyCode::Esc);
 
@@ -648,5 +650,5 @@ fn a_concern_without_code_still_becomes_the_feedback() {
     let mut app = explaining(vec![lone.clone(), lone]);
     select(&mut app, 2, 0);
     press(&mut app, KeyCode::Char('f'));
-    assert_eq!(draft(&app).text, "");
+    assert_eq!(draft(&app).request.feedback, "");
 }
