@@ -9,13 +9,14 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, Effect, Focus, Item, View};
+use super::{App, Effect, Focus, Item, View, delete_word};
 use crate::explain::{Explanation, Note, Ref};
 use crate::fix::{Fixer, Request, excerpt};
 use crate::git::Target;
 use crate::git::branches::Branch;
 use crate::git::diff::{FileDiff, LineKind};
 use crate::git::feed::Entry;
+use crate::highlight::sanitize;
 
 /// Feedback being written, before it goes to the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,13 +265,7 @@ impl App {
                 draft.text.pop();
             }
             KeyCode::Char('u') if ctrl => draft.text.clear(),
-            KeyCode::Char('w') if ctrl => {
-                let trimmed = draft.text.trim_end().len();
-                let cut = draft.text[..trimmed]
-                    .rfind(char::is_whitespace)
-                    .map_or(0, |i| i + 1);
-                draft.text.truncate(cut);
-            }
+            KeyCode::Char('w') if ctrl => delete_word(&mut draft.text, char::is_whitespace),
             KeyCode::Char(c) if !ctrl => draft.text.push(c),
             _ => {}
         }
@@ -324,7 +319,8 @@ impl App {
         let done = self.fix.running.remove(i);
         self.notice = Some(match result {
             Ok(summary) => format!("Fixed in {}: {summary}", done.checkout),
-            Err(why) => format!("Couldn't fix in {}: {why}", done.checkout),
+            // The agent's own error output: untrusted, like all it prints.
+            Err(why) => format!("Couldn't fix in {}: {}", done.checkout, sanitize(&why)),
         });
         let mut effects = self.request_worktree();
         effects.extend(self.request_branches());

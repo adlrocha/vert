@@ -580,9 +580,8 @@ impl App {
     /// Reloads an open linked-worktree diff: with its latest changes, or
     /// empty once the worktree is clean. A removed worktree is left alone.
     fn refresh_open_worktree(&self) -> Option<Effect> {
-        let Some(View::Detail(d)) = self.views.last() else {
-            return None;
-        };
+        // Also under a view stacked on the diff (an explanation, a file).
+        let d = self.views.iter().rev().find_map(View::as_detail)?;
         let root = d.entry.root.as_ref().filter(|_| d.entry.is_worktree())?;
         let checkout = self
             .branches
@@ -1814,6 +1813,24 @@ mod tests {
         };
         assert_eq!(clean.id, entry.id);
         assert!(clean.files.is_empty() && clean.added == 0 && clean.removed == 0);
+
+        // A view stacked on the diff (a file opened from it) doesn't stop it.
+        app.update(Msg::File {
+            path: "a.rs".to_owned(),
+            content: Ok(String::new()),
+            line: 1,
+            marks: std::collections::BTreeSet::new(),
+            root: entry.root.clone(),
+        });
+        let reload = app.update(Msg::Branches(Ok(Branches {
+            base: None,
+            branches: vec![checkout("agent", false, true)],
+        })));
+        assert!(
+            matches!(reload.as_slice(), [Effect::LoadDiff { refresh: true, entry: e, .. }] if e.id == entry.id),
+            "{reload:?}"
+        );
+        app.views.pop();
 
         // A removed worktree has nothing left to diff.
         let reload = app.update(Msg::Branches(Ok(Branches::default())));

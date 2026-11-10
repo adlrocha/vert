@@ -1235,11 +1235,7 @@ impl App {
                 self.query_changed()
             }
             KeyCode::Char('w') if ctrl => {
-                let trimmed = self.search.query.trim_end().len();
-                let cut = self.search.query[..trimmed]
-                    .rfind(|c: char| c.is_whitespace() || c == '/')
-                    .map_or(0, |i| i + 1);
-                self.search.query.truncate(cut);
+                delete_word(&mut self.search.query, |c| c.is_whitespace() || c == '/');
                 self.query_changed()
             }
             KeyCode::Backspace => {
@@ -1312,6 +1308,18 @@ impl App {
             None => Vec::new(),
         }
     }
+}
+
+/// Deletes the last word of `text` (`ctrl-w`): trailing whitespace, then
+/// back to just after the last character `ends_word` matches.
+fn delete_word(text: &mut String, ends_word: impl Fn(char) -> bool) {
+    let trimmed = text.trim_end().len();
+    let cut = text[..trimmed]
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| ends_word(c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    text.truncate(cut);
 }
 
 /// Furthest scroll position: the last line sits at the bottom of the viewport.

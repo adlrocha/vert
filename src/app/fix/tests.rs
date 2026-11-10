@@ -69,7 +69,7 @@ fn file(path: &str) -> FileDiff {
 
 fn fixer() -> Fixer {
     Fixer {
-        agent: Agent::Pi,
+        agent: Agent::Claude,
         model: None,
         timeout: Duration::from_secs(1),
         max_excerpt_bytes: 1 << 10,
@@ -247,6 +247,11 @@ fn feedback_on_a_hunk_is_written_sent_and_reported() {
     assert_eq!(draft(&app).text, "use a constant ");
     ctrl(&mut app, 'u');
     assert_eq!(draft(&app).text, "");
+    // A space wider than a byte, pasted from a page, ends a word too.
+    typed(&mut app, "keep\u{a0}drop");
+    ctrl(&mut app, 'w');
+    assert_eq!(draft(&app).text, "keep\u{a0}");
+    ctrl(&mut app, 'u');
     typed(&mut app, " name the 41 ");
     ctrl(&mut app, 'x');
     assert_eq!(
@@ -266,6 +271,12 @@ fn feedback_on_a_hunk_is_written_sent_and_reported() {
         Some("Asked the agent to fix this in this checkout")
     );
 
+    reports_and_one_per_checkout(app, id);
+}
+
+/// Continues [`feedback_on_a_hunk_is_written_sent_and_reported`] with fix
+/// `id` running in vert's checkout.
+fn reports_and_one_per_checkout(mut app: App, id: u64) {
     // One fix per checkout at a time.
     press(&mut app, KeyCode::Char('f'));
     typed(&mut app, "more");
@@ -306,11 +317,12 @@ fn feedback_on_a_hunk_is_written_sent_and_reported() {
     assert_ne!(second, id);
     app.update(Msg::Fixed {
         id: second,
-        result: Err("pi timed out".to_owned()),
+        result: Err("claude failed: \u{1b}[31mred".to_owned()),
     });
     assert_eq!(
         app.notice.as_deref(),
-        Some("Couldn't fix in this checkout: pi timed out")
+        Some("Couldn't fix in this checkout: claude failed: ·[31mred"),
+        "escape sequences never reach the terminal"
     );
 }
 

@@ -233,7 +233,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("← →", "scroll sideways"),
             ("⏎ e", "view / edit file"),
             ("x", "explain the change"),
-            ("f", "have the agent fix this hunk"),
+            ("f", "have the agent fix the file or hunk"),
         ],
     ),
     (
@@ -833,7 +833,7 @@ mod render_tests {
     fn the_fix_prompt_and_running_fixes_render() {
         let (t, mut app) = real_app();
         app.set_fixer(&Ok(crate::fix::Fixer {
-            agent: crate::explain::agent::Agent::Pi,
+            agent: crate::explain::agent::Agent::Claude,
             model: Some("sonnet".to_owned()),
             timeout: std::time::Duration::from_secs(1),
             max_excerpt_bytes: 1024,
@@ -859,7 +859,7 @@ mod render_tests {
         }
         let s = screen(&mut app, 140, 30);
         assert!(s.contains(" Fix "), "{s}");
-        assert!(s.contains("pi · sonnet edits this checkout"), "{s}");
+        assert!(s.contains("claude · sonnet edits this checkout"), "{s}");
         assert!(s.contains("docs/guide.md"), "{s}");
         assert!(
             s.contains("one per concern, ▏"),

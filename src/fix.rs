@@ -173,6 +173,10 @@ impl Fixer {
     /// # Errors
     /// Returns a message for the user when the agent fails or times out.
     pub fn fix(&self, request: &Request, dir: &Path, groups: &Groups) -> Result<String, String> {
+        // pi can't be confined to `dir`; a custom command is the user's own.
+        if self.agent == Agent::Pi {
+            return Err("pi can't be kept inside the checkout, so it doesn't fix".to_owned());
+        }
         let how = agent::Run {
             access: Access::Edit,
             model: self.model.as_deref(),
@@ -295,5 +299,17 @@ mod tests {
             .fix(&request(), dir.path(), &Groups::default())
             .expect_err("fails");
         assert!(err.ends_with("nope"), "{err}");
+
+        let pi = Fixer {
+            agent: Agent::Pi,
+            ..failing
+        };
+        let refused = pi
+            .fix(&request(), dir.path(), &Groups::default())
+            .expect_err("pi");
+        assert!(
+            refused.contains("can't be kept inside the checkout"),
+            "{refused}"
+        );
     }
 }

@@ -316,20 +316,7 @@ impl Config {
         if self.no_network {
             return Err("network access is off (--no-network)".to_owned());
         }
-        let agent = match self.explain_agent {
-            Choice::Pi => {
-                return Err(
-                    "pi can't be kept inside the checkout, so it doesn't fix: set VERT_EXPLAIN_AGENT to claude or codex"
-                        .to_owned(),
-                );
-            }
-            Choice::Auto => agent::select(Choice::Claude, None, path)
-                .or_else(|_| agent::select(Choice::Codex, None, path))
-                .map_err(|_| {
-                    "no agent that can fix found: install Claude Code or Codex".to_owned()
-                })?,
-            choice @ (Choice::Claude | Choice::Codex) => agent::select(choice, None, path)?,
-        };
+        let agent = agent::select_editor(self.explain_agent, path)?;
         Ok(Fixer {
             agent,
             model: self.model(),

@@ -184,18 +184,11 @@ impl Agent {
                     ],
                 },
             ),
-            (Self::Pi, Access::ReadOnly) => (
+            // pi can't be kept inside the checkout, so it never gets tools
+            // that write, whatever it is asked to do.
+            (Self::Pi, _) => (
                 "pi",
                 &["-p", "--no-session", "--tools", "read,grep,find,ls"],
-            ),
-            (Self::Pi, Access::Edit) => (
-                "pi",
-                &[
-                    "-p",
-                    "--no-session",
-                    "--tools",
-                    "read,grep,find,ls,edit,write",
-                ],
             ),
             (Self::Custom(cmd), _) => {
                 let mut c = Command::new("sh");
@@ -248,6 +241,31 @@ pub fn select(choice: Choice, custom: Option<&str>, path: Option<&OsStr>) -> Res
                 Err(format!("{} is not on PATH (--explain-agent)", agent.name()))
             }
         }
+    }
+}
+
+/// Picks the agent to fix changes with, from `choice`, checked against the
+/// directories of `path`: only one that [`confines_edits`](Agent::confines_edits).
+/// `auto` takes the first of those installed.
+///
+/// # Errors
+/// Explains, for the user, why no agent can fix.
+pub fn select_editor(choice: Choice, path: Option<&OsStr>) -> Result<Agent, String> {
+    if choice == Choice::Auto {
+        return AUTO
+            .into_iter()
+            .filter(Agent::confines_edits)
+            .find(|agent| path.is_some_and(|p| on_path(agent.name(), p)))
+            .ok_or_else(|| "no agent that can fix found: install Claude Code or Codex".to_owned());
+    }
+    let agent = select(choice, None, path)?;
+    if agent.confines_edits() {
+        Ok(agent)
+    } else {
+        Err(format!(
+            "{} can't be kept inside the checkout, so it doesn't fix: set VERT_EXPLAIN_AGENT to claude or codex",
+            agent.name()
+        ))
     }
 }
 
@@ -615,9 +633,11 @@ mod tests {
                 .any(|w| w == ["--sandbox", "workspace-write"])
         );
         assert_eq!(codex[codex.len() - 3..], ["--model", "o3", "-"]);
-        let pi = args_with(&Agent::Pi, Access::Edit, None);
-        assert!(pi.contains(&"read,grep,find,ls,edit,write".to_owned()));
-        assert!(!pi.iter().any(|a| a.contains("bash")));
+        assert_eq!(
+            args_with(&Agent::Pi, Access::Edit, None),
+            args(&Agent::Pi),
+            "pi never gets tools that write"
+        );
         let custom = Agent::Custom("x".to_owned());
         assert_eq!(args_with(&custom, Access::Edit, None), ["-c", "x"]);
     }
