@@ -65,7 +65,7 @@ impl Hunk {
     pub fn holds_new_line(&self, line: u32) -> bool {
         let mut lines = self.lines.iter().filter_map(|l| l.new_no);
         let first = lines.next();
-        let last = lines.last().or(first);
+        let last = lines.next_back().or(first);
         first
             .zip(last)
             .is_some_and(|(a, b)| (a..=b).contains(&line))
