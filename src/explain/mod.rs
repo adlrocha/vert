@@ -597,6 +597,7 @@ impl Explainer {
         }
         let out = agent::run(
             &self.agent,
+            agent::Access::ReadOnly,
             self.model.as_deref(),
             dir,
             &prompt,

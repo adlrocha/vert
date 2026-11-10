@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use crate::app::Start;
 use crate::explain::agent::{self, Choice};
 use crate::explain::{Explainer, cache::Cache};
+use crate::fix::Fixer;
 use crate::labels::{LabelError, Labeler};
 
 /// Understand what your agents are building: a live, navigable view of a git repo's changes.
@@ -117,7 +118,7 @@ pub struct Config {
     #[arg(long, global = true, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
     pub github_timeout_secs: u64,
 
-    /// Never contact GitHub (pull requests are not shown), and explain no changes.
+    /// Never contact GitHub (pull requests are not shown), and explain or fix no changes.
     #[arg(long, global = true)]
     pub no_network: bool,
 
@@ -125,8 +126,8 @@ pub struct Config {
     #[arg(long, global = true)]
     pub no_update_check: bool,
 
-    /// Coding agent that explains a change (`x` in a diff); `auto` picks the
-    /// first of claude, codex and pi found on PATH.
+    /// Coding agent that explains (`x` in a diff) and fixes (`f`) changes;
+    /// `auto` picks the first of claude, codex and pi found on PATH.
     #[arg(long, global = true, value_enum, default_value_t = Choice::Auto, value_name = "AGENT", env = "VERT_EXPLAIN_AGENT")]
     pub explain_agent: Choice,
 
@@ -141,7 +142,7 @@ pub struct Config {
     #[arg(long, global = true, value_name = "CMD", env = "VERT_EXPLAIN_CMD")]
     pub explain_cmd: Option<String>,
 
-    /// Seconds an agent may take to explain a change.
+    /// Seconds an agent may take to explain or fix a change.
     #[arg(long, global = true, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..), env = "VERT_EXPLAIN_TIMEOUT_SECS")]
     pub explain_timeout_secs: u64,
 
@@ -294,21 +295,54 @@ impl Config {
             return Err("network access is off (--no-network)".to_owned());
         }
         let agent = agent::select(self.explain_agent, self.explain_cmd.as_deref(), path)?;
-        let model = self
-            .explain_model
+        Ok(Explainer {
+            agent,
+            model: self.model(),
+            timeout: Duration::from_secs(self.explain_timeout_secs),
+            max_diff_bytes: self.max_diff_bytes(),
+            cache: Some(Cache::new(cache_dir().join("vert/explain"))),
+        })
+    }
+
+    /// How to fix changes, given the `PATH` to look for agents in. Fixes use
+    /// the agent and model explanations use, but always a known agent:
+    /// `--explain-cmd` only answers the explain prompt, so it is skipped.
+    ///
+    /// # Errors
+    /// Explains, for the user, why fixes are unavailable.
+    pub fn fixer(&self, path: Option<&OsStr>) -> Result<Fixer, String> {
+        if self.no_network {
+            return Err("network access is off (--no-network)".to_owned());
+        }
+        let agent = agent::select(self.explain_agent, None, path).map_err(|why| {
+            if self.explain_agent == Choice::Auto {
+                "no coding agent found: install Claude Code, Codex or pi".to_owned()
+            } else {
+                why
+            }
+        })?;
+        Ok(Fixer {
+            agent,
+            model: self.model(),
+            timeout: Duration::from_secs(self.explain_timeout_secs),
+            max_excerpt_bytes: self.max_diff_bytes(),
+        })
+    }
+
+    /// The model asked for, unless blank.
+    fn model(&self) -> Option<String> {
+        self.explain_model
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty())
-            .map(str::to_owned);
-        Ok(Explainer {
-            agent,
-            model,
-            timeout: Duration::from_secs(self.explain_timeout_secs),
-            max_diff_bytes: usize::try_from(self.explain_max_diff_kb)
-                .unwrap_or(usize::MAX)
-                .saturating_mul(1024),
-            cache: Some(Cache::new(cache_dir().join("vert/explain"))),
-        })
+            .map(str::to_owned)
+    }
+
+    /// `--explain-max-diff-kb` in bytes.
+    fn max_diff_bytes(&self) -> usize {
+        usize::try_from(self.explain_max_diff_kb)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(1024)
     }
 
     /// Search-result cap as a `usize`.
@@ -465,6 +499,44 @@ mod tests {
         assert_eq!(branch.start(), Ok(Some(Start::Branch("feat/x".to_owned()))));
         assert!(Config::parse_from(["vert", "branch", " "]).start().is_err());
         assert!(Config::try_parse_from(["vert", "branch"]).is_err());
+    }
+
+    #[test]
+    fn fixes_use_a_known_agent_unless_offline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pi = dir.path().join("pi");
+        std::fs::write(&pi, "#!/bin/sh\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let path = Some(dir.path().as_os_str());
+        let config = Config::parse_from([
+            "vert",
+            "--explain-agent",
+            "auto",
+            "--explain-cmd",
+            "llm",
+            "--explain-model",
+            " x/y ",
+            "--explain-timeout-secs",
+            "60",
+            "--explain-max-diff-kb",
+            "3",
+        ]);
+        let fixer = config.fixer(path).expect("pi is installed");
+        assert_eq!(fixer.agent, agent::Agent::Pi, "--explain-cmd is skipped");
+        assert_eq!(fixer.model.as_deref(), Some("x/y"));
+        assert_eq!(fixer.timeout, Duration::from_secs(60));
+        assert_eq!(fixer.max_excerpt_bytes, 3072);
+        assert!(
+            config
+                .fixer(None)
+                .is_err_and(|e| e.contains("no coding agent"))
+        );
+        let offline = Config::parse_from(["vert", "--no-network"]).fixer(path);
+        assert!(offline.is_err_and(|e| e.contains("--no-network")));
     }
 
     #[test]

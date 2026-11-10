@@ -15,7 +15,7 @@ vert is a terminal UI that shows a live, labelled feed of a git repository's cha
 - `main.rs` is terminal setup and the event loop only. Don't grow it.
 - I/O happens only in `jobs::run` on worker threads (git, search, watching). A new side effect becomes a new `Effect` variant plus an arm in `jobs::run`, never a direct call from `update`.
 - `src/ui` renders app state read-only. Keep rendering decisions out of `App`.
-- Coding agents (explanations) run only from `jobs::run`, through `explain::agent::run`: read-only tools for Claude Code, Codex and pi (a `--explain-cmd` runs unconfined), a timeout, their own process group killed afterwards, and capped output. Agent output is untrusted: sanitize it (`highlight::sanitize`) before it reaches the terminal, and check every hunk pointer against the real diff. The answer cache stays owner-only (0700 directory, 0600 files).
+- Coding agents run only from `jobs::run`, through `explain::agent::run`, with an explicit `agent::Access`: read-only tools to explain (a `--explain-cmd` runs unconfined), file-editing tools without a shell to fix (Codex in its workspace sandbox), always in the line of work's own checkout and never committing. Every run has a timeout, its process group is killed afterwards, and its output is capped. Agent output is untrusted: sanitize it (`highlight::sanitize`) before it reaches the terminal, and check every hunk pointer against the real diff. The answer cache stays owner-only (0700 directory, 0600 files).
 - Thresholds (size labels, wide modules, debounce, caps) are CLI options. Don't hardcode what is already configurable, and don't add constants that should be options.
 
 ## Code rules

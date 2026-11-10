@@ -3,8 +3,9 @@
 //!
 //! Every agent gets the prompt on standard input, runs in the change's
 //! checkout and answers on standard output. Claude Code, Codex and pi are
-//! limited to read-only tools; a custom command runs unconfined, with the
-//! user's own permissions.
+//! limited to read-only tools to explain a change, and to file-editing tools
+//! (no shell for Claude Code and pi; Codex's workspace sandbox) to fix one.
+//! A custom command runs unconfined, with the user's own permissions.
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -38,6 +39,15 @@ pub enum Choice {
     Codex,
     /// pi (`pi`).
     Pi,
+}
+
+/// What an agent may do in the checkout it runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Read files only: explanations.
+    ReadOnly,
+    /// Read and edit files: fixes.
+    Edit,
 }
 
 /// A coding agent vert can ask.
@@ -83,22 +93,23 @@ impl Agent {
         }
     }
 
-    /// The command that runs the agent non-interactively (Claude Code, Codex
-    /// and pi with read-only tools; a custom command unconfined), on `model` when given (else the agent's own default). A custom command
-    /// gets the model in the `VERT_EXPLAIN_MODEL` environment variable.
+    /// The command that runs the agent non-interactively with `access`
+    /// (a custom command always runs unconfined), on `model` when given
+    /// (else the agent's own default). A custom command gets the model in
+    /// the `VERT_EXPLAIN_MODEL` environment variable.
     ///
     /// ```
-    /// use vert::explain::agent::Agent;
-    /// let cmd = Agent::Pi.command(Some("sonnet"));
+    /// use vert::explain::agent::{Access, Agent};
+    /// let cmd = Agent::Pi.command(Access::ReadOnly, Some("sonnet"));
     /// assert_eq!(cmd.get_program(), "pi");
     /// let args: Vec<_> = cmd.get_args().collect();
     /// assert!(args.contains(&"--no-session".as_ref()));
     /// assert!(args.windows(2).any(|w| w == ["--model", "sonnet"]));
     /// ```
     #[must_use]
-    pub fn command(&self, model: Option<&str>) -> Command {
-        let (program, args): (&str, &[&str]) = match self {
-            Self::Claude => (
+    pub fn command(&self, access: Access, model: Option<&str>) -> Command {
+        let (program, args): (&str, &[&str]) = match (self, access) {
+            (Self::Claude, Access::ReadOnly) => (
                 "claude",
                 &[
                     "-p",
@@ -109,24 +120,58 @@ impl Agent {
                     "Read,Grep,Glob",
                 ],
             ),
-            Self::Codex => (
-                "codex",
+            (Self::Claude, Access::Edit) => (
+                "claude",
                 &[
-                    "exec",
-                    "--sandbox",
-                    "read-only",
-                    "--skip-git-repo-check",
-                    "--ephemeral",
-                    "--color",
-                    "never",
-                    "-",
+                    "-p",
+                    "--output-format",
+                    "text",
+                    "--no-session-persistence",
+                    "--tools",
+                    "Read,Grep,Glob,Edit,Write",
+                    "--permission-mode",
+                    "acceptEdits",
                 ],
             ),
-            Self::Pi => (
+            (Self::Codex, _) => (
+                "codex",
+                match access {
+                    Access::ReadOnly => &[
+                        "exec",
+                        "--sandbox",
+                        "read-only",
+                        "--skip-git-repo-check",
+                        "--ephemeral",
+                        "--color",
+                        "never",
+                        "-",
+                    ],
+                    Access::Edit => &[
+                        "exec",
+                        "--sandbox",
+                        "workspace-write",
+                        "--skip-git-repo-check",
+                        "--ephemeral",
+                        "--color",
+                        "never",
+                        "-",
+                    ],
+                },
+            ),
+            (Self::Pi, Access::ReadOnly) => (
                 "pi",
                 &["-p", "--no-session", "--tools", "read,grep,find,ls"],
             ),
-            Self::Custom(cmd) => {
+            (Self::Pi, Access::Edit) => (
+                "pi",
+                &[
+                    "-p",
+                    "--no-session",
+                    "--tools",
+                    "read,grep,find,ls,edit,write",
+                ],
+            ),
+            (Self::Custom(cmd), _) => {
                 let mut c = Command::new("sh");
                 c.arg("-c").arg(cmd);
                 if let Some(model) = model {
@@ -236,20 +281,21 @@ pub enum RunError {
     },
 }
 
-/// Runs `agent` on `model` in `dir`, writing `prompt` to its standard input, and
-/// returns what it printed. It is stopped after `timeout`.
+/// Runs `agent` on `model` in `dir` with `access`, writing `prompt` to its
+/// standard input, and returns what it printed. It is stopped after `timeout`.
 ///
 /// # Errors
 /// Returns [`RunError`] when it cannot start, fails or runs out of time.
 pub fn run(
     agent: &Agent,
+    access: Access,
     model: Option<&str>,
     dir: &Path,
     prompt: &str,
     timeout: Duration,
 ) -> Result<String, RunError> {
     let name = agent.name().to_owned();
-    let mut command = agent.command(model);
+    let mut command = agent.command(access, model);
     // Its own process group, so a timeout stops whatever the agent started.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -396,8 +442,12 @@ mod tests {
     }
 
     fn args_on(agent: &Agent, model: Option<&str>) -> Vec<String> {
+        args_with(agent, Access::ReadOnly, model)
+    }
+
+    fn args_with(agent: &Agent, access: Access, model: Option<&str>) -> Vec<String> {
         agent
-            .command(model)
+            .command(access, model)
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
@@ -412,7 +462,7 @@ mod tests {
         assert_eq!(codex.last().map(String::as_str), Some("-"), "stdin prompt");
         assert!(args(&Agent::Pi).contains(&"read,grep,find,ls".to_owned()));
         let custom = Agent::Custom("my-llm --json".to_owned());
-        assert_eq!(custom.command(None).get_program(), "sh");
+        assert_eq!(custom.command(Access::ReadOnly, None).get_program(), "sh");
         assert_eq!(args(&custom), ["-c", "my-llm --json"]);
         assert!(
             args_on(&Agent::Claude, Some("opus")).ends_with(&["--model".into(), "opus".into()])
@@ -433,6 +483,31 @@ mod tests {
             [Agent::Claude, Agent::Codex, Agent::Pi, custom].map(|a| a.name().to_owned()),
             ["claude", "codex", "pi", "--explain-cmd"]
         );
+    }
+
+    #[test]
+    fn fixing_agents_edit_files_without_a_shell() {
+        let claude = args_with(&Agent::Claude, Access::Edit, Some("opus"));
+        assert!(claude.contains(&"Read,Grep,Glob,Edit,Write".to_owned()));
+        assert!(
+            claude
+                .windows(2)
+                .any(|w| w == ["--permission-mode", "acceptEdits"])
+        );
+        assert!(claude.ends_with(&["--model".into(), "opus".into()]));
+        assert!(!claude.iter().any(|a| a.contains("Bash")));
+        let codex = args_with(&Agent::Codex, Access::Edit, Some("o3"));
+        assert!(
+            codex
+                .windows(2)
+                .any(|w| w == ["--sandbox", "workspace-write"])
+        );
+        assert_eq!(codex[codex.len() - 3..], ["--model", "o3", "-"]);
+        let pi = args_with(&Agent::Pi, Access::Edit, None);
+        assert!(pi.contains(&"read,grep,find,ls,edit,write".to_owned()));
+        assert!(!pi.iter().any(|a| a.contains("bash")));
+        let custom = Agent::Custom("x".to_owned());
+        assert_eq!(args_with(&custom, Access::Edit, None), ["-c", "x"]);
     }
 
     /// A directory holding fake executables named `names`.
@@ -491,6 +566,7 @@ mod tests {
         std::fs::write(dir.path().join("marker"), "here").expect("write");
         let out = run(
             &sh("cat marker; echo; tr a-z A-Z; printf %s \"$VERT_EXPLAIN_MODEL\""),
+            Access::ReadOnly,
             Some("m1"),
             dir.path(),
             "hello",
@@ -506,6 +582,7 @@ mod tests {
         let secs = Duration::from_secs(10);
         let failed = run(
             &sh("echo out; echo bad >&2; exit 3"),
+            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -517,18 +594,31 @@ mod tests {
             text.contains("exit status: 3") && text.ends_with(": bad"),
             "{text}"
         );
-        let quiet = run(&sh("echo only stdout; exit 1"), None, dir.path(), "", secs)
-            .expect_err("fails")
-            .to_string();
+        let quiet = run(
+            &sh("echo only stdout; exit 1"),
+            Access::ReadOnly,
+            None,
+            dir.path(),
+            "",
+            secs,
+        )
+        .expect_err("fails")
+        .to_string();
         assert!(
             quiet.ends_with("only stdout"),
             "stdout when stderr is empty: {quiet}"
         );
+    }
 
+    #[test]
+    fn stops_what_the_agent_left_behind_and_slow_agents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secs = Duration::from_secs(10);
         // A child left behind in the agent's group is stopped with it.
         let start = Instant::now();
         let left = run(
             &sh("sleep 30 & echo partial"),
+            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -551,6 +641,7 @@ mod tests {
             } else {
                 "sleep 30"
             }),
+            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -567,6 +658,7 @@ mod tests {
         let marker = dir.path().join("still-running");
         let _ = run(
             &sh("(sleep 1; touch still-running) & sleep 30"),
+            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -577,6 +669,7 @@ mod tests {
 
         let slow = run(
             &sh("sleep 5"),
+            Access::ReadOnly,
             None,
             dir.path(),
             "",
@@ -588,6 +681,7 @@ mod tests {
 
         let missing = run(
             &sh("x"),
+            Access::ReadOnly,
             None,
             &dir.path().join("gone"),
             "",
@@ -601,7 +695,15 @@ mod tests {
 
         // An agent that ignores its input still answers.
         assert_eq!(
-            run(&sh("echo ok"), None, dir.path(), &"x".repeat(1 << 20), secs).expect("ok"),
+            run(
+                &sh("echo ok"),
+                Access::ReadOnly,
+                None,
+                dir.path(),
+                &"x".repeat(1 << 20),
+                secs
+            )
+            .expect("ok"),
             "ok\n"
         );
     }
@@ -615,6 +717,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let big = run(
             &sh("head -c 17000000 /dev/zero"),
+            Access::ReadOnly,
             None,
             dir.path(),
             "",

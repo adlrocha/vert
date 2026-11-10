@@ -6,6 +6,7 @@
 
 mod branches;
 mod explain;
+mod fix;
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ pub use branches::{
 #[cfg(test)]
 pub(crate) use explain::pi_for_tests;
 pub use explain::{ExplainState, ExplainView, Item, Pane, Status, items, row_pointer, targets};
+pub use fix::{Draft, FixState, Running};
 
 use crate::explain::Answer;
 use crate::git::RepoInfo;
@@ -483,6 +485,13 @@ pub enum Msg {
         /// The explanation, or why there is none.
         result: Result<Answer, String>,
     },
+    /// An agent finished acting on feedback.
+    Fixed {
+        /// The request (see [`Effect::Fix`]).
+        id: u64,
+        /// What the agent said it did, or why it failed.
+        result: Result<String, String>,
+    },
 }
 
 /// Side effects requested by [`App::update`].
@@ -558,6 +567,15 @@ pub enum Effect {
         /// Ask even if an answer is cached.
         fresh: bool,
     },
+    /// Ask a coding agent to act on feedback, editing files in a checkout.
+    Fix {
+        /// Identifies the request in [`Msg::Fixed`].
+        id: u64,
+        /// The linked worktree to edit, or `None` for vert's own checkout.
+        root: Option<PathBuf>,
+        /// The feedback and where it points.
+        request: crate::fix::Request,
+    },
 }
 
 /// What the once-a-day update check found out about vert itself.
@@ -589,6 +607,8 @@ pub struct App {
     refresh: Refresh,
     /// Explanations of changes.
     pub explain: ExplainState,
+    /// Fixes asked of the agent.
+    pub fix: FixState,
     /// Stacked views (detail, file); the last one is on screen.
     pub views: Vec<View>,
     /// Whether the help overlay is shown.
@@ -648,6 +668,7 @@ impl App {
             branches: BranchesState::default(),
             refresh: Refresh::default(),
             explain: ExplainState::default(),
+            fix: FixState::default(),
             views: Vec::new(),
             help: false,
             watch: WatchStatus::Live,
@@ -763,6 +784,7 @@ impl App {
                 self.on_explained(key, result);
                 Vec::new()
             }
+            Msg::Fixed { id, result } => self.on_fixed(id, result),
             Msg::Removed { removed, error } => {
                 let effects = self.request_branches();
                 self.notice =
@@ -988,6 +1010,9 @@ impl App {
             return self.answer_remove(confirmed);
         }
         self.notice = None;
+        if self.fix.draft.is_some() {
+            return self.on_draft_key(&key);
+        }
         if self.branches.collisions.is_some() {
             return self.on_collisions_key(&key);
         }
@@ -1272,6 +1297,10 @@ impl App {
         let max = self.max_highlight;
         match self.views.last_mut() {
             Some(View::Detail(_)) if key.code == KeyCode::Char('x') => self.open_explain(),
+            Some(View::Detail(_)) if key.code == KeyCode::Char('f') => self.draft_fix_from_detail(),
+            Some(View::Explain(_)) if key.code == KeyCode::Char('f') => {
+                self.draft_fix_from_explain()
+            }
             Some(View::Detail(d)) => detail_key(d, key, max),
             Some(View::File(f)) => file_key(f, key),
             Some(View::Explain(_)) => self.on_explain_key(key),
