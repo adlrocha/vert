@@ -68,7 +68,7 @@ in, and what deserves a second look.
 - **Fixes:** press `f` on a hunk, or on a concern in an explanation, write
   what should change (a concern starts as its own text), and Claude Code
   or Codex makes the edit in that line of work's checkout, confined to
-  it. It never commits, so the fix lands in the checkout's uncommitted
+  it (or pi, unconfined, if you choose it). It never commits, so the fix lands in the checkout's uncommitted
   changes. See [Fixes](#fixes).
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter. `e` opens `$VISUAL`/`$EDITOR` at that line
@@ -215,9 +215,9 @@ These are the full commands:
 
 | Agent         | Runs as                                                                            |
 | ------------- | ---------------------------------------------------------------------------------- |
-| Claude Code   | `claude -p --output-format text --no-session-persistence --tools Read,Grep,Glob`   |
+| Claude Code   | `claude -p --output-format text --no-session-persistence --strict-mcp-config --tools Read,Grep,Glob` |
 | Codex         | `codex exec --sandbox read-only --skip-git-repo-check --ephemeral --color never -` |
-| pi            | `pi -p --no-session --tools read,grep,find,ls`                                     |
+| pi            | `pi -p --no-session --no-extensions --no-mcp --no-skills --no-context-files --tools read,grep,find,ls` |
 | `--explain-cmd` | `sh -c CMD`, unconfined, with your own permissions                               |
 
 When a model is set, `--model MODEL` is added before Codex's final `-`, or at
@@ -284,14 +284,15 @@ fix it from there. One fix runs per checkout at a time; checkouts don't
 wait for each other.
 
 **Which agent, and what it may do.** The code under review can contain
-instructions aimed at the agent (an `AGENTS.md`, a comment), so a fix only
-runs with an agent that keeps its edits inside the checkout by itself, not
-only because the prompt asks:
+instructions aimed at the agent (an `AGENTS.md`, a comment), so by default
+a fix only runs with an agent that keeps its edits inside the checkout by
+itself, not only because the prompt asks:
 
 | Agent       | Runs as                                                                                                                                       | Kept inside the checkout by                                   |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
 | Claude Code | `claude -p --output-format text --no-session-persistence --restricted --strict-mcp-config --tools Read,Grep,Glob,Edit,Write --permission-mode acceptEdits` | `--restricted`: file tools confined to the checkout and kept off `.git` (a write to `.git/hooks` is refused), no tool that runs code, no MCP servers, and the checkout's own settings ignored |
 | Codex       | `codex exec --sandbox workspace-write -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=true --skip-git-repo-check --ephemeral --color never -` | its workspace-write sandbox, with `/tmp` and `$TMPDIR` taken out of it: it can run commands, but writes only inside the checkout, never to `.git` (so no commit, stash or reset), and has no network |
+| pi          | `pi -p --no-session --no-extensions --no-mcp --no-skills --no-context-files --tools read,grep,find,ls,edit,write` | nothing: only when you choose it (see below) |
 
 Inside the checkout the agent can change any file, so it could also undo
 uncommitted work you have there; it is asked to touch only what the
@@ -301,8 +302,15 @@ makes `git commit`, `stash` and `reset` fail).
 
 The agent and model are the ones explanations use (`VERT_EXPLAIN_AGENT`,
 `VERT_EXPLAIN_MODEL`), with the same timeout. `auto` picks the first of
-`claude` and `codex` on `PATH`. pi can't be confined this way, so it
-explains but doesn't fix: with `VERT_EXPLAIN_AGENT=pi`, `f` says so. A
+`claude` and `codex` on `PATH`, never pi.
+
+**Fixing with pi.** pi can't be confined to the checkout, so it fixes
+only when you choose it with `VERT_EXPLAIN_AGENT=pi`, and vert labels it
+`pi, unconfined` where you ask for the fix. It gets only its file tools
+(read, grep, find, ls, edit, write; no bash), and no extensions, MCP
+servers, skills or context files, so it can't run code. Its edits, though,
+can land anywhere your user can write, `.git` included. Use it on code you
+trust. A
 `--explain-cmd` only knows how to answer the explain prompt, so fixes skip
 it and use the agent `--explain-agent` names (with `auto`, the first of
 `claude` and `codex`).
@@ -337,7 +345,7 @@ checkout whose agent is idle.
 | `--github-timeout-secs`  | 15      | GitHub request timeout                          |
 | `--no-network`           | off     | Never contact GitHub, and no explanations or fixes |
 | `--no-update-check`      | off     | Never ask GitHub whether a newer vert exists    |
-| `--explain-agent` / `VERT_EXPLAIN_AGENT` | `auto` | Agent for `x` and `f`: `auto`, `claude`, `codex` or `pi` (pi doesn't fix) |
+| `--explain-agent` / `VERT_EXPLAIN_AGENT` | `auto` | Agent for `x` and `f`: `auto`, `claude`, `codex` or `pi` (pi fixes unconfined, only when named) |
 | `--explain-model` / `VERT_EXPLAIN_MODEL` | agent's default | Model the agent uses, in its own naming |
 | `--explain-cmd` / `VERT_EXPLAIN_CMD` | — | Shell command to use instead of a known agent |
 | `--explain-timeout-secs` / `VERT_EXPLAIN_TIMEOUT_SECS` | 600 | How long an agent may take to explain or fix |

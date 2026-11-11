@@ -155,9 +155,15 @@ impl Fixer {
     /// The agent, and its model when one was chosen, as shown to the user.
     #[must_use]
     pub fn label(&self) -> String {
+        let name = match self.agent {
+            // Said wherever a fix is asked for, since pi's edits aren't
+            // kept inside the checkout.
+            Agent::Pi => "pi, unconfined",
+            ref agent => agent.name(),
+        };
         match &self.model {
-            Some(model) => format!("{} · {model}", self.agent.name()),
-            None => self.agent.name().to_owned(),
+            Some(model) => format!("{name} · {model}"),
+            None => name.to_owned(),
         }
     }
 
@@ -167,12 +173,9 @@ impl Fixer {
     /// # Errors
     /// Returns a message for the user when the agent fails or times out.
     pub fn fix(&self, request: &Request, dir: &Path, groups: &Groups) -> Result<String, String> {
-        // pi can't be confined to `dir`. A custom command is the user's own
-        // and runs unconfined; vert never configures one for fixes (see
-        // `agent::select_editor`), and tests use one to fake an agent.
-        if self.agent == Agent::Pi {
-            return Err("pi can't be kept inside the checkout, so it doesn't fix".to_owned());
-        }
+        // A custom command is the user's own and runs unconfined; vert never
+        // configures one for fixes (see `agent::select_editor`), and tests
+        // use one to fake an agent.
         let how = agent::Run {
             access: Access::Edit,
             model: self.model.as_deref(),
@@ -300,12 +303,6 @@ mod tests {
             agent: Agent::Pi,
             ..failing
         };
-        let refused = pi
-            .fix(&request(), dir.path(), &Groups::default())
-            .expect_err("pi");
-        assert!(
-            refused.contains("can't be kept inside the checkout"),
-            "{refused}"
-        );
+        assert_eq!(pi.label(), "pi, unconfined · m", "the user is told");
     }
 }
