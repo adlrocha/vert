@@ -560,10 +560,8 @@ impl Explainer {
     /// ```
     #[must_use]
     pub fn label(&self) -> String {
-        match &self.model {
-            Some(model) => format!("{} · {model}", self.agent.name()),
-            None => self.agent.name().to_owned(),
-        }
+        self.agent
+            .label(agent::Access::ReadOnly, self.model.as_deref())
     }
 
     /// Explains `entry`, whose diff is `files`, running the agent in `dir`

@@ -5,9 +5,10 @@
 //! checkout and answers on standard output. Claude Code, Codex and pi are
 //! limited to read-only tools to explain a change. To fix one, Claude Code
 //! gets file tools confined to the checkout (`--restricted`, no shell, no
-//! MCP servers) and Codex its workspace-write sandbox; pi can't be confined,
-//! so it doesn't fix. A custom command runs unconfined, with the user's own
-//! permissions.
+//! MCP servers) and Codex its workspace-write sandbox. pi can't be confined
+//! to the checkout, so it fixes only when asked for by name, with its file
+//! tools and nothing else. A custom command runs unconfined, with the
+//! user's own permissions.
 
 use std::collections::BTreeSet;
 
@@ -64,12 +65,39 @@ pub enum Agent {
     Claude,
     /// Codex: its read-only sandbox to explain, its workspace-write one to fix.
     Codex,
-    /// pi: read, grep, find and ls. It can't be confined to a checkout, so it
-    /// never fixes.
+    /// pi: read, grep, find and ls to explain; with edit and write to fix.
+    /// It can't be confined to a checkout, so it fixes only when chosen by
+    /// name (see [`select_editor`]).
     Pi,
     /// A shell command that reads the prompt on stdin and answers on stdout.
     Custom(String),
 }
+
+/// pi's arguments to explain. No extensions, MCP servers, skills or context
+/// files: only the file tools listed, none of which runs code.
+const PI_READ_ONLY: [&str; 8] = [
+    "-p",
+    "--no-session",
+    "--no-extensions",
+    "--no-mcp",
+    "--no-skills",
+    "--no-context-files",
+    "--tools",
+    "read,grep,find,ls",
+];
+
+/// pi's arguments to fix: as [`PI_READ_ONLY`], with edit and write. Its
+/// edits are still not kept inside the checkout.
+const PI_EDIT: [&str; 8] = [
+    "-p",
+    "--no-session",
+    "--no-extensions",
+    "--no-mcp",
+    "--no-skills",
+    "--no-context-files",
+    "--tools",
+    "read,grep,find,ls,edit,write",
+];
 
 /// The agents tried, in order, when the choice is [`Choice::Auto`].
 const AUTO: [Agent; 3] = [Agent::Claude, Agent::Codex, Agent::Pi];
@@ -98,6 +126,27 @@ impl Agent {
     #[must_use]
     pub const fn confines_edits(&self) -> bool {
         matches!(self, Self::Claude | Self::Codex)
+    }
+
+    /// The agent, with `model` when one was chosen, as shown to the user.
+    /// Editing with an agent that doesn't confine its edits says so.
+    ///
+    /// ```
+    /// use vert::explain::agent::{Access, Agent};
+    /// assert_eq!(Agent::Pi.label(Access::ReadOnly, None), "pi");
+    /// assert_eq!(Agent::Pi.label(Access::Edit, Some("m")), "pi, unconfined · m");
+    /// assert_eq!(Agent::Claude.label(Access::Edit, Some("m")), "claude · m");
+    /// ```
+    #[must_use]
+    pub fn label(&self, access: Access, model: Option<&str>) -> String {
+        let name = match access {
+            Access::Edit if !self.confines_edits() => format!("{}, unconfined", self.name()),
+            _ => self.name().to_owned(),
+        };
+        match model {
+            Some(model) => format!("{name} · {model}"),
+            None => name,
+        }
     }
 
     /// Identifies the agent in cached answers; stable across releases.
@@ -138,6 +187,7 @@ impl Agent {
                     "--output-format",
                     "text",
                     "--no-session-persistence",
+                    "--strict-mcp-config",
                     "--tools",
                     "Read,Grep,Glob",
                 ],
@@ -190,12 +240,8 @@ impl Agent {
                     ],
                 },
             ),
-            // pi can't be kept inside the checkout, so it never gets tools
-            // that write, whatever it is asked to do.
-            (Self::Pi, _) => (
-                "pi",
-                &["-p", "--no-session", "--tools", "read,grep,find,ls"],
-            ),
+            (Self::Pi, Access::ReadOnly) => ("pi", &PI_READ_ONLY),
+            (Self::Pi, Access::Edit) => ("pi", &PI_EDIT),
             (Self::Custom(cmd), _) => {
                 let mut c = Command::new("sh");
                 c.arg("-c").arg(cmd);
@@ -251,8 +297,9 @@ pub fn select(choice: Choice, custom: Option<&str>, path: Option<&OsStr>) -> Res
 }
 
 /// Picks the agent to fix changes with, from `choice`, checked against the
-/// directories of `path`: only one that [`confines_edits`](Agent::confines_edits).
-/// `auto` takes the first of those installed.
+/// directories of `path`. `auto` takes the first installed agent that
+/// [`confines_edits`](Agent::confines_edits); pi, which doesn't, fixes only
+/// when chosen by name.
 ///
 /// # Errors
 /// Explains, for the user, why no agent can fix.
@@ -262,17 +309,12 @@ pub fn select_editor(choice: Choice, path: Option<&OsStr>) -> Result<Agent, Stri
             .into_iter()
             .filter(Agent::confines_edits)
             .find(|agent| path.is_some_and(|p| on_path(agent.name(), p)))
-            .ok_or_else(|| "no agent that can fix found: install Claude Code or Codex".to_owned());
+            // Short enough for an 80-column footer after "Can't fix: ".
+            .ok_or_else(|| {
+                "no claude or codex; install one or set VERT_EXPLAIN_AGENT=pi".to_owned()
+            });
     }
-    let agent = select(choice, None, path)?;
-    if agent.confines_edits() {
-        Ok(agent)
-    } else {
-        Err(format!(
-            "{} can't be kept inside the checkout, so it doesn't fix: set VERT_EXPLAIN_AGENT to claude or codex",
-            agent.name()
-        ))
-    }
+    select(choice, None, path)
 }
 
 /// Whether an executable named `program` is in one of the `path` directories.
@@ -587,7 +629,17 @@ mod tests {
         let codex = args(&Agent::Codex);
         assert!(codex.windows(2).any(|w| w == ["--sandbox", "read-only"]));
         assert_eq!(codex.last().map(String::as_str), Some("-"), "stdin prompt");
-        assert!(args(&Agent::Pi).contains(&"read,grep,find,ls".to_owned()));
+        assert!(args(&Agent::Claude).contains(&"--strict-mcp-config".to_owned()));
+        let pi = args(&Agent::Pi);
+        assert!(pi.windows(2).any(|w| w == ["--tools", "read,grep,find,ls"]));
+        for off in [
+            "--no-extensions",
+            "--no-mcp",
+            "--no-skills",
+            "--no-context-files",
+        ] {
+            assert!(pi.contains(&off.to_owned()), "{off}");
+        }
         let custom = Agent::Custom("my-llm --json".to_owned());
         assert_eq!(custom.command(Access::ReadOnly, None).get_program(), "sh");
         assert_eq!(args(&custom), ["-c", "my-llm --json"]);
@@ -646,10 +698,16 @@ mod tests {
             );
         }
         assert_eq!(codex[codex.len() - 3..], ["--model", "o3", "-"]);
+        let pi = args_with(&Agent::Pi, Access::Edit, None);
+        assert!(
+            pi.windows(2)
+                .any(|w| w == ["--tools", "read,grep,find,ls,edit,write"]),
+            "file tools only, no bash"
+        );
         assert_eq!(
-            args_with(&Agent::Pi, Access::Edit, None),
-            args(&Agent::Pi),
-            "pi never gets tools that write"
+            pi.iter().filter(|a| a.starts_with("--no-")).count(),
+            5,
+            "same switches off as explaining: {pi:?}"
         );
         let custom = Agent::Custom("x".to_owned());
         assert_eq!(args_with(&custom, Access::Edit, None), ["-c", "x"]);

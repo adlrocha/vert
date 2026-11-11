@@ -128,7 +128,8 @@ pub struct Config {
 
     /// Coding agent that explains (`x` in a diff) and fixes (`f`) changes;
     /// `auto` picks the first of claude, codex and pi found on PATH to
-    /// explain, and of claude and codex to fix. pi explains only.
+    /// explain, and of claude and codex to fix. pi fixes only when named,
+    /// and its edits aren't kept inside the checkout.
     #[arg(long, global = true, value_enum, default_value_t = Choice::Auto, value_name = "AGENT", env = "VERT_EXPLAIN_AGENT")]
     pub explain_agent: Choice,
 
@@ -307,10 +308,10 @@ impl Config {
     }
 
     /// How to fix changes, given the `PATH` to look for agents in. Fixes use
-    /// the agent and model explanations use, but only an agent that keeps
-    /// its edits inside the checkout ([`agent::Agent::confines_edits`]):
-    /// `auto` picks the first of claude and codex, and pi and
-    /// `--explain-cmd` are never used.
+    /// the agent and model explanations use: `auto` picks the first agent
+    /// that keeps its edits inside the checkout
+    /// ([`agent::Agent::confines_edits`]), claude or codex; pi, which
+    /// doesn't, fixes only when named; `--explain-cmd` is never used.
     ///
     /// # Errors
     /// Explains, for the user, why fixes are unavailable.
@@ -516,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn fixes_use_an_agent_that_stays_in_the_checkout() {
+    fn fixes_pick_a_confined_agent_unless_one_is_named() {
         let fixer_with = |installed: &[&str], args: &[&str]| {
             let dir = agents(installed);
             let config = Config::parse_from(["vert"].iter().chain(args));
@@ -551,13 +552,14 @@ mod tests {
         let codex = fixer_with(&["pi", "codex"], &auto).expect("codex");
         assert_eq!(codex.agent, agent::Agent::Codex, "pi is passed over");
         let none = fixer_with(&["pi"], &auto).expect_err("only pi");
-        assert!(none.contains("install Claude Code or Codex"), "{none}");
+        assert!(none.contains("no claude or codex"), "{none}");
+        assert!(none.contains("VERT_EXPLAIN_AGENT=pi"), "{none}");
         let chosen = fixer_with(&["claude", "codex"], &[&explicit[..], &["codex"]].concat());
         assert_eq!(chosen.map(|f| f.agent), Ok(agent::Agent::Codex));
         let missing = fixer_with(&["codex"], &[&explicit[..], &["claude"]].concat());
         assert!(missing.is_err_and(|e| e.contains("claude is not on PATH")));
-        let pi = fixer_with(&["pi"], &[&explicit[..], &["pi"]].concat()).expect_err("pi");
-        assert!(pi.contains("pi can't be kept inside the checkout"), "{pi}");
+        let pi = fixer_with(&["claude", "pi"], &[&explicit[..], &["pi"]].concat());
+        assert_eq!(pi.map(|f| f.agent), Ok(agent::Agent::Pi), "pi when named");
         let offline = fixer_with(&["claude"], &["--no-network"]);
         assert!(offline.is_err_and(|e| e.contains("--no-network")));
     }
