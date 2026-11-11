@@ -598,11 +598,10 @@ impl App {
             .iter()
             .filter_map(|b| b.worktree.as_ref())
             .find(|w| &w.path == root)?;
-        let entry = checkout.dirty.clone().unwrap_or_else(|| {
-            let mut clean = d.entry.clone();
-            clean.clear_files();
-            clean
-        });
+        let entry = checkout
+            .dirty
+            .clone()
+            .unwrap_or_else(|| d.entry.without_files());
         Some(Effect::LoadDiff {
             entry: Box::new(entry),
             refresh: true,

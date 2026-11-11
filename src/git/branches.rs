@@ -369,7 +369,7 @@ fn changes(
     };
     used.insert(key, files.clone());
     let mut entry = Entry::new(target, files, labeler);
-    entry.id = format!("branch:{name}");
+    entry.id = Entry::branch_id(name);
     entry.short = if merge_base.is_some() {
         name.to_owned()
     } else {

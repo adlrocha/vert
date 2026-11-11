@@ -4,8 +4,9 @@
 //!
 //! vert sends the agent the change it is looking at, the place the feedback
 //! is about (a file and line, with the hunk around it) and the feedback in
-//! the reviewer's words. The agent edits files and never commits, so the fix
-//! arrives as uncommitted changes that the live diff shows straight away.
+//! the reviewer's words. The agent edits files and never commits, so its
+//! edits are that checkout's uncommitted changes, which an open diff of them
+//! shows as they are made.
 
 use std::fmt::Write as _;
 use std::path::Path;

@@ -839,11 +839,11 @@ impl App {
                 if let Some(d) = self.views.iter().rev().find_map(View::as_detail)
                     && d.entry.is_own_worktree()
                 {
-                    let entry = self.feed.worktree.clone().unwrap_or_else(|| {
-                        let mut clean = d.entry.clone();
-                        clean.clear_files();
-                        clean
-                    });
+                    let entry = self
+                        .feed
+                        .worktree
+                        .clone()
+                        .unwrap_or_else(|| d.entry.without_files());
                     effects.push(Effect::LoadDiff {
                         entry: Box::new(entry),
                         refresh: true,

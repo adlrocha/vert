@@ -2,8 +2,9 @@
 //! piece of feedback, in the checkout of the line of work under review.
 //!
 //! The feedback is typed (or taken from an explanation's concern) in a
-//! small prompt. Sending it runs the agent in the background; its edits show
-//! up in the live diff, and its one-line summary in the footer.
+//! small prompt. Sending it runs the agent in the background; its edits are
+//! the checkout's uncommitted changes, which an open diff of them shows as
+//! they are made, and its one-line summary goes in the footer.
 
 use std::path::PathBuf;
 
@@ -89,7 +90,7 @@ impl App {
         };
         // A branch's changes are a range, or a bare commit when it shares no
         // history with the base; either way the branch decides where it lives.
-        if let Some(name) = entry.id.strip_prefix("branch:") {
+        if let Some(name) = entry.branch() {
             return self
                 .branches
                 .list
