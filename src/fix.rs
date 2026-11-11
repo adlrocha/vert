@@ -152,19 +152,11 @@ pub struct Fixer {
 }
 
 impl Fixer {
-    /// The agent, and its model when one was chosen, as shown to the user.
+    /// The agent, and its model when one was chosen, as shown to the user;
+    /// it says so when the agent's edits aren't kept inside the checkout.
     #[must_use]
     pub fn label(&self) -> String {
-        let name = match self.agent {
-            // Said wherever a fix is asked for, since pi's edits aren't
-            // kept inside the checkout.
-            Agent::Pi => "pi, unconfined",
-            ref agent => agent.name(),
-        };
-        match &self.model {
-            Some(model) => format!("{name} · {model}"),
-            None => name.to_owned(),
-        }
+        self.agent.label(Access::Edit, self.model.as_deref())
     }
 
     /// Asks the agent to act on `request`, editing files in `dir` and
@@ -281,7 +273,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             max_excerpt_bytes: 1 << 10,
         };
-        assert_eq!(fixer.label(), "--explain-cmd");
+        assert_eq!(fixer.label(), "--explain-cmd, unconfined");
         assert_eq!(
             fixer.fix(&request(), dir.path(), &Groups::default()),
             Ok("wrote out.txt".to_owned())
@@ -293,7 +285,7 @@ mod tests {
             model: Some("m".to_owned()),
             ..fixer
         };
-        assert_eq!(failing.label(), "--explain-cmd · m");
+        assert_eq!(failing.label(), "--explain-cmd, unconfined · m");
         let err = failing
             .fix(&request(), dir.path(), &Groups::default())
             .expect_err("fails");

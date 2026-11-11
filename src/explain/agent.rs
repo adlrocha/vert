@@ -128,6 +128,27 @@ impl Agent {
         matches!(self, Self::Claude | Self::Codex)
     }
 
+    /// The agent, with `model` when one was chosen, as shown to the user.
+    /// Editing with an agent that doesn't confine its edits says so.
+    ///
+    /// ```
+    /// use vert::explain::agent::{Access, Agent};
+    /// assert_eq!(Agent::Pi.label(Access::ReadOnly, None), "pi");
+    /// assert_eq!(Agent::Pi.label(Access::Edit, Some("m")), "pi, unconfined · m");
+    /// assert_eq!(Agent::Claude.label(Access::Edit, Some("m")), "claude · m");
+    /// ```
+    #[must_use]
+    pub fn label(&self, access: Access, model: Option<&str>) -> String {
+        let name = match access {
+            Access::Edit if !self.confines_edits() => format!("{}, unconfined", self.name()),
+            _ => self.name().to_owned(),
+        };
+        match model {
+            Some(model) => format!("{name} · {model}"),
+            None => name,
+        }
+    }
+
     /// Identifies the agent in cached answers; stable across releases.
     ///
     /// ```
