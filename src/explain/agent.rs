@@ -309,9 +309,9 @@ pub fn select_editor(choice: Choice, path: Option<&OsStr>) -> Result<Agent, Stri
             .into_iter()
             .filter(Agent::confines_edits)
             .find(|agent| path.is_some_and(|p| on_path(agent.name(), p)))
+            // Short enough for an 80-column footer after "Can't fix: ".
             .ok_or_else(|| {
-                "no agent that can fix found: install Claude Code or Codex, or set VERT_EXPLAIN_AGENT=pi to fix without confinement"
-                    .to_owned()
+                "no claude or codex; install one or set VERT_EXPLAIN_AGENT=pi".to_owned()
             });
     }
     select(choice, None, path)

@@ -296,9 +296,9 @@ itself, not only because the prompt asks:
 
 Inside the checkout the agent can change any file, so it could also undo
 uncommitted work you have there; it is asked to touch only what the
-feedback is about, and neither agent can write to `.git` (checked by
-hand for both: Claude Code is refused `.git/hooks`, and Codex's sandbox
-makes `git commit`, `stash` and `reset` fail).
+feedback is about. Neither Claude Code nor Codex can write to `.git`
+(checked by hand for both: Claude Code is refused `.git/hooks`, and
+Codex's sandbox makes `git commit`, `stash` and `reset` fail); pi can.
 
 The agent and model are the ones explanations use (`VERT_EXPLAIN_AGENT`,
 `VERT_EXPLAIN_MODEL`), with the same timeout. `auto` picks the first of
@@ -310,10 +310,11 @@ only when you choose it with `VERT_EXPLAIN_AGENT=pi`, and vert labels it
 (read, grep, find, ls, edit, write; no bash), and no extensions, MCP
 servers, skills or context files, so it can't run code. Its edits, though,
 can land anywhere your user can write, `.git` included. Use it on code you
-trust. A
-`--explain-cmd` only knows how to answer the explain prompt, so fixes skip
-it and use the agent `--explain-agent` names (with `auto`, the first of
-`claude` and `codex`).
+trust.
+
+A `--explain-cmd` only knows how to answer the explain prompt, so fixes
+skip it and use the agent `--explain-agent` names (with `auto`, the first
+of `claude` and `codex`).
 
 The hunk sent is capped at `--explain-max-diff-kb`; the agent reads the
 file itself for the rest. Quitting vert stops any agent still working.

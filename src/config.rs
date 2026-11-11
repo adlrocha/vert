@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn fixes_use_an_agent_that_stays_in_the_checkout() {
+    fn fixes_pick_a_confined_agent_unless_one_is_named() {
         let fixer_with = |installed: &[&str], args: &[&str]| {
             let dir = agents(installed);
             let config = Config::parse_from(["vert"].iter().chain(args));
@@ -552,7 +552,7 @@ mod tests {
         let codex = fixer_with(&["pi", "codex"], &auto).expect("codex");
         assert_eq!(codex.agent, agent::Agent::Codex, "pi is passed over");
         let none = fixer_with(&["pi"], &auto).expect_err("only pi");
-        assert!(none.contains("install Claude Code or Codex"), "{none}");
+        assert!(none.contains("no claude or codex"), "{none}");
         assert!(none.contains("VERT_EXPLAIN_AGENT=pi"), "{none}");
         let chosen = fixer_with(&["claude", "codex"], &[&explicit[..], &["codex"]].concat());
         assert_eq!(chosen.map(|f| f.agent), Ok(agent::Agent::Codex));
