@@ -54,6 +54,9 @@ pub struct Entry {
 /// The identifier used for the working-tree entry.
 pub const WORKTREE_ID: &str = "worktree";
 
+/// What [`Entry::id`] starts with for the changes a branch adds.
+const BRANCH_ID_PREFIX: &str = "branch:";
+
 impl Entry {
     /// Builds an unnamed entry for `target` from its changed files, labelled
     /// by `labeler`. Callers fill in the message, author and time.
@@ -100,16 +103,40 @@ impl Entry {
         }
     }
 
-    /// Drops every changed file and the labels derived from them, leaving the
-    /// entry as [`Entry::blank`] would label it.
-    pub fn clear_files(&mut self) {
+    /// The id of the changes the branch `name` adds.
+    ///
+    /// ```
+    /// use vert::git::feed::Entry;
+    /// assert_eq!(Entry::branch_id("feat"), "branch:feat");
+    /// ```
+    #[must_use]
+    pub fn branch_id(name: &str) -> String {
+        format!("{BRANCH_ID_PREFIX}{name}")
+    }
+
+    /// The branch whose changes this entry holds, if it holds a branch's.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        self.id.strip_prefix(BRANCH_ID_PREFIX)
+    }
+
+    /// A copy without its changed files, as the same change reads once its
+    /// checkout is clean: what an open diff shows when a fix undid it.
+    #[must_use]
+    /// Its files, the labels derived from them and its age are dropped, as
+    /// [`Entry::blank`] would label it; what identifies it is kept.
+    pub fn without_files(&self) -> Self {
         let empty = Self::blank(self.target);
-        self.files = empty.files;
-        self.added = empty.added;
-        self.removed = empty.removed;
-        self.modules = empty.modules;
-        self.size = empty.size;
-        self.wide = empty.wide;
+        Self {
+            time: empty.time,
+            files: empty.files,
+            added: empty.added,
+            removed: empty.removed,
+            modules: empty.modules,
+            size: empty.size,
+            wide: empty.wide,
+            ..self.clone()
+        }
     }
 
     /// Replaces the changed files and recomputes the totals and labels.
@@ -447,7 +474,9 @@ mod tests {
         linked.root = Some(PathBuf::from("/elsewhere"));
         assert!(linked.is_worktree() && !linked.is_own_worktree());
 
-        linked.clear_files();
+        assert_ne!(linked.time, 0, "a working tree change has an age");
+        let linked = linked.without_files();
+        assert_eq!(linked.time, 0, "an emptied diff dates nothing");
         assert!(linked.files.is_empty() && linked.modules.is_empty());
         assert_eq!((linked.added, linked.removed), (0, 0));
         assert_eq!(linked.size, Size::Small);
