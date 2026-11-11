@@ -122,9 +122,10 @@ impl Entry {
 
     /// A copy without its changed files, as the same change reads once its
     /// checkout is clean: what an open diff shows when a fix undid it.
-    #[must_use]
+    ///
     /// Its files, the labels derived from them and its age are dropped, as
-    /// [`Entry::blank`] would label it; what identifies it is kept.
+    /// in [`Entry::blank`]; what identifies it is kept.
+    #[must_use]
     pub fn without_files(&self) -> Self {
         let empty = Self::blank(self.target);
         Self {
