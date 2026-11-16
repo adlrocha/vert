@@ -247,10 +247,13 @@ impl Fixer {
             .map_err(|e| e.to_string())?;
         let summary = summary(&out);
         let outcome = match before {
-            None => Outcome::Kept("committing fixes is off (--no-fix-commit)".to_owned()),
-            Some(Err(e)) => Outcome::Kept(format!("couldn't record the checkout first: {e}")),
+            None => Outcome::Kept("committing fixes is off with --no-fix-commit".to_owned()),
+            Some(Err(e)) => Outcome::Kept(format!(
+                "couldn't record the checkout first: {}",
+                crate::jobs::describe(&e)
+            )),
             Some(Ok(before)) => {
-                commit::commit_edits(dir, before, &message(request, &self.agent, &summary))
+                commit::commit_edits(dir, &before, &message(request, &self.agent, &summary))
                     .unwrap_or_else(|e| Outcome::Kept(crate::jobs::describe(&e)))
             }
         };
@@ -385,7 +388,7 @@ mod tests {
             fixer.fix(&request(), dir.path(), &Groups::default()),
             Ok(Done {
                 summary: "wrote out.txt".to_owned(),
-                outcome: Outcome::Kept("committing fixes is off (--no-fix-commit)".to_owned()),
+                outcome: Outcome::Kept("committing fixes is off with --no-fix-commit".to_owned()),
             })
         );
         assert!(dir.path().join("out.txt").exists());

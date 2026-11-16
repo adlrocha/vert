@@ -286,7 +286,8 @@ and of its pull request once you push. Nothing is pushed. To undo a fix,
   done, what changed since is applied on top of `HEAD` and committed.
   Uncommitted work you already had, staged or not, stays as it was.
   Anything you edit in that checkout while the agent works counts as part
-  of the fix.
+  of the fix. Files git ignores aren't recorded, so edits to them stay
+  out of the commit.
 - The commit is `fix: <the agent's summary>`, with your feedback in the
   body, made as your git `user.name` and `user.email`. A fix by Claude Code
   credits it with a `Co-authored-by:` trailer; the other agents are named

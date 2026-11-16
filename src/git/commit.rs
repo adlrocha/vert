@@ -17,13 +17,18 @@
 
 use std::path::{Path, PathBuf};
 
-use git2::{ApplyLocation, DiffOptions, IndexAddOption, Oid, Repository, RepositoryState};
+use git2::{ApplyLocation, DiffOptions, IndexAddOption, Oid, Repository, RepositoryState, Tree};
 
 use super::{Context, GitError, short_id};
 
-/// The state of a checkout's files at one moment, stored as a tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Snapshot(Oid);
+/// The state of a checkout at one moment: its files, stored as a tree, and
+/// the branch it had checked out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    tree: Oid,
+    /// `HEAD`'s branch (`refs/heads/…`), or `None` when it has none.
+    branch: Option<String>,
+}
 
 /// What became of the edits made since a [`Snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +39,10 @@ pub enum Outcome {
         id: String,
         /// The branch it was added to.
         branch: String,
-        /// The index couldn't be updated afterwards, so `git status` may
-        /// show the fix as undone in the index for the files it touched.
+        /// The index couldn't be brought up to date for every file the fix
+        /// touched (staged work of yours there overlaps it, or git failed),
+        /// so `git status` may be off for them. Staged work is never
+        /// discarded.
         stale_index: bool,
     },
     /// Nothing changed.
@@ -60,10 +67,13 @@ pub fn snapshot(dir: &Path) -> Result<Snapshot, GitError> {
     index
         .update_all(["*"], None)
         .ctx("record the checkout's removed files")?;
-    index
-        .write_tree()
-        .map(Snapshot)
-        .ctx("store the checkout's files")
+    let tree = index.write_tree().ctx("store the checkout's files")?;
+    let branch = repo
+        .head()
+        .ok()
+        .filter(git2::Reference::is_branch)
+        .and_then(|h| h.name().ok().map(str::to_owned));
+    Ok(Snapshot { tree, branch })
 }
 
 /// Commits what changed in the checkout at `dir` since `before`, on its
@@ -73,9 +83,9 @@ pub fn snapshot(dir: &Path) -> Result<Snapshot, GitError> {
 /// # Errors
 /// Returns an error when git fails unexpectedly; the edits are then still
 /// in the checkout, uncommitted. Expected refusals are [`Outcome::Kept`].
-pub fn commit_edits(dir: &Path, before: Snapshot, message: &str) -> Result<Outcome, GitError> {
+pub fn commit_edits(dir: &Path, before: &Snapshot, message: &str) -> Result<Outcome, GitError> {
     let after = snapshot(dir)?;
-    if after == before {
+    if after.tree == before.tree {
         return Ok(Outcome::Unchanged);
     }
     let repo = super::open(dir)?;
@@ -84,9 +94,16 @@ pub fn commit_edits(dir: &Path, before: Snapshot, message: &str) -> Result<Outco
     }
     let head = repo.head().ctx("read HEAD")?;
     let branch = head.shorthand().unwrap_or("HEAD").to_owned();
+    // The fix belongs on the branch it was made on, not one checked out
+    // while the agent worked.
+    if head.name().ok() != before.branch.as_deref() {
+        return Ok(Outcome::Kept(format!(
+            "the checkout switched to {branch} while the agent worked"
+        )));
+    }
     let parent = head.peel_to_commit().ctx("read the HEAD commit")?;
-    let old = repo.find_tree(before.0).ctx("read the first snapshot")?;
-    let new = repo.find_tree(after.0).ctx("read the second snapshot")?;
+    let old = repo.find_tree(before.tree).ctx("read the first snapshot")?;
+    let new = repo.find_tree(after.tree).ctx("read the second snapshot")?;
     // With binary contents, so a changed binary file applies like the rest.
     let mut opts = DiffOptions::new();
     opts.show_binary(true);
@@ -130,22 +147,50 @@ pub fn commit_edits(dir: &Path, before: Snapshot, message: &str) -> Result<Outco
     Ok(Outcome::Committed {
         id: short_id(id),
         branch,
-        stale_index: !refresh_index(&repo, &diff, id, &paths),
+        stale_index: !refresh_index(&repo, &diff, (id, &base, &tree), &paths),
     })
 }
 
-/// Brings the index up to date with commit `id` for the `paths` the fix
-/// touched, keeping what was staged there staged. Returns whether it could.
-fn refresh_index(repo: &Repository, diff: &git2::Diff<'_>, id: Oid, paths: &[PathBuf]) -> bool {
+/// Brings the index up to date with commit `id` (tree `fixed`, on top of
+/// tree `base`) for the `paths` the fix touched, keeping what was staged
+/// there staged. Returns whether it could, for every path.
+fn refresh_index(
+    repo: &Repository,
+    diff: &git2::Diff<'_>,
+    (id, base, fixed): (Oid, &Tree<'_>, &Tree<'_>),
+    paths: &[PathBuf],
+) -> bool {
     // The fix applied to the index as it is: other staged hunks stay.
     if repo.apply(diff, ApplyLocation::Index, None).is_ok() {
         return true;
     }
-    // It overlaps staged hunks (or the agent staged its own edits): those
-    // files are reset to the commit instead.
-    repo.find_object(id, None)
-        .and_then(|commit| repo.reset_default(Some(&commit), paths.iter()))
-        .is_ok()
+    // It overlaps what is staged. A path staged as the fix has it (the
+    // agent staged its edit) is right already, and one with nothing staged
+    // is reset to the commit; one with staged work of yours is left as it
+    // is, never discarded, and reported.
+    let Ok(index) = repo.index() else {
+        return false;
+    };
+    let in_tree = |tree: &Tree<'_>, path: &Path| tree.get_path(path).ok().map(|e| e.id());
+    let mut reset = Vec::new();
+    let mut kept = false;
+    for path in paths {
+        let staged = index.get_path(path, 0).map(|e| e.id);
+        if staged == in_tree(fixed, path) {
+            continue;
+        }
+        if staged == in_tree(base, path) {
+            reset.push(path);
+        } else {
+            kept = true;
+        }
+    }
+    let refreshed = reset.is_empty()
+        || repo
+            .find_object(id, None)
+            .and_then(|commit| repo.reset_default(Some(&commit), reset))
+            .is_ok();
+    refreshed && !kept
 }
 
 /// Why edits in `repo` can't become a commit on its branch, if they can't.
@@ -254,7 +299,7 @@ mod tests {
 
         t.write("a.txt", "one\nTWO\nthree\n");
         t.write("new.txt", "added by the agent\n");
-        let outcome = commit_edits(t.path(), before, "fix: shout\n").expect("commit");
+        let outcome = commit_edits(t.path(), &before, "fix: shout\n").expect("commit");
         let id = committed(&outcome);
 
         let head = t
@@ -296,12 +341,71 @@ mod tests {
         index.write().expect("write");
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\n");
-        committed(&commit_edits(t.path(), before, "fix\n").expect("commit"));
+        committed(&commit_edits(t.path(), &before, "fix\n").expect("commit"));
         assert_eq!(
             head_file(&t, "a.txt").as_deref(),
             Some("one\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\n")
         );
         assert_eq!(status(&t), [("a.txt".to_owned(), Status::INDEX_MODIFIED)]);
+    }
+
+    #[test]
+    fn staged_work_the_fix_overlaps_stays_staged_and_is_reported() {
+        let t = repo();
+        t.write("a.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
+        t.commit("longer");
+        // Staged, then undone on disk only: the fix applies to HEAD but
+        // not to the index.
+        t.write("a.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\nmine\n");
+        let mut index = t.repo.index().expect("index");
+        index.add_path(Path::new("a.txt")).expect("stage");
+        index.write().expect("write");
+        let staged = index.get_path(Path::new("a.txt"), 0).expect("entry").id;
+        t.write("a.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
+        let before = snapshot(t.path()).expect("snapshot");
+        t.write("a.txt", "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\neight\n");
+        let outcome = commit_edits(t.path(), &before, "fix\n").expect("commit");
+        assert!(
+            matches!(
+                &outcome,
+                Outcome::Committed {
+                    stale_index: true,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            head_file(&t, "a.txt").as_deref(),
+            Some("one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\neight\n")
+        );
+        let index = t.repo.index().expect("index");
+        assert_eq!(
+            index.get_path(Path::new("a.txt"), 0).expect("entry").id,
+            staged,
+            "never discarded"
+        );
+    }
+
+    #[test]
+    fn a_branch_switched_while_the_agent_works_keeps_the_edits() {
+        let t = repo();
+        let before = snapshot(t.path()).expect("snapshot");
+        let tip = t
+            .repo
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("commit");
+        t.repo.branch("other", &tip, false).expect("branch");
+        t.repo.set_head("refs/heads/other").expect("switch");
+        t.write("a.txt", "changed\n");
+        let outcome = commit_edits(t.path(), &before, "fix\n").expect("commit");
+        assert!(
+            matches!(&outcome, Outcome::Kept(why) if why.contains("switched to other")),
+            "{outcome:?}"
+        );
+        assert_eq!(t.repo.head().expect("head").target(), Some(tip.id()));
     }
 
     #[test]
@@ -312,7 +416,7 @@ mod tests {
         let mut index = t.repo.index().expect("index");
         index.add_path(Path::new("a.txt")).expect("stage");
         index.write().expect("write");
-        committed(&commit_edits(t.path(), before, "fix\n").expect("commit"));
+        committed(&commit_edits(t.path(), &before, "fix\n").expect("commit"));
         assert_eq!(head_file(&t, "a.txt").as_deref(), Some("one\nTWO\nthree\n"));
         assert_eq!(status(&t), []);
     }
@@ -323,7 +427,7 @@ mod tests {
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "one\nTWO\nthree\n");
         std::fs::write(t.repo.path().join("index.lock"), "").expect("lock");
-        let outcome = commit_edits(t.path(), before, "fix\n").expect("commit");
+        let outcome = commit_edits(t.path(), &before, "fix\n").expect("commit");
         assert!(
             matches!(
                 &outcome,
@@ -345,7 +449,7 @@ mod tests {
         let before = snapshot(t.path()).expect("snapshot");
         std::fs::write(t.path().join("logo.bin"), b"\0\x01\x02new").expect("write");
         std::fs::write(t.path().join("added.bin"), b"\0\xff").expect("write");
-        committed(&commit_edits(t.path(), before, "fix: bytes\n").expect("commit"));
+        committed(&commit_edits(t.path(), &before, "fix: bytes\n").expect("commit"));
         let blob = |path: &str| {
             let tree = t.repo.head().expect("head").peel_to_tree().expect("tree");
             let entry = tree.get_path(Path::new(path)).expect("entry");
@@ -362,7 +466,7 @@ mod tests {
         let t = repo();
         let before = snapshot(t.path()).expect("snapshot");
         t.remove("b.txt");
-        committed(&commit_edits(t.path(), before, "fix: drop b\n").expect("commit"));
+        committed(&commit_edits(t.path(), &before, "fix: drop b\n").expect("commit"));
         assert_eq!(head_file(&t, "b.txt"), None);
         assert_eq!(status(&t), []);
     }
@@ -374,7 +478,7 @@ mod tests {
         let tip = t.repo.head().expect("head").target();
         let before = snapshot(t.path()).expect("snapshot");
         assert_eq!(
-            commit_edits(t.path(), before, "fix\n").expect("commit"),
+            commit_edits(t.path(), &before, "fix\n").expect("commit"),
             Outcome::Unchanged
         );
         assert_eq!(t.repo.head().expect("head").target(), tip);
@@ -387,7 +491,7 @@ mod tests {
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "one\nmine, fixed\nthree\n");
         let tip = t.repo.head().expect("head").target();
-        let outcome = commit_edits(t.path(), before, "fix\n").expect("commit");
+        let outcome = commit_edits(t.path(), &before, "fix\n").expect("commit");
         assert!(
             matches!(&outcome, Outcome::Kept(why) if why.contains("overlap")),
             "{outcome:?}"
@@ -407,7 +511,7 @@ mod tests {
         t.write("a.txt", "mine\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "mine\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\n");
-        committed(&commit_edits(t.path(), before, "fix\n").expect("commit"));
+        committed(&commit_edits(t.path(), &before, "fix\n").expect("commit"));
         assert_eq!(
             head_file(&t, "a.txt").as_deref(),
             Some("one\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\n")
@@ -422,7 +526,7 @@ mod tests {
         t.repo.set_head_detached(tip).expect("detach");
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "changed\n");
-        let outcome = commit_edits(t.path(), before, "fix\n").expect("commit");
+        let outcome = commit_edits(t.path(), &before, "fix\n").expect("commit");
         assert!(
             matches!(&outcome, Outcome::Kept(why) if why.contains("detached")),
             "{outcome:?}"
@@ -434,7 +538,7 @@ mod tests {
         let t = repo();
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "changed\n");
-        committed(&commit_edits(t.path(), before, "fix\n").expect("commit"));
+        committed(&commit_edits(t.path(), &before, "fix\n").expect("commit"));
         let head = t
             .repo
             .head()
@@ -451,7 +555,7 @@ mod tests {
             .expect("unset");
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "changed again\n");
-        let outcome = commit_edits(t.path(), before, "fix\n").expect("commit");
+        let outcome = commit_edits(t.path(), &before, "fix\n").expect("commit");
         assert!(
             matches!(&outcome, Outcome::Kept(why) if why.contains("user.name")),
             "{outcome:?}"
@@ -468,7 +572,7 @@ mod tests {
             .expect("set");
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "changed\n");
-        let outcome = commit_edits(t.path(), before, "fix\n").expect("commit");
+        let outcome = commit_edits(t.path(), &before, "fix\n").expect("commit");
         assert!(
             matches!(&outcome, Outcome::Kept(why) if why.contains("signed")),
             "{outcome:?}"
@@ -482,7 +586,7 @@ mod tests {
         std::fs::write(t.repo.path().join("MERGE_HEAD"), format!("{tip}\n")).expect("merge");
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "changed\n");
-        let outcome = commit_edits(t.path(), before, "fix\n").expect("commit");
+        let outcome = commit_edits(t.path(), &before, "fix\n").expect("commit");
         assert!(
             matches!(&outcome, Outcome::Kept(why) if why.contains("in progress")),
             "{outcome:?}"
@@ -494,7 +598,7 @@ mod tests {
         let t = TestRepo::new();
         let before = snapshot(t.path()).expect("snapshot");
         t.write("a.txt", "new\n");
-        let outcome = commit_edits(t.path(), before, "fix\n").expect("commit");
+        let outcome = commit_edits(t.path(), &before, "fix\n").expect("commit");
         assert!(
             matches!(&outcome, Outcome::Kept(why) if why.contains("no commit")),
             "{outcome:?}"
@@ -527,7 +631,7 @@ mod tests {
             .commit(Some("HEAD"), &sig, &sig, "mine\n", &tree, &[&parent])
             .expect("commit");
 
-        committed(&commit_edits(t.path(), before, "fix\n").expect("commit"));
+        committed(&commit_edits(t.path(), &before, "fix\n").expect("commit"));
         let head = t
             .repo
             .head()
