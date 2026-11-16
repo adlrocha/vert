@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use git2::{IndexAddOption, Oid, Repository, RepositoryState};
+use git2::{DiffOptions, IndexAddOption, Oid, Repository, RepositoryState};
 
 use super::{Context, GitError, short_id};
 
@@ -85,14 +85,17 @@ pub fn commit_edits(dir: &Path, before: Snapshot, message: &str) -> Result<Outco
     let parent = head.peel_to_commit().ctx("read the HEAD commit")?;
     let old = repo.find_tree(before.0).ctx("read the first snapshot")?;
     let new = repo.find_tree(after.0).ctx("read the second snapshot")?;
+    // With binary contents, so a changed binary file applies like the rest.
+    let mut opts = DiffOptions::new();
+    opts.show_binary(true);
     let diff = repo
-        .diff_tree_to_tree(Some(&old), Some(&new), None)
+        .diff_tree_to_tree(Some(&old), Some(&new), Some(&mut opts))
         .ctx("compare the snapshots")?;
     let paths = touched(&diff);
     let base = parent.tree().ctx("read the HEAD tree")?;
     let Ok(mut applied) = repo.apply_to_tree(&base, &diff, None) else {
         return Ok(Outcome::Kept(
-            "the edits overlap uncommitted changes the checkout already had".to_owned(),
+            "the edits don't apply on top of HEAD; they likely overlap uncommitted changes the checkout already had".to_owned(),
         ));
     };
     let tree_id = applied.write_tree_to(&repo).ctx("store the fix")?;
@@ -252,6 +255,26 @@ mod tests {
                 ("staged.txt".to_owned(), Status::INDEX_NEW),
             ]
         );
+    }
+
+    #[test]
+    fn commits_binary_files() {
+        let t = repo();
+        std::fs::write(t.path().join("logo.bin"), b"\0\x01\x02old").expect("write");
+        t.commit("binary");
+        let before = snapshot(t.path()).expect("snapshot");
+        std::fs::write(t.path().join("logo.bin"), b"\0\x01\x02new").expect("write");
+        std::fs::write(t.path().join("added.bin"), b"\0\xff").expect("write");
+        committed(&commit_edits(t.path(), before, "fix: bytes\n").expect("commit"));
+        let blob = |path: &str| {
+            let tree = t.repo.head().expect("head").peel_to_tree().expect("tree");
+            let entry = tree.get_path(Path::new(path)).expect("entry");
+            let object = entry.to_object(&t.repo).expect("object");
+            object.as_blob().expect("blob").content().to_vec()
+        };
+        assert_eq!(blob("logo.bin"), b"\0\x01\x02new");
+        assert_eq!(blob("added.bin"), b"\0\xff");
+        assert_eq!(status(&t), []);
     }
 
     #[test]
