@@ -840,6 +840,7 @@ mod render_tests {
         let (t, mut app) = real_app();
         let none = crate::explain::agent::select_editor(crate::explain::agent::Choice::Auto, None);
         app.set_fixer(&none.map(|agent| crate::fix::Fixer {
+            commit: true,
             agent,
             model: None,
             timeout: std::time::Duration::from_secs(1),
@@ -862,6 +863,7 @@ mod render_tests {
     fn the_fix_prompt_warns_when_pi_is_not_kept_in_the_checkout() {
         let (t, mut app) = real_app();
         app.set_fixer(&Ok(crate::fix::Fixer {
+            commit: true,
             agent: crate::explain::agent::Agent::Pi,
             model: None,
             timeout: std::time::Duration::from_secs(1),
@@ -880,6 +882,7 @@ mod render_tests {
         assert!(s.contains("pi, unconfined edits"), "{s}");
         assert!(s.contains("can't be kept inside"), "{s}");
         app.set_fixer(&Ok(crate::fix::Fixer {
+            commit: true,
             agent: crate::explain::agent::Agent::Claude,
             model: None,
             timeout: std::time::Duration::from_secs(1),
@@ -892,6 +895,7 @@ mod render_tests {
     fn the_fix_prompt_and_running_fixes_render() {
         let (t, mut app) = real_app();
         app.set_fixer(&Ok(crate::fix::Fixer {
+            commit: true,
             agent: crate::explain::agent::Agent::Claude,
             model: Some("sonnet".to_owned()),
             timeout: std::time::Duration::from_secs(1),

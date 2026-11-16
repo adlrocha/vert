@@ -4,30 +4,35 @@
 //!
 //! vert sends the agent the change it is looking at, the place the feedback
 //! is about (a file and line, with the hunk around it) and the feedback in
-//! the reviewer's words. The agent edits files and never commits, so its
-//! edits are that checkout's uncommitted changes, which an open diff of them
-//! shows as they are made.
+//! the reviewer's words. The agent edits files and never commits. Once it is
+//! done, vert commits what it changed (and only that) on the checkout's
+//! branch, unless that is turned off or can't be done safely (see
+//! [`crate::git::commit`]); the edits then stay uncommitted.
 
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
 use crate::explain::agent::{self, Access, Agent, Groups};
+use crate::git::commit::{self, Outcome};
 use crate::git::diff::FileDiff;
 use crate::highlight::sanitize;
 
 /// Bumped whenever the prompt changes.
-const PROMPT_VERSION: &str = "vert-fix-2";
+const PROMPT_VERSION: &str = "vert-fix-3";
 /// The line an agent starts its one-line summary with.
 const SUMMARY: &str = "SUMMARY:";
 /// Most characters of an agent's summary repeated to the user.
 const SUMMARY_CHARS: usize = 300;
+/// Most characters of a fix commit's subject line, `fix: ` included: git's
+/// usual width, so logs and pull requests show it whole.
+const SUBJECT_CHARS: usize = 72;
 
 const INSTRUCTIONS: &str = r"A person is reviewing a code change in this repository, in the current directory, and asked you to act on one piece of feedback.
 
 Rules:
 - Do what the feedback asks with the smallest edit that does it. Don't refactor, reformat or touch unrelated code.
-- Edit files in the current directory only. Don't run git commands that commit, stage, stash, reset, check out, clean, push or switch branches: the person reviews your edit as uncommitted changes, next to any they already have.
+- Edit files in the current directory only. Don't run git commands that commit, stage, stash, reset, check out, clean, push or switch branches: the person reviews your edits once you are done, next to any uncommitted work they already have.
 - The files on disk are the source of truth. The excerpt shows where the person was looking when they wrote the feedback; it may be out of date.
 - If the feedback is unclear, wrong, or already addressed, change nothing and say why.
 - End your answer with one line that starts with SUMMARY: and says what you changed, or why you changed nothing.";
@@ -139,6 +144,61 @@ pub fn summary(out: &str) -> String {
     format!("{kept}…")
 }
 
+/// The commit message for `request` fixed by `agent`, which said `summary`:
+/// a `fix:` subject from the summary, the feedback in the body, and the
+/// agent as a co-author when it has an address to credit.
+///
+/// ```
+/// use vert::explain::agent::Agent;
+/// use vert::fix::{Request, message};
+/// let request = Request {
+///     change: "a1b2c3d Add login".into(),
+///     place: Some("src/auth.rs:42".into()),
+///     excerpt: String::new(),
+///     feedback: "Use a named constant".into(),
+/// };
+/// let m = message(&request, &Agent::Claude, "Named the timeout");
+/// assert!(m.starts_with("fix: Named the timeout\n\n"));
+/// assert!(m.contains("Use a named constant"));
+/// assert!(m.ends_with("Co-authored-by: Claude <noreply@anthropic.com>\n"));
+/// ```
+#[must_use]
+pub fn message(request: &Request, agent: &Agent, summary: &str) -> String {
+    let head = format!("fix: {}", summary.trim());
+    let subject = if head.chars().count() <= SUBJECT_CHARS {
+        head
+    } else {
+        let kept: String = head.chars().take(SUBJECT_CHARS - 1).collect();
+        format!("{}…", kept.trim_end())
+    };
+    let mut out = format!("{subject}\n\n");
+    let _ = writeln!(
+        out,
+        "{} acted on this feedback in vert, on {}{}:\n",
+        agent.name(),
+        request.change.trim(),
+        request
+            .place
+            .as_deref()
+            .map_or_else(String::new, |p| format!(" at {p}")),
+    );
+    let _ = writeln!(out, "{}\n", request.feedback.trim());
+    let _ = writeln!(out, "It said: {}", summary.trim());
+    if let Some(who) = agent.co_author() {
+        let _ = write!(out, "\nCo-authored-by: {who}\n");
+    }
+    out
+}
+
+/// What came of a fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Done {
+    /// The agent's one-line summary of what it did.
+    pub summary: String,
+    /// What became of its edits: committed, none, or left uncommitted.
+    pub outcome: Outcome,
+}
+
 /// How to ask for fixes.
 #[derive(Debug, Clone)]
 pub struct Fixer {
@@ -150,6 +210,8 @@ pub struct Fixer {
     pub timeout: Duration,
     /// Excerpt bytes sent; the agent reads the rest itself.
     pub max_excerpt_bytes: usize,
+    /// Whether the agent's edits are committed once it is done.
+    pub commit: bool,
 }
 
 impl Fixer {
@@ -161,11 +223,16 @@ impl Fixer {
     }
 
     /// Asks the agent to act on `request`, editing files in `dir` and
-    /// tracked in `groups`, and returns its one-line summary of what it did.
+    /// tracked in `groups`, then commits its edits when [`Fixer::commit`]
+    /// is on. Returns its one-line summary and what became of the edits.
     ///
     /// # Errors
     /// Returns a message for the user when the agent fails or times out.
-    pub fn fix(&self, request: &Request, dir: &Path, groups: &Groups) -> Result<String, String> {
+    /// Its edits then stay uncommitted.
+    pub fn fix(&self, request: &Request, dir: &Path, groups: &Groups) -> Result<Done, String> {
+        // Taken before the agent starts, so only what changes from here on
+        // is committed; without it the edits stay uncommitted.
+        let before = self.commit.then(|| commit::snapshot(dir));
         // A custom command is the user's own and runs unconfined; vert never
         // configures one for fixes (see `agent::select_editor`), and tests
         // use one to fake an agent.
@@ -178,7 +245,16 @@ impl Fixer {
         };
         let out = agent::run(&self.agent, how, &prompt(request, self.max_excerpt_bytes))
             .map_err(|e| e.to_string())?;
-        Ok(summary(&out))
+        let summary = summary(&out);
+        let outcome = match before {
+            None => Outcome::Kept("committing fixes is off (--no-fix-commit)".to_owned()),
+            Some(Err(e)) => Outcome::Kept(format!("couldn't record the checkout first: {e}")),
+            Some(Ok(before)) => {
+                commit::commit_edits(dir, before, &message(request, &self.agent, &summary))
+                    .unwrap_or_else(|e| Outcome::Kept(crate::jobs::describe(&e)))
+            }
+        };
+        Ok(Done { summary, outcome })
     }
 }
 
@@ -263,6 +339,35 @@ mod tests {
     }
 
     #[test]
+    fn commit_messages_credit_the_feedback_and_the_agent() {
+        let m = message(&request(), &Agent::Claude, " Named the timeout ");
+        assert_eq!(
+            m,
+            "fix: Named the timeout\n\n\
+             claude acted on this feedback in vert, on a1b2c3d Add login at src/auth.rs:42:\n\n\
+             Use a named constant here\n\n\
+             It said: Named the timeout\n\n\
+             Co-authored-by: Claude <noreply@anthropic.com>\n"
+        );
+        let whole = message(
+            &Request {
+                place: None,
+                ..request()
+            },
+            &Agent::Codex,
+            &"word ".repeat(30),
+        );
+        let subject = whole.lines().next().expect("subject");
+        assert_eq!(subject.chars().count(), SUBJECT_CHARS, "{subject}");
+        assert!(subject.ends_with('…'), "{subject}");
+        assert!(whole.contains("on a1b2c3d Add login:\n"), "{whole}");
+        assert!(
+            !whole.contains("Co-authored-by"),
+            "codex has no address to credit"
+        );
+    }
+
+    #[test]
     fn fixes_run_the_agent_in_the_checkout() {
         let dir = tempfile::tempdir().expect("tempdir");
         let fixer = Fixer {
@@ -273,11 +378,15 @@ mod tests {
             model: None,
             timeout: Duration::from_secs(10),
             max_excerpt_bytes: 1 << 10,
+            commit: false,
         };
         assert_eq!(fixer.label(), "--explain-cmd, unconfined");
         assert_eq!(
             fixer.fix(&request(), dir.path(), &Groups::default()),
-            Ok("wrote out.txt".to_owned())
+            Ok(Done {
+                summary: "wrote out.txt".to_owned(),
+                outcome: Outcome::Kept("committing fixes is off (--no-fix-commit)".to_owned()),
+            })
         );
         assert!(dir.path().join("out.txt").exists());
 

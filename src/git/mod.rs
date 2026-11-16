@@ -2,6 +2,7 @@
 //! collide, and removing the ones that are done: worktrees and branches.
 
 pub mod branches;
+pub mod commit;
 pub mod diff;
 pub mod feed;
 pub mod overlap;

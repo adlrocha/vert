@@ -6,8 +6,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, Effect, ExplainView, Focus, Msg, Pane, Status, View};
 use crate::explain::agent::Agent;
 use crate::explain::{Explanation, Note, Ref};
-use crate::fix::{Fixer, Request};
+use crate::fix::{Done, Fixer, Request};
 use crate::git::branches::{Branch, Branches, Worktree};
+use crate::git::commit::Outcome;
 use crate::git::diff::{DiffLine, FileDiff, Hunk, LineKind};
 use crate::git::feed::Entry;
 use crate::git::{FileStat, FileStatus, RepoInfo, Target};
@@ -69,6 +70,7 @@ fn file(path: &str) -> FileDiff {
 
 fn fixer() -> Fixer {
     Fixer {
+        commit: true,
         agent: Agent::Claude,
         model: None,
         timeout: Duration::from_secs(1),
@@ -295,26 +297,59 @@ fn reports_and_one_per_checkout(mut app: App, id: u64) {
     assert_eq!(
         app.update(Msg::Fixed {
             id: id + 100,
-            result: Ok("x".to_owned())
+            result: Ok(done(Outcome::Unchanged))
         }),
         []
     );
     let effects = app.update(Msg::Fixed {
         id,
-        result: Ok("named it LIMIT".to_owned()),
+        result: Ok(done(Outcome::Committed {
+            id: "a1b2c3d".to_owned(),
+            branch: "feat-x".to_owned(),
+        })),
     });
     assert!(effects.contains(&Effect::LoadWorktree), "{effects:?}");
+    assert!(
+        effects.contains(&Effect::LoadCommits),
+        "the fix is a commit: {effects:?}"
+    );
     assert!(effects.contains(&Effect::LoadBranches), "{effects:?}");
     assert_eq!(
         app.notice.as_deref(),
-        Some("Fixed in this checkout: named it LIMIT")
+        Some("Committed a1b2c3d to feat-x: named it LIMIT")
     );
     assert_eq!(app.fix.running, []);
+
+    // Edits left uncommitted, and none at all, say so; neither is a commit.
+    let sent = |app: &mut App, outcome: Outcome| {
+        press(app, KeyCode::Char('f'));
+        typed(app, "again");
+        let (next, _, _) = fix_of(&press(app, KeyCode::Enter));
+        assert_ne!(next, id);
+        let effects = app.update(Msg::Fixed {
+            id: next,
+            result: Ok(done(outcome)),
+        });
+        assert!(!effects.contains(&Effect::LoadCommits), "{effects:?}");
+        next
+    };
+    sent(
+        &mut app,
+        Outcome::Kept("HEAD is \u{1b}[31mdetached".to_owned()),
+    );
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Fixed in this checkout, left uncommitted (HEAD is ·[31mdetached): named it LIMIT")
+    );
+    sent(&mut app, Outcome::Unchanged);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Nothing changed in this checkout: named it LIMIT")
+    );
 
     press(&mut app, KeyCode::Char('f'));
     typed(&mut app, "again");
     let (second, _, _) = fix_of(&press(&mut app, KeyCode::Enter));
-    assert_ne!(second, id);
     app.update(Msg::Fixed {
         id: second,
         result: Err("claude failed: \u{1b}[31mred".to_owned()),
@@ -324,6 +359,14 @@ fn reports_and_one_per_checkout(mut app: App, id: u64) {
         Some("Couldn't fix in this checkout: claude failed: ·[31mred"),
         "escape sequences never reach the terminal"
     );
+}
+
+/// A fix that said "named it LIMIT", with `outcome`.
+fn done(outcome: Outcome) -> Done {
+    Done {
+        summary: "named it LIMIT".to_owned(),
+        outcome,
+    }
 }
 
 #[test]

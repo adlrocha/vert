@@ -403,7 +403,8 @@ fn ask(ctx: &Context, asked: &crate::explain::question::Ask) -> Msg {
 }
 
 /// Asks the configured agent to act on `request`, editing the checkout at
-/// `root` (vert's own when `None`).
+/// `root` (vert's own when `None`), and commits its edits there unless
+/// that is turned off.
 fn fix(ctx: &Context, id: u64, root: Option<&Path>, request: &crate::fix::Request) -> Msg {
     let result = ctx
         .fix
@@ -1223,16 +1224,45 @@ mod tests {
             model: None,
             timeout: Duration::from_secs(10),
             max_excerpt_bytes: 1024,
+            commit: true,
         });
+        // Not a checkout, so there is nothing to commit to.
         let dir = tempfile::tempdir().expect("tempdir");
         let Some(Msg::Fixed { result, .. }) = fix(&c, Some(dir.path().to_path_buf())) else {
             panic!("answered")
         };
-        assert_eq!(result, Ok("wrote it".to_owned()));
+        let done = result.expect("fixed");
+        assert_eq!(done.summary, "wrote it");
+        assert!(
+            matches!(&done.outcome, crate::git::commit::Outcome::Kept(why) if why.contains("couldn't record")),
+            "{:?}",
+            done.outcome
+        );
         assert!(dir.path().join("marker").exists(), "the linked worktree");
         assert!(!t.path().join("marker").exists());
-        fix(&c, None);
+
+        let mut config = t.repo.config().expect("config");
+        config.set_str("user.name", "Reviewer").expect("name");
+        config
+            .set_str("user.email", "reviewer@example.com")
+            .expect("email");
+        let Some(Msg::Fixed { result, .. }) = fix(&c, None) else {
+            panic!("answered")
+        };
         assert!(t.path().join("marker").exists(), "vert's own checkout");
+        let crate::git::commit::Outcome::Committed { id, .. } = result.expect("fixed").outcome
+        else {
+            panic!("committed")
+        };
+        let head = t
+            .repo
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("commit");
+        assert!(head.id().to_string().starts_with(&id));
+        assert_eq!(head.summary().ok().flatten(), Some("fix: wrote it"));
+        assert!(head.tree().expect("tree").get_name("marker").is_some());
     }
 
     #[test]

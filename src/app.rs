@@ -498,8 +498,9 @@ pub enum Msg {
     Fixed {
         /// The request (see [`Effect::Fix`]).
         id: u64,
-        /// What the agent said it did, or why it failed.
-        result: Result<String, String>,
+        /// What the agent said it did and what became of its edits, or
+        /// why it failed.
+        result: Result<crate::fix::Done, String>,
     },
 }
 
