@@ -140,6 +140,15 @@ impl Entry {
         }
     }
 
+    /// Uncommitted changes not yet scanned: their files and totals come
+    /// with their diff (see [`Entry::relabel`]).
+    #[must_use]
+    pub fn uncommitted() -> Self {
+        let mut entry = Self::blank(Target::WorkingTree);
+        "Uncommitted changes".clone_into(&mut entry.summary);
+        entry
+    }
+
     /// Makes this the uncommitted changes of the linked worktree `name` at
     /// `path`: the id, summary and checkout such an entry has.
     pub fn for_linked_worktree(&mut self, path: &Path, name: &str) {
@@ -325,8 +334,8 @@ pub fn load_worktree(
         return Ok(None);
     }
     let workdir = super::workdir(repo)?;
-    let mut entry = Entry::new(Target::WorkingTree, files, labeler);
-    "Uncommitted changes".clone_into(&mut entry.summary);
+    let mut entry = Entry::uncommitted();
+    entry.relabel(files, labeler);
     entry.time = entry
         .files
         .iter()

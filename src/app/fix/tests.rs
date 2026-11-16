@@ -993,11 +993,11 @@ fn c_opens_what_the_last_fix_changed() {
         app.notice.as_deref(),
         Some("The last fix in this checkout changed nothing")
     );
-    // Uncommitted edits open as the checkout's uncommitted changes.
-    assert_eq!(finish(&mut app, None, Outcome::Kept("why".to_owned())), []);
+    // Uncommitted edits open as the checkout's uncommitted changes, read
+    // from disk even before a scan has seen them.
     assert_eq!(
-        app.notice.as_deref(),
-        Some("this checkout has no uncommitted changes")
+        opened(&finish(&mut app, None, Outcome::Kept("why".to_owned()))),
+        Entry::uncommitted()
     );
     let mut dirty = Entry::blank(Target::WorkingTree);
     dirty.summary = "Uncommitted changes".to_owned();

@@ -11,6 +11,7 @@ use super::fix::{ConcernFix, concern_key};
 use super::{App, Effect, Focus, ListPos, View, half_page, max_scroll};
 use crate::explain::question::{Ask, Question};
 use crate::explain::{Answer, Diagram, Explainer, Explanation, Note, Ref, diff_key, tree};
+use crate::git::commit::Outcome;
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
 use crate::highlight::sanitize;
@@ -573,12 +574,12 @@ impl App {
     }
 
     /// The diff of `entry` for reload `reload` came: the explain view that
-    /// asked for it (`r`)
-    /// explains it, under the key of the diff as it is now. The questions
-    /// asked about it stay with it when it is unchanged; when a fix changed
-    /// it, they stay with the old diff, as they are about that code. When
-    /// the change is empty now or can't be read, the view keeps what it
-    /// showed and says why.
+    /// asked for it (`r`) explains it, under the key of the diff as it is
+    /// now. The answered questions stay with it when it is unchanged; when a
+    /// fix changed it, they stay with the old diff, as they are about that
+    /// code, while one still being answered joins the new explanation (see
+    /// [`App::on_answered`]). When the change is empty now or can't be read,
+    /// the view keeps what it showed and says why.
     pub(super) fn on_reloaded(
         &mut self,
         reload: u64,
@@ -608,7 +609,12 @@ impl App {
                 }
                 // A failed load says so itself.
                 if result.is_ok() {
-                    self.notice = Some(if self.fix.last.is_some() {
+                    // `c` only has something to open after a fix that
+                    // changed something.
+                    let fixed = self.fix.last.as_ref().is_some_and(|l| {
+                        matches!(l.outcome, Ok(Outcome::Committed { .. } | Outcome::Kept(_)))
+                    });
+                    self.notice = Some(if fixed {
                         "Nothing to explain again: the change is empty now (c shows the last fix)"
                             .to_owned()
                     } else {
@@ -635,6 +641,9 @@ impl App {
         v.key = key;
         v.entry = entry.clone();
         v.files.clone_from(&files);
+        // Waiting for the answer about the diff it now holds, even if the
+        // old one came meanwhile.
+        v.status = Status::Asking(self.now);
         v.pos = ListPos::default();
         v.target = 0;
         v.scroll = 0;
@@ -1347,6 +1356,12 @@ mod tests {
         let (mut a, old) = explained();
         a.explain.questioning.insert(old, 0);
         let (reload, entry) = reload_of(&mut a);
+        // The old diff's explanation lands while the reload is in flight.
+        a.update(Msg::Explained {
+            key: old,
+            result: Ok(answer(false)),
+        });
+        assert!(matches!(view(&a).status, Status::Ready(..)));
         let effects = a.update(Msg::Reloaded {
             reload,
             entry,
@@ -1354,6 +1369,10 @@ mod tests {
         });
         let new = asked(&effects, true);
         assert_ne!(new, old);
+        assert!(
+            matches!(view(&a).status, Status::Asking(_)),
+            "waiting for the answer about the diff it now holds"
+        );
         // An explanation of the old diff landing late is superseded.
         a.notice = None;
         a.update(Msg::Explained {
@@ -1564,11 +1583,26 @@ mod tests {
             a.notice.as_deref(),
             Some("Nothing to explain again: the change is empty now")
         );
-        // After a fix (one that committed all of it, say), `c` shows it.
+        // After a fix that changed nothing, `c` has nothing to show.
         a.fix.last = Some(crate::app::Finished {
             root: None,
             checkout: "this checkout".to_owned(),
             outcome: Ok(crate::git::commit::Outcome::Unchanged),
+        });
+        reload(&mut a, Ok(Vec::new()));
+        assert_eq!(
+            a.notice.as_deref(),
+            Some("Nothing to explain again: the change is empty now")
+        );
+        // After one that committed all of it, say, `c` shows it.
+        a.fix.last = Some(crate::app::Finished {
+            root: None,
+            checkout: "this checkout".to_owned(),
+            outcome: Ok(crate::git::commit::Outcome::Committed {
+                id: git2::Oid::ZERO_SHA1,
+                branch: "main".to_owned(),
+                stale_index: false,
+            }),
         });
         reload(&mut a, Ok(Vec::new()));
         assert_eq!(

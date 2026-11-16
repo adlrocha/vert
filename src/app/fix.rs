@@ -526,7 +526,14 @@ impl App {
             }
             Ok(Outcome::Kept(_)) => {
                 let dirty = match &last.root {
-                    None => self.feed.worktree.clone(),
+                    // Its files and totals come with the diff, read from
+                    // disk, even before a scan has seen the fix's edits.
+                    None => Some(
+                        self.feed
+                            .worktree
+                            .clone()
+                            .unwrap_or_else(Entry::uncommitted),
+                    ),
                     // The last scan may predate the fix's edits, and linked
                     // worktrees aren't watched: the diff is read from disk
                     // as it opens either way.
@@ -540,7 +547,7 @@ impl App {
                         .map(|w| {
                             w.dirty.clone().unwrap_or_else(|| {
                                 // Its files and totals come with the diff.
-                                let mut e = Entry::blank(Target::WorkingTree);
+                                let mut e = Entry::uncommitted();
                                 e.for_linked_worktree(root, &w.name);
                                 e
                             })

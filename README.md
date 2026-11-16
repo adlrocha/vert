@@ -239,8 +239,9 @@ read from the cache. The explanation and the newest earlier answers are
 replayed up to `--explain-max-diff-kb`. Answers appear in the outline as `Q1`,
 `Q2`, …, and their code pointers jump to the diff like the steps' do.
 Questions are kept with the change: reopening it, or pressing `r` for a new
-explanation, keeps them. When a fix has changed the code since, the questions
-stay with the old code they were about.
+explanation, keeps them. When a fix has changed the code since, answered
+questions stay with the old code they were about; a question the agent is
+still answering when you press `r` joins the new explanation instead.
 
 **Explaining again.** `r` loads the change as it is now and explains that:
 uncommitted work as it is on disk, and a branch at its current tip, so a fix
