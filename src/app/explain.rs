@@ -7,11 +7,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::fix::{ConcernFix, concern_key};
+use super::fix::{ConcernFix, Finished, concern_key};
 use super::{App, Effect, Focus, ListPos, View, half_page, max_scroll};
 use crate::explain::question::{Ask, Question};
 use crate::explain::{Answer, Diagram, Explainer, Explanation, Note, Ref, diff_key, tree};
-use crate::git::commit::Outcome;
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
 use crate::highlight::sanitize;
@@ -316,10 +315,20 @@ impl ExplainState {
         self.moved.remove(&new);
         self.moved.retain(|from, to| from != to);
         self.moved.insert(old, new);
+        // Concerns keep their fix's status, by `concern_key`, on the new
+        // diff (one the new answer no longer raises just shows none).
+        if let Some(fixes) = self.fixes.get(&old).cloned() {
+            let carried = self.fixes.entry(new).or_default();
+            for (concern, fix) in fixes {
+                carried.entry(concern).or_insert(fix);
+            }
+        }
     }
 
     /// Records how the fix asked for `concerns` of the diff `key` stands.
+    /// For a diff explained again since, the status goes where its view is.
     pub(super) fn set_concern_fixes(&mut self, key: u64, concerns: &[String], fix: &ConcernFix) {
+        let key = self.moved.get(&key).copied().unwrap_or(key);
         let fixes = self.fixes.entry(key).or_default();
         for concern in concerns {
             fixes.insert(concern.clone(), fix.clone());
@@ -611,9 +620,7 @@ impl App {
                 if result.is_ok() {
                     // `c` only has something to open after a fix that
                     // changed something.
-                    let fixed = self.fix.last.as_ref().is_some_and(|l| {
-                        matches!(l.outcome, Ok(Outcome::Committed { .. } | Outcome::Kept(_)))
-                    });
+                    let fixed = self.fix.last.as_ref().is_some_and(Finished::changed);
                     self.notice = Some(if fixed {
                         "Nothing to explain again: the change is empty now (c shows the last fix)"
                             .to_owned()
@@ -1401,6 +1408,25 @@ mod tests {
         // Back to diff 1: it is current again, the others lead to it.
         s.moved_to(3, 1);
         assert_eq!(s.moved, [(2, 1), (3, 1)].into());
+    }
+
+    #[test]
+    fn a_concern_s_fix_status_follows_its_view_to_a_new_diff() {
+        let mut s = ExplainState::default();
+        let concern = ["Off by one".to_owned()];
+        s.set_concern_fixes(1, &concern, &ConcernFix::Fixing { since: 5 });
+        s.moved_to(1, 2);
+        assert_eq!(
+            s.concern_fix(2, "Off by one"),
+            Some(&ConcernFix::Fixing { since: 5 }),
+            "still being fixed, so still can't be marked"
+        );
+        // The fix, sent for the old diff, finishes on the new one.
+        s.set_concern_fixes(1, &concern, &ConcernFix::Failed("boom".to_owned()));
+        assert_eq!(
+            s.concern_fix(2, "Off by one"),
+            Some(&ConcernFix::Failed("boom".to_owned()))
+        );
     }
 
     #[test]

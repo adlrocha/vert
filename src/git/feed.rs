@@ -282,7 +282,12 @@ pub fn load_commits_cached(
     Ok(entries)
 }
 
-fn commit_entry(repo: &Repository, oid: Oid, labeler: &Labeler) -> Result<Entry, GitError> {
+/// The entry of commit `oid` in `repo`: its summary, body, author, time
+/// and changed files.
+///
+/// # Errors
+/// Returns an error when the commit or its changes can't be read.
+pub fn commit_entry(repo: &Repository, oid: Oid, labeler: &Labeler) -> Result<Entry, GitError> {
     let commit = repo.find_commit(oid).ctx("read commit")?;
     let files = file_stats(repo, Target::Commit(oid))?;
     let mut entry = Entry::new(Target::Commit(oid), files, labeler);

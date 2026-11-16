@@ -504,9 +504,18 @@ fn load_diff(entry: &mut Entry, ctx: &Context) -> Result<Vec<git::diff::FileDiff
         entry.relabel(files.iter().map(|f| f.stat.clone()).collect(), &ctx.labeler);
         return Ok(files);
     }
-    let files = git::open(ctx.dir(entry.root.as_deref()))
-        .and_then(|repo| git::diff::load(&repo, entry.target))
-        .map_err(|e| describe(&e))?;
+    let repo = git::open(ctx.dir(entry.root.as_deref())).map_err(|e| describe(&e))?;
+    // A commit vert only knows by id (a fix's, made on a branch the feed
+    // doesn't walk) is described from the commit itself.
+    if let Target::Commit(oid) = entry.target
+        && entry.summary.is_empty()
+    {
+        let mut known =
+            git::feed::commit_entry(&repo, oid, &ctx.labeler).map_err(|e| describe(&e))?;
+        known.root = entry.root.take();
+        *entry = known;
+    }
+    let files = git::diff::load(&repo, entry.target).map_err(|e| describe(&e))?;
     // Uncommitted changes move: the entry says what they are now.
     if entry.target == Target::WorkingTree {
         entry.relabel(files.iter().map(|f| f.stat.clone()).collect(), &ctx.labeler);
@@ -627,6 +636,25 @@ mod tests {
             panic!("diff")
         };
         assert_eq!(diff[0].stat.path, "src/main.rs");
+
+        // A commit known only by id is described from the commit.
+        let Some(Msg::Diff {
+            entry: described,
+            result: Ok(_),
+            ..
+        }) = run(
+            Effect::LoadDiff {
+                entry: Box::new(Entry::blank(commits[0].target)),
+                refresh: false,
+                file: None,
+            },
+            &c,
+        )
+        else {
+            panic!("commit diff")
+        };
+        assert_eq!(described.summary, commits[0].summary);
+        assert_eq!(described.files, commits[0].files);
 
         // An entry that doesn't know its files yet learns them.
         let Some(Msg::Reloaded {

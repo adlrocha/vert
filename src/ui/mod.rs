@@ -255,10 +255,10 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("⏎", "go to the code"),
             ("J K", "scroll"),
             ("a", "ask a follow-up question"),
-            ("r", "explain the change again, as it is now"),
+            ("r", "explain it as it is now"),
             ("space", "mark a concern to fix"),
-            ("f", "fix the marked concerns, or the selected pointer"),
-            ("c", "see what the last fix changed"),
+            ("f", "fix marked, else selected"),
+            ("c", "see the last fix"),
         ],
     ),
     (

@@ -51,6 +51,14 @@ pub enum Outcome {
     Kept(String),
 }
 
+impl Outcome {
+    /// Whether the edits changed anything: a commit, or uncommitted edits.
+    #[must_use]
+    pub const fn changed(&self) -> bool {
+        !matches!(self, Self::Unchanged)
+    }
+}
+
 /// Records the files of the checkout at `dir` as a tree, without touching
 /// its index.
 ///

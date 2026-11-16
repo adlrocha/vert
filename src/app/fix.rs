@@ -85,6 +85,15 @@ pub struct Finished {
     pub outcome: Result<Outcome, String>,
 }
 
+impl Finished {
+    /// Whether the fix changed anything there is to show (`c`): not when
+    /// it changed nothing, nor when the agent failed.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.outcome.as_ref().is_ok_and(Outcome::changed)
+    }
+}
+
 /// Feedback being written, before it goes to the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
@@ -445,7 +454,7 @@ impl App {
         // before the agent's words, which may be too long for the footer.
         // With nothing changed, or a failed agent, there is no fix for `c`
         // to show.
-        let shown = matches!(&result, Ok(d) if d.outcome != Outcome::Unchanged);
+        let shown = self.fix.last.as_ref().is_some_and(Finished::changed);
         let hint = match self.views.last() {
             Some(View::Explain(_)) if !shown => " (r explain again)",
             Some(View::Explain(_)) => " (c changes, r explain again)",
@@ -498,67 +507,65 @@ impl App {
             self.notice = Some("No fix has finished yet".to_owned());
             return Vec::new();
         };
-        let entry = match &last.outcome {
-            Err(_) => {
-                self.notice = Some(format!(
+        if !last.changed() {
+            self.notice = Some(if last.outcome.is_err() {
+                format!(
                     "The last fix in {} failed: there is nothing of it to show",
                     last.checkout
-                ));
-                return Vec::new();
-            }
-            Ok(Outcome::Unchanged) => {
-                self.notice = Some(format!("The last fix in {} changed nothing", last.checkout));
-                return Vec::new();
-            }
-            Ok(Outcome::Committed { id, .. }) => {
-                let id = *id;
-                let known = self
-                    .feed
-                    .commits
-                    .iter()
-                    .find(|e| e.target == Target::Commit(id))
-                    .cloned();
-                known.unwrap_or_else(|| {
-                    let mut entry = Entry::blank(Target::Commit(id));
-                    entry.root.clone_from(&last.root);
-                    entry
-                })
-            }
-            Ok(Outcome::Kept(_)) => {
-                let dirty = match &last.root {
-                    // Its files and totals come with the diff, read from
-                    // disk, even before a scan has seen the fix's edits.
-                    None => Some(
-                        self.feed
-                            .worktree
-                            .clone()
-                            .unwrap_or_else(Entry::uncommitted),
-                    ),
-                    // The last scan may predate the fix's edits, and linked
-                    // worktrees aren't watched: the diff is read from disk
-                    // as it opens either way.
-                    Some(root) => self
-                        .branches
-                        .list
-                        .branches
-                        .iter()
-                        .filter_map(|b| b.worktree.as_ref())
-                        .find(|w| &w.path == root)
-                        .map(|w| {
-                            w.dirty.clone().unwrap_or_else(|| {
-                                // Its files and totals come with the diff.
-                                let mut e = Entry::uncommitted();
-                                e.for_linked_worktree(root, &w.name);
-                                e
-                            })
-                        }),
-                };
-                let Some(entry) = dirty else {
-                    self.notice = Some(format!("{} has no uncommitted changes", last.checkout));
-                    return Vec::new();
-                };
+                )
+            } else {
+                format!("The last fix in {} changed nothing", last.checkout)
+            });
+            return Vec::new();
+        }
+        let entry = if let Ok(Outcome::Committed { id, .. }) = &last.outcome {
+            let id = *id;
+            let known = self
+                .feed
+                .commits
+                .iter()
+                .find(|e| e.target == Target::Commit(id))
+                .cloned();
+            known.unwrap_or_else(|| {
+                let mut entry = Entry::blank(Target::Commit(id));
+                entry.root.clone_from(&last.root);
                 entry
-            }
+            })
+        } else {
+            // Uncommitted edits (the rest changed nothing, said above).
+            let dirty = match &last.root {
+                // Its files and totals come with the diff, read from
+                // disk, even before a scan has seen the fix's edits.
+                None => Some(
+                    self.feed
+                        .worktree
+                        .clone()
+                        .unwrap_or_else(Entry::uncommitted),
+                ),
+                // The last scan may predate the fix's edits, and linked
+                // worktrees aren't watched: the diff is read from disk
+                // as it opens either way.
+                Some(root) => self
+                    .branches
+                    .list
+                    .branches
+                    .iter()
+                    .filter_map(|b| b.worktree.as_ref())
+                    .find(|w| &w.path == root)
+                    .map(|w| {
+                        w.dirty.clone().unwrap_or_else(|| {
+                            // Its files and totals come with the diff.
+                            let mut e = Entry::uncommitted();
+                            e.for_linked_worktree(root, &w.name);
+                            e
+                        })
+                    }),
+            };
+            let Some(entry) = dirty else {
+                self.notice = Some(format!("{} has no uncommitted changes", last.checkout));
+                return Vec::new();
+            };
+            entry
         };
         vec![Effect::LoadDiff {
             entry: Box::new(entry),

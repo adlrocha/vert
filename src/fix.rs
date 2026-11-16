@@ -1,10 +1,12 @@
-//! Fixes: a coding agent already set up on the machine acts on one piece of
-//! review feedback, editing files in the checkout of the line of work under
+//! Fixes: a coding agent already set up on the machine acts on review
+//! feedback, editing files in the checkout of the line of work under
 //! review.
 //!
-//! vert sends the agent the change it is looking at, the place the feedback
-//! is about (a file and line, with the hunk around it) and the feedback in
-//! the reviewer's words. The agent edits files and never commits. Once it is
+//! vert sends the agent the change it is looking at and the feedback in the
+//! reviewer's words: either one request with the place it is about (a file
+//! and line, with the hunk around it), or several concerns from an
+//! explanation as a numbered list, each with the places it points at, and
+//! the hunks there file by file (see [`concerns_request`]). The agent edits files and never commits. Once it is
 //! done, vert commits what it changed (and only that) on the checkout's
 //! branch, unless that is turned off or can't be done safely (see
 //! [`crate::git::commit`]); the edits then stay uncommitted.
