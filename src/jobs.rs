@@ -195,6 +195,16 @@ fn diff_message(mut entry: Box<Entry>, refresh: bool, file: Option<String>, ctx:
     }
 }
 
+/// Loads `entry`'s diff for the explanation reload `reload`.
+fn reload_message(reload: u64, mut entry: Box<Entry>, ctx: &Context) -> Msg {
+    let result = load_diff(&mut entry, ctx);
+    Msg::Reloaded {
+        reload,
+        entry,
+        result,
+    }
+}
+
 /// Finds where the lines of work in `list` collide.
 fn find_overlaps(
     list: &git::branches::Branches,
@@ -261,6 +271,7 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
             refresh,
             file,
         } => diff_message(entry, refresh, file, ctx),
+        Effect::ReloadDiff { reload, entry } => reload_message(reload, entry, ctx),
         Effect::LoadBranches => {
             let mut cache = ctx
                 .branch_cache
@@ -601,7 +612,7 @@ mod tests {
             ..
         }) = run(
             Effect::LoadDiff {
-                entry: Box::new(wt),
+                entry: Box::new(wt.clone()),
                 refresh: true,
                 file: None,
             },
@@ -609,6 +620,22 @@ mod tests {
         )
         else {
             panic!("diff")
+        };
+        assert_eq!(diff[0].stat.path, "src/main.rs");
+
+        let Some(Msg::Reloaded {
+            reload: 7,
+            result: Ok(diff),
+            ..
+        }) = run(
+            Effect::ReloadDiff {
+                reload: 7,
+                entry: Box::new(wt),
+            },
+            &c,
+        )
+        else {
+            panic!("reloaded diff")
         };
         assert_eq!(diff[0].stat.path, "src/main.rs");
     }

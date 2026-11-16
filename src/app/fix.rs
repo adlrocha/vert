@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Effect, Focus, Item, View, concern_at, delete_word};
-use crate::explain::{Explanation, Note, Ref};
-use crate::fix::{Done, Fixer, Request, excerpt};
+use crate::explain::{Note, Ref};
+use crate::fix::{Done, Fixer, Request, excerpt, place};
 use crate::git::Target;
 use crate::git::branches::Branch;
 use crate::git::commit::Outcome;
@@ -223,10 +223,7 @@ impl App {
         text: String,
         concerns: Option<Concerns>,
     ) {
-        let place = file.map(|f| match line {
-            Some(line) => format!("{}:{line}", f.stat.path),
-            None => f.stat.path.clone(),
-        });
+        let place = file.map(|f| place(&f.stat.path, line));
         let excerpt = file.map(|f| excerpt(f, hunk)).unwrap_or_default();
         self.start_draft(entry, place, excerpt, text, concerns);
     }
@@ -318,7 +315,8 @@ impl App {
             && !v.marked.is_empty()
         {
             let marked: Vec<usize> = v.marked.iter().copied().collect();
-            let (text, excerpt) = concerns_request(e, &marked, &v.files);
+            let notes: Vec<&Note> = marked.iter().filter_map(|&i| e.concerns.get(i)).collect();
+            let (text, excerpt) = crate::fix::concerns_request(&notes, &v.files);
             let texts = marked
                 .iter()
                 .filter_map(|&i| e.concerns.get(i))
@@ -444,10 +442,12 @@ impl App {
         });
         // In an explanation, the keys to see the fix and explain again come
         // before the agent's words, which may be too long for the footer.
-        let hint = if matches!(self.views.last(), Some(View::Explain(_))) {
-            " (c changes, r explain again)"
-        } else {
-            ""
+        // With nothing changed there is no fix for `c` to show.
+        let unchanged = matches!(&result, Ok(d) if d.outcome == Outcome::Unchanged);
+        let hint = match self.views.last() {
+            Some(View::Explain(_)) if unchanged => " (r explain again)",
+            Some(View::Explain(_)) => " (c changes, r explain again)",
+            _ => "",
         };
         self.notice = Some(match result {
             Ok(Done { summary, outcome }) => match outcome {
@@ -535,41 +535,6 @@ impl App {
             file: None,
         }]
     }
-}
-
-/// The feedback and excerpt asking to fix the concerns `marked` of `e`,
-/// whose diff is `files`: the concerns as a numbered list, each with the
-/// places it points at, and the hunks there.
-fn concerns_request(e: &Explanation, marked: &[usize], files: &[FileDiff]) -> (String, String) {
-    let mut text =
-        "Deal with each of these concerns a reviewer raised about the change:\n".to_owned();
-    let mut shown: Vec<(&str, Option<usize>)> = Vec::new();
-    let mut excerpts = String::new();
-    for (n, note) in marked.iter().filter_map(|&i| e.concerns.get(i)).enumerate() {
-        let _ = write!(text, "\n{}. {}", n + 1, note.text.trim());
-        let places: Vec<String> = note
-            .refs
-            .iter()
-            .map(|r| {
-                let file = files.iter().find(|f| f.stat.path == r.path);
-                let line = file
-                    .zip(r.hunk)
-                    .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
-                if let Some(f) = file
-                    && !shown.contains(&(r.path.as_str(), r.hunk))
-                {
-                    shown.push((r.path.as_str(), r.hunk));
-                    let _ = writeln!(excerpts, "diff --git a/{0} b/{0}", r.path);
-                    excerpts.push_str(&excerpt(f, r.hunk));
-                }
-                line.map_or_else(|| r.path.clone(), |l| format!("{}:{l}", r.path))
-            })
-            .collect();
-        if !places.is_empty() {
-            let _ = write!(text, " (at {})", places.join(", "));
-        }
-    }
-    (text, excerpts)
 }
 
 #[cfg(test)]

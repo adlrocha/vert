@@ -37,7 +37,7 @@ pub const EXPLAIN_HINTS: Hints = &[
 pub struct ConcernMarks<'a> {
     /// Concerns marked with `space`.
     pub marked: &'a BTreeSet<usize>,
-    /// Fixes asked for concerns of this diff, by concern text.
+    /// Fixes asked for concerns of this diff, by [`concern_key`].
     pub fixes: Option<&'a BTreeMap<String, ConcernFix>>,
     /// The time now (Unix seconds), for how long a fix has run.
     pub now: i64,

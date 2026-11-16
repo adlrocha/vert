@@ -884,6 +884,18 @@ fn the_selected_concern_alone_is_tracked_and_failures_are_kept() {
         "its edits, if any, are uncommitted"
     );
 
+    // Nothing changed: there is no fix for `c` to show.
+    press(&mut app, KeyCode::Char('f'));
+    let (id, _, _) = fix_of(&press(&mut app, KeyCode::Enter));
+    app.update(Msg::Fixed {
+        id,
+        result: Ok(done(Outcome::Unchanged)),
+    });
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Nothing changed in this checkout (r explain again): named it LIMIT")
+    );
+
     // Away from an explanation, the notice has no keys to offer.
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('f'));

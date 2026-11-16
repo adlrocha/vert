@@ -276,9 +276,9 @@ For the full output, run the command from the table above in a terminal.
 
 Press `f` in a diff and write what should change. The coding agent then
 acts on it in the checkout the change belongs to, while you keep
-reviewing. The header shows `fixing in <checkout>` and how long it has been
-running until it is done, and
-the footer shows the agent's one-line summary of what it changed and the
+reviewing. While one fix runs, the header shows `fixing in <checkout>`
+and how long it has been running until it is done (with several, how
+many), and the footer shows the agent's one-line summary of what it changed and the
 commit it became, for example `Committed a1b2c3d to feat-x: …`.
 
 **Where the fix shows up.** The agent edits files and never commits. While

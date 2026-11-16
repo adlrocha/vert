@@ -455,6 +455,15 @@ pub enum Msg {
         /// The file to start on, if not the first.
         file: Option<String>,
     },
+    /// The diff an explanation asked again (`r`) reloads was loaded.
+    Reloaded {
+        /// Which reload it answers: [`Reload::id`].
+        reload: u64,
+        /// Change the diff belongs to.
+        entry: Box<Entry>,
+        /// Outcome.
+        result: Result<Vec<FileDiff>, String>,
+    },
     /// A file for the viewer was read.
     File {
         /// Path relative to the repository.
@@ -537,6 +546,14 @@ pub enum Effect {
         refresh: bool,
         /// The file to start on, if not the first.
         file: Option<String>,
+    },
+    /// Load the diff of an entry for an explanation asked again (`r`); it
+    /// also refreshes the open detail view.
+    ReloadDiff {
+        /// Which reload this is: [`Reload::id`].
+        reload: u64,
+        /// The change.
+        entry: Box<Entry>,
     },
     /// Read a file for the viewer.
     OpenFile {
@@ -767,15 +784,21 @@ impl App {
                 refresh,
                 file,
             } => {
-                // A reload may be an explanation asked again.
-                let effects = if refresh {
-                    self.on_reloaded(&entry, &result)
-                } else {
-                    Vec::new()
-                };
                 match result {
                     Ok(files) if refresh => self.refresh_detail(*entry, files),
                     Ok(files) => self.open_detail(*entry, files, file.as_deref()),
+                    Err(e) => self.notice = Some(format!("Could not load diff: {e}")),
+                }
+                Vec::new()
+            }
+            Msg::Reloaded {
+                reload,
+                entry,
+                result,
+            } => {
+                let effects = self.on_reloaded(reload, &entry, &result);
+                match result {
+                    Ok(files) => self.refresh_detail(*entry, files),
                     Err(e) => self.notice = Some(format!("Could not load diff: {e}")),
                 }
                 effects

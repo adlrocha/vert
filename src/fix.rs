@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::explain::Note;
 use crate::explain::agent::{self, Access, Agent, Groups};
 use crate::git::commit::{self, Outcome};
 use crate::git::diff::FileDiff;
@@ -43,13 +44,63 @@ Rules:
 pub struct Request {
     /// The change under review, as the person sees it: `"a1b2c3d Add login"`.
     pub change: String,
-    /// Where the feedback points: `"src/auth.rs:42"`, a file, or `None`
-    /// for the change as a whole.
+    /// Where the feedback points (see [`place`]): `"src/auth.rs:42"`, a
+    /// file, or `None` for the change as a whole, as for several concerns.
     pub place: Option<String>,
-    /// The hunk around that place, in diff form; empty when there is none.
+    /// The hunk around that place, in diff form, or for several concerns
+    /// (see [`concerns_request`]) each hunk they point at under its file's
+    /// `diff --git` header; empty when there is none.
     pub excerpt: String,
     /// The feedback, in the person's words.
     pub feedback: String,
+}
+
+/// A place in the change as the agent is told it: `path:line`, or the
+/// path alone for a whole file.
+///
+/// ```
+/// assert_eq!(vert::fix::place("src/a.rs", Some(42)), "src/a.rs:42");
+/// assert_eq!(vert::fix::place("src/a.rs", None), "src/a.rs");
+/// ```
+#[must_use]
+pub fn place(path: &str, line: Option<u32>) -> String {
+    line.map_or_else(|| path.to_owned(), |l| format!("{path}:{l}"))
+}
+
+/// The feedback and excerpt asking to fix several `concerns` of a change
+/// whose diff is `files`: the concerns as a numbered list, each with the
+/// places it points at, and each hunk there once, under its file's header.
+#[must_use]
+pub fn concerns_request(concerns: &[&Note], files: &[FileDiff]) -> (String, String) {
+    let mut text =
+        "Deal with each of these concerns a reviewer raised about the change:\n".to_owned();
+    let mut shown: Vec<(&str, Option<usize>)> = Vec::new();
+    let mut excerpts = String::new();
+    for (n, note) in concerns.iter().enumerate() {
+        let _ = write!(text, "\n{}. {}", n + 1, note.text.trim());
+        let places: Vec<String> = note
+            .refs
+            .iter()
+            .map(|r| {
+                let file = files.iter().find(|f| f.stat.path == r.path);
+                let line = file
+                    .zip(r.hunk)
+                    .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
+                if let Some(f) = file
+                    && !shown.contains(&(r.path.as_str(), r.hunk))
+                {
+                    shown.push((r.path.as_str(), r.hunk));
+                    let _ = writeln!(excerpts, "diff --git a/{0} b/{0}", r.path);
+                    excerpts.push_str(&excerpt(f, r.hunk));
+                }
+                place(&r.path, line)
+            })
+            .collect();
+        if !places.is_empty() {
+            let _ = write!(text, " (at {})", places.join(", "));
+        }
+    }
+    (text, excerpts)
 }
 
 /// The hunk `hunk` of `file` in diff form (`+`, `-` and ` ` prefixes), or
@@ -331,6 +382,50 @@ mod tests {
             "@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n@@ -9 +9 @@\n-x\n+y\n"
         );
         assert_eq!(excerpt(&files[0], Some(5)), "");
+    }
+
+    #[test]
+    fn several_concerns_go_as_a_numbered_list_with_each_hunk_once() {
+        use crate::explain::Ref;
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n@@ -9 +9 @@\n-x\n+y\n";
+        let files = crate::git::diff::parse(diff).expect("diff");
+        let at = |path: &str, hunk| Ref {
+            path: path.to_owned(),
+            hunk,
+            label: String::new(),
+        };
+        let first = Note {
+            text: " Off by one ".to_owned(),
+            refs: vec![at("a.rs", Some(1)), at("gone.rs", None)],
+        };
+        let second = Note {
+            text: "Same place".to_owned(),
+            refs: vec![at("a.rs", Some(1))],
+        };
+        let third = Note {
+            text: "No code".to_owned(),
+            refs: Vec::new(),
+        };
+        let (text, excerpt) = concerns_request(&[&first, &second, &third], &files);
+        assert_eq!(
+            text,
+            "Deal with each of these concerns a reviewer raised about the change:\n\
+             \n1. Off by one (at a.rs:9, gone.rs)\
+             \n2. Same place (at a.rs:9)\
+             \n3. No code"
+        );
+        assert_eq!(excerpt, "diff --git a/a.rs b/a.rs\n@@ -9 +9 @@\n-x\n+y\n");
+        // And the prompt carries both, with no single place.
+        let p = prompt(
+            &Request {
+                place: None,
+                excerpt,
+                feedback: text,
+                ..request()
+            },
+            1 << 20,
+        );
+        assert!(p.contains("1. Off by one") && p.contains("diff --git a/a.rs"));
     }
 
     #[test]

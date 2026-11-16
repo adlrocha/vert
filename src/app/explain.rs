@@ -88,6 +88,8 @@ pub struct ExplainView {
 /// An explanation being asked again (`r`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reload {
+    /// Tells this reload's diff from other loads of the same change.
+    pub id: u64,
     /// What the view showed before: back if the change can't be reloaded.
     pub previous: Status,
     /// Waiting for a fresh branch list first, to take the branch at the tip
@@ -262,6 +264,8 @@ pub struct ExplainState {
     /// Answers that came while their diff had no explanation to join,
     /// added to the next one.
     unshown: HashMap<u64, Vec<Question>>,
+    /// The last reload (`r`) started, numbering them.
+    reloads: u64,
     /// The last explain view left, to come back to where it was.
     parked: Option<Box<ExplainView>>,
     /// Fixes asked for concerns, by [`diff_key`] and [`concern_key`].
@@ -486,7 +490,10 @@ impl App {
         let entry = v.entry.clone();
         let branch = entry.branch().is_some();
         let previous = std::mem::replace(&mut v.status, Status::Asking(self.now));
+        self.explain.reloads += 1;
+        let id = self.explain.reloads;
         v.reload = Some(Reload {
+            id,
             previous,
             awaiting_branches: branch,
         });
@@ -497,10 +504,9 @@ impl App {
             return self.request_branches();
         }
         let entry = self.current_entry(&entry);
-        vec![Effect::LoadDiff {
+        vec![Effect::ReloadDiff {
+            reload: id,
             entry: Box::new(entry),
-            refresh: true,
-            file: None,
         }]
     }
 
@@ -523,10 +529,9 @@ impl App {
                     .find(|b| b.name == name)
                     .and_then(|b| b.changes.clone())
                     .unwrap_or_else(|| v.entry.clone());
-                Some(Effect::LoadDiff {
+                Some(Effect::ReloadDiff {
+                    reload: reload.id,
                     entry: Box::new(entry),
-                    refresh: true,
-                    file: None,
                 })
             })
             .collect()
@@ -543,7 +548,8 @@ impl App {
             .unwrap_or_else(|| entry.clone())
     }
 
-    /// The diff of `entry` came: an explain view waiting for it (`r`)
+    /// The diff of `entry` for reload `reload` came: the explain view that
+    /// asked for it (`r`)
     /// explains it, under the key of the diff as it is now. The questions
     /// asked about it stay with it when it is unchanged; when a fix changed
     /// it, they stay with the old diff, as they are about that code. When
@@ -551,6 +557,7 @@ impl App {
     /// showed and says why.
     pub(super) fn on_reloaded(
         &mut self,
+        reload: u64,
         entry: &Entry,
         result: &Result<Vec<FileDiff>, String>,
     ) -> Vec<Effect> {
@@ -559,7 +566,9 @@ impl App {
             _ => None,
         });
         let Some(v) = open.chain(self.explain.parked.as_deref_mut()).find(|v| {
-            v.reload.as_ref().is_some_and(|r| !r.awaiting_branches) && v.entry.id == entry.id
+            v.reload
+                .as_ref()
+                .is_some_and(|r| r.id == reload && !r.awaiting_branches)
         }) else {
             return Vec::new();
         };
@@ -1021,22 +1030,14 @@ mod tests {
     /// back unchanged: what follows.
     fn explain_again(a: &mut App) -> Vec<Effect> {
         let effects = press(a, KeyCode::Char('r'));
-        let [
-            Effect::LoadDiff {
-                entry,
-                refresh: true,
-                file: None,
-            },
-        ] = effects.as_slice()
-        else {
+        let [Effect::ReloadDiff { reload, entry }] = effects.as_slice() else {
             panic!("expected the diff to reload, got {effects:?}");
         };
         let files = view(a).files.clone();
-        a.update(Msg::Diff {
+        a.update(Msg::Reloaded {
+            reload: *reload,
             entry: entry.clone(),
             result: Ok(files),
-            refresh: true,
-            file: None,
         })
     }
 
@@ -1312,7 +1313,7 @@ mod tests {
         let reloads = |effects: Vec<Effect>| -> Vec<Effect> {
             effects
                 .into_iter()
-                .filter(|e| matches!(e, Effect::LoadDiff { .. }))
+                .filter(|e| matches!(e, Effect::ReloadDiff { .. }))
                 .collect()
         };
         // A branch list is being read when `r` is pressed, right after a fix
@@ -1325,14 +1326,7 @@ mod tests {
         assert!(first.contains(&Effect::LoadBranches), "{first:?}");
         assert_eq!(reloads(first), [], "read before `r`");
         let effects = reloads(a.update(list(2)));
-        let [
-            Effect::LoadDiff {
-                entry,
-                refresh: true,
-                ..
-            },
-        ] = effects.as_slice()
-        else {
+        let [Effect::ReloadDiff { reload, entry }] = effects.as_slice() else {
             panic!("expected the diff to reload, got {effects:?}");
         };
         assert_eq!(**entry, tip(2), "the branch as it is now");
@@ -1344,11 +1338,20 @@ mod tests {
         );
         assert_eq!(press(&mut a, KeyCode::Char('r')), [], "already reloading");
 
-        let effects = a.update(Msg::Diff {
-            entry: entry.clone(),
-            result: Ok(vec![file("src/a.rs"), file("src/fixed.rs")]),
+        // A refresh of the same change asked before `r` (the diff under
+        // the explanation, say) may land first: it isn't this reload.
+        let earlier = a.update(Msg::Diff {
+            entry: Box::new(tip(1)),
+            result: Ok(vec![file("src/a.rs")]),
             refresh: true,
             file: None,
+        });
+        assert_eq!(earlier, []);
+        assert!(view(&a).reload.is_some(), "still waiting for its own");
+        let effects = a.update(Msg::Reloaded {
+            reload: *reload,
+            entry: entry.clone(),
+            result: Ok(vec![file("src/a.rs"), file("src/fixed.rs")]),
         });
         let new = asked(&effects, true);
         assert_ne!(new, old, "a new diff, under its own key");
@@ -1401,17 +1404,16 @@ mod tests {
             let effects: Vec<Effect> = a
                 .update(Msg::Branches(result))
                 .into_iter()
-                .filter(|e| matches!(e, Effect::LoadDiff { .. }))
+                .filter(|e| matches!(e, Effect::ReloadDiff { .. }))
                 .collect();
-            assert!(
-                matches!(effects.as_slice(), [Effect::LoadDiff { entry, .. }] if **entry == feat_at(1)),
-                "{effects:?}"
-            );
-            a.update(Msg::Diff {
-                entry: Box::new(feat_at(1)),
+            let [Effect::ReloadDiff { reload, entry }] = effects.as_slice() else {
+                panic!("expected the diff to reload, got {effects:?}");
+            };
+            assert_eq!(**entry, feat_at(1));
+            a.update(Msg::Reloaded {
+                reload: *reload,
+                entry: entry.clone(),
                 result: Ok(vec![file("src/a.rs")]),
-                refresh: true,
-                file: None,
             });
             assert!(view(&a).reload.is_none());
         }
@@ -1422,14 +1424,13 @@ mod tests {
         let (mut a, _) = explained();
         let reload = |a: &mut App, result: Result<Vec<FileDiff>, String>| {
             let effects = press(a, KeyCode::Char('r'));
-            let [Effect::LoadDiff { entry, .. }] = effects.as_slice() else {
+            let [Effect::ReloadDiff { reload, entry }] = effects.as_slice() else {
                 panic!("expected the diff to reload, got {effects:?}");
             };
-            let effects = a.update(Msg::Diff {
+            let effects = a.update(Msg::Reloaded {
+                reload: *reload,
                 entry: entry.clone(),
                 result,
-                refresh: true,
-                file: None,
             });
             assert_eq!(effects, []);
             assert!(view(a).reload.is_none());
@@ -1457,12 +1458,11 @@ mod tests {
             Some("Nothing to explain again: the change is empty now (c shows the last fix)")
         );
 
-        // A diff that reloads for another view leaves this one alone.
-        let other = a.update(Msg::Diff {
+        // A reload no view is waiting for is left alone.
+        let other = a.update(Msg::Reloaded {
+            reload: 99,
             entry: Box::new(change("other")),
             result: Ok(vec![file("x.rs")]),
-            refresh: true,
-            file: None,
         });
         assert_eq!(other, []);
     }
@@ -1471,16 +1471,15 @@ mod tests {
     fn explaining_again_finds_its_parked_view() {
         let (mut a, key) = explained();
         let effects = press(&mut a, KeyCode::Char('r'));
-        let [Effect::LoadDiff { entry, .. }] = effects.as_slice() else {
+        let [Effect::ReloadDiff { reload, entry }] = effects.as_slice() else {
             panic!("expected the diff to reload, got {effects:?}");
         };
-        let entry = entry.clone();
+        let (reload, entry) = (*reload, entry.clone());
         press(&mut a, KeyCode::Esc);
-        let effects = a.update(Msg::Diff {
+        let effects = a.update(Msg::Reloaded {
+            reload,
             entry,
             result: Ok(vec![file("src/a.rs"), file("docs/x.md")]),
-            refresh: true,
-            file: None,
         });
         assert_eq!(asked(&effects, true), key, "the same diff");
         let parked = a.explain.parked.as_ref().expect("parked");
@@ -1495,7 +1494,7 @@ mod tests {
         "Uncommitted changes".clone_into(&mut wt.summary);
         a.update(Msg::Worktree(Ok(Some(wt.clone()))));
         let effects = press(&mut a, KeyCode::Char('r'));
-        let [Effect::LoadDiff { entry, .. }] = effects.as_slice() else {
+        let [Effect::ReloadDiff { entry, .. }] = effects.as_slice() else {
             panic!("expected the diff to reload, got {effects:?}");
         };
         assert_eq!(**entry, wt);
