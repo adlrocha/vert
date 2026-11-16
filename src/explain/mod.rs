@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod cache;
+pub mod question;
 pub mod tree;
 
 use std::collections::{BTreeSet, HashMap};
@@ -17,7 +18,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::git::FileStatus;
@@ -150,6 +151,9 @@ pub struct Explanation {
     pub unexplained: Vec<Ref>,
     /// Pointers the agent gave that name no hunk of this change.
     pub dropped: usize,
+    /// Follow-up questions about the change and their answers, oldest
+    /// first (see [`question`]).
+    pub questions: Vec<question::Question>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,11 +178,21 @@ struct RawStep {
     refs: Vec<RawRef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RawRef {
     file: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     hunk: Option<usize>,
+}
+
+impl From<&Ref> for RawRef {
+    /// The pointer as the agent writes it: hunks numbered from 1.
+    fn from(r: &Ref) -> Self {
+        Self {
+            file: r.path.clone(),
+            hunk: r.hunk.map(|h| h + 1),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -345,6 +359,7 @@ impl Explanation {
             concerns,
             unexplained,
             dropped: resolve.dropped,
+            questions: Vec::new(),
         })
     }
 }
@@ -587,8 +602,9 @@ impl Explainer {
         if !fresh
             && let Some(cache) = &self.cache
             && let Some(saved) = cache.get(key)
-            && let Ok(explanation) = Explanation::validate(&saved, files)
+            && let Ok(mut explanation) = Explanation::validate(&saved, files)
         {
+            explanation.questions = self.questions(entry, files);
             return Ok(Answer {
                 explanation,
                 cached: true,
@@ -602,11 +618,13 @@ impl Explainer {
             groups,
         };
         let out = agent::run(&self.agent, how, &prompt).map_err(|e| e.to_string())?;
-        let explanation = Explanation::validate(&out, files)
+        let mut explanation = Explanation::validate(&out, files)
             .map_err(|e| format!("{}: {e}", self.agent.name()))?;
         if let Some(cache) = &self.cache {
             cache.put(key, extract_json(&out).unwrap_or(&out));
         }
+        // Asking again keeps the questions: they belong to the change.
+        explanation.questions = self.questions(entry, files);
         Ok(Answer {
             explanation,
             cached: false,
@@ -623,6 +641,13 @@ pub fn prompt(entry: &Entry, files: &[FileDiff], max_diff_bytes: usize) -> Strin
     out.push_str(PROMPT_VERSION);
     out.push_str("\n\n");
     out.push_str(INSTRUCTIONS);
+    describe_change(&mut out, entry, files, max_diff_bytes);
+    out
+}
+
+/// Appends the change's message and its diff, hunks numbered per file, to
+/// `out`. Hunk bodies stop once the diff passes `max_diff_bytes`.
+fn describe_change(out: &mut String, entry: &Entry, files: &[FileDiff], max_diff_bytes: usize) {
     out.push_str("\n\n# The change\n\n");
     let _ = writeln!(out, "{}", entry.headline());
     if !entry.body.trim().is_empty() {
@@ -669,7 +694,6 @@ pub fn prompt(entry: &Entry, files: &[FileDiff], max_diff_bytes: usize) -> Strin
             "\nSome hunks were left out to save space. Read those files to understand them.\n",
         );
     }
-    out
 }
 
 #[cfg(test)]
@@ -730,7 +754,7 @@ mod tests {
         ]
     }
 
-    fn entry() -> Entry {
+    pub(crate) fn entry() -> Entry {
         let mut e = Entry::blank(Target::Commit(git2::Oid::ZERO_SHA1));
         "Add retries".clone_into(&mut e.summary);
         "Because GitHub flakes.".clone_into(&mut e.body);

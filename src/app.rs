@@ -487,6 +487,13 @@ pub enum Msg {
         /// The explanation, or why there is none.
         result: Result<Answer, String>,
     },
+    /// An agent answered a follow-up question about a change.
+    Answered {
+        /// The diff it was asked about (see [`crate::explain::diff_key`]).
+        key: u64,
+        /// The answer, or why there is none.
+        result: Result<crate::explain::question::Question, String>,
+    },
     /// An agent finished acting on feedback.
     Fixed {
         /// The request (see [`Effect::Fix`]).
@@ -569,6 +576,8 @@ pub enum Effect {
         /// Ask even if an answer is cached.
         fresh: bool,
     },
+    /// Ask a coding agent a follow-up question about a change it explained.
+    Ask(Box<crate::explain::question::Ask>),
     /// Ask a coding agent to act on feedback, editing files in a checkout.
     Fix {
         /// Identifies the request in [`Msg::Fixed`].
@@ -784,6 +793,10 @@ impl App {
             Msg::Start(start) => self.start_at(start),
             Msg::Explained { key, result } => {
                 self.on_explained(key, result);
+                Vec::new()
+            }
+            Msg::Answered { key, result } => {
+                self.on_answered(key, result);
                 Vec::new()
             }
             Msg::Fixed { id, result } => self.on_fixed(id, result),
@@ -1022,6 +1035,9 @@ impl App {
         }
         if self.branches.collisions.is_some() {
             return self.on_collisions_key(&key);
+        }
+        if matches!(self.views.last(), Some(View::Explain(v)) if v.question.is_some()) {
+            return self.on_question_key(&key);
         }
         if !self.views.is_empty() {
             return self.on_view_key(&key);

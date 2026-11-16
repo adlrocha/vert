@@ -291,6 +291,7 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
             files,
             fresh,
         } => explain(ctx, key, &entry, &files, fresh),
+        Effect::Ask(asked) => ask(ctx, &asked),
         Effect::Fix { id, root, request } => fix(ctx, id, root.as_deref(), &request),
         Effect::Remove { worktree, branch } => {
             let (removed, error) = remove(
@@ -385,6 +386,20 @@ fn explain(
             )
         });
     Msg::Explained { key, result }
+}
+
+/// Asks the configured agent a follow-up question about a change it
+/// explained, where the change's files are.
+fn ask(ctx: &Context, asked: &crate::explain::question::Ask) -> Msg {
+    let result = ctx
+        .explain
+        .as_ref()
+        .ok_or_else(|| "explanations are unavailable".to_owned())
+        .and_then(|ex| ex.ask(asked, ctx.dir(asked.entry.root.as_deref()), &ctx.agents));
+    Msg::Answered {
+        key: asked.key,
+        result,
+    }
 }
 
 /// Asks the configured agent to act on `request`, editing the checkout at
@@ -1129,6 +1144,51 @@ mod tests {
         assert_eq!(answer.explanation.intent, "linked-wt");
         assert_eq!(answer.explanation.unexplained.len(), 1);
         assert!(!answer.cached);
+    }
+
+    #[test]
+    fn follow_up_questions_are_answered_in_the_change_checkout() {
+        let t = repo();
+        let mut c = ctx(&t);
+        let wt = git::feed::load_worktree(&t.repo, &c.labeler, 0)
+            .expect("worktree")
+            .expect("dirty");
+        let files = git::diff::load(&t.repo, wt.target).expect("diff");
+        let explanation =
+            crate::explain::Explanation::validate(r#"{"intent": "x"}"#, &files).expect("valid");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let linked = dir.path().join("linked-wt");
+        std::fs::create_dir(&linked).expect("dir");
+        let mut elsewhere = wt;
+        elsewhere.root = Some(linked);
+        let asking = Effect::Ask(Box::new(crate::explain::question::Ask {
+            key: 4,
+            entry: elsewhere,
+            files,
+            explanation,
+            question: "Where?".to_owned(),
+        }));
+        let Some(Msg::Answered { key: 4, result }) = run(asking.clone(), &c) else {
+            panic!("answered")
+        };
+        assert_eq!(result, Err("explanations are unavailable".to_owned()));
+        c.explain = Some(Explainer {
+            agent: crate::explain::agent::Agent::Custom(
+                r#"cat > /dev/null; printf '{"answer": "In %s"}' "$(basename "$PWD")""#.to_owned(),
+            ),
+            model: None,
+            timeout: Duration::from_secs(10),
+            max_diff_bytes: 1024,
+            cache: None,
+        });
+        let Some(Msg::Answered {
+            result: Ok(answer), ..
+        }) = run(asking, &c)
+        else {
+            panic!("answered")
+        };
+        assert_eq!(answer.answer, "In linked-wt");
+        assert_eq!(answer.question, "Where?");
     }
 
     #[test]

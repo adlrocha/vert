@@ -561,6 +561,7 @@ fn explaining(concerns: Vec<Note>) -> App {
         concerns,
         unexplained: Vec::new(),
         dropped: 0,
+        questions: Vec::new(),
     };
     app.views.push(View::Explain(Box::new(ExplainView {
         key: 1,
@@ -574,6 +575,8 @@ fn explaining(concerns: Vec<Note>) -> App {
         scroll: 0,
         height: 0,
         rows: 0,
+        question: None,
+        asking: None,
     })));
     app
 }

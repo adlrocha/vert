@@ -1,4 +1,5 @@
-//! The feedback prompt: what the agent will be asked to fix, and where.
+//! The feedback prompt: what the agent will be asked to fix, and where. The
+//! box it is drawn in also holds follow-up questions (see [`draw_prompt`]).
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -20,8 +21,6 @@ pub(super) fn draw_draft(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(draft) = &app.fix.draft else {
         return;
     };
-    let box_w = MAX_WIDTH.min(area.width);
-    let inner = usize::from(box_w.saturating_sub(4)).max(1);
     let agent = match &app.fix.agent {
         Some(Ok(agent)) => agent.as_str(),
         _ => "agent",
@@ -31,15 +30,32 @@ pub(super) fn draw_draft(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .place
         .as_deref()
         .unwrap_or("the change as a whole");
-    let mut lines = vec![
-        Line::from(Span::styled(
-            truncate(&format!("{agent} edits {}", draft.checkout), inner),
-            theme::bold(),
-        )),
-        Line::from(Span::styled(truncate(place, inner), theme::muted())),
-        Line::raw(""),
-    ];
-    let typed = format!("{}▏", draft.request.feedback);
+    draw_prompt(frame, area, " Fix ", &draft.request.feedback, |inner| {
+        vec![
+            Line::from(Span::styled(
+                truncate(&format!("{agent} edits {}", draft.checkout), inner),
+                theme::bold(),
+            )),
+            Line::from(Span::styled(truncate(place, inner), theme::muted())),
+        ]
+    });
+}
+
+/// Draws a box over everything else, centred on `area`, where text is
+/// typed for an agent: the lines `head` makes for the inner width, a blank
+/// line, then `typed` with a cursor, its last lines when it is long.
+pub(super) fn draw_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    typed: &str,
+    head: impl FnOnce(usize) -> Vec<Line<'static>>,
+) {
+    let box_w = MAX_WIDTH.min(area.width);
+    let inner = usize::from(box_w.saturating_sub(4)).max(1);
+    let mut lines = head(inner);
+    lines.push(Line::raw(""));
+    let typed = format!("{typed}▏");
     let wrapped = wrap(&typed, inner);
     let skip = wrapped.len().saturating_sub(MAX_TEXT_LINES);
     lines.extend(
@@ -54,7 +70,7 @@ pub(super) fn draw_draft(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(lines).block(
             panel(true)
-                .title(" Fix ")
+                .title(title.to_owned())
                 .title_bottom(Line::from(format!(" {HINT} ")).alignment(Alignment::Right))
                 .padding(ratatui::widgets::Padding::horizontal(1)),
         ),
