@@ -30,12 +30,12 @@ jobs:
         github.event.comment.user.type != 'Bot' &&
         contains(github.event.comment.body, '@nibble-review'))
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     concurrency:
       group: nibble-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
       cancel-in-progress: true
     steps:
-      # v1.1.2 — full SHA so a moved tag can never change what runs with the write token and model key. Bump deliberately.
-      - uses: adlrocha/nibble-review@325792c4bd3a92d494ac684df980171cc2e21986
+      # v1.2.0 — full SHA so a moved tag can never change what runs with the write token and model key. Bump deliberately.
+      - uses: adlrocha/nibble-review@ae7bc82986303cf0514856093e65ae4c005070ba
         with:
           api-key: ${{ secrets.OPENCODE_API_KEY }}
