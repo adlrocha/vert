@@ -23,7 +23,7 @@ const HINTS: Hints = &[
     ("b", "branch diff"),
     ("p", "PR diff"),
     ("f", "filter kinds"),
-    ("/", "filter names"),
+    ("/", "filter names or PR #"),
     ("c", "collisions"),
     ("d", "remove"),
     ("r", "refresh"),

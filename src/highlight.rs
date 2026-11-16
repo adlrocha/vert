@@ -162,11 +162,13 @@ pub fn sanitize(text: &str) -> String {
 }
 
 impl Highlighter {
-    /// The shared instance (syntax definitions load once, lazily).
+    /// The shared instance (syntax definitions load once, lazily). The
+    /// syntaxes are `bat`'s extended set, which adds TypeScript, TOML,
+    /// Dockerfile and more to syntect's defaults.
     pub fn global() -> &'static Self {
         static INSTANCE: OnceLock<Highlighter> = OnceLock::new();
         INSTANCE.get_or_init(|| Self {
-            syntaxes: SyntaxSet::load_defaults_newlines(),
+            syntaxes: two_face::syntax::extra_newlines(),
             theme: ansi_theme(),
         })
     }
@@ -233,6 +235,22 @@ mod tests {
             "Bourne Again Shell (bash)"
         );
         assert_eq!(h.language("notes.unknownext", None), "Plain Text");
+    }
+
+    #[test]
+    fn detects_languages_beyond_syntect_defaults() {
+        let h = Highlighter::global();
+        assert_eq!(h.language("tests/tools.test.ts", None), "TypeScript");
+        assert_eq!(h.language("src/App.tsx", None), "TypeScriptReact");
+        assert_eq!(h.language("Cargo.toml", None), "TOML");
+        assert_eq!(h.language("Dockerfile", None), "Dockerfile");
+        let out = h.highlight("a.ts", &["const roots: string[] = [];"], 100);
+        assert!(
+            out[0]
+                .iter()
+                .any(|(s, _)| matches!(s.fg, Some(Color::Indexed(_)))),
+            "TypeScript is coloured, not plain"
+        );
     }
 
     #[test]

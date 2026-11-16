@@ -205,7 +205,8 @@ pub struct BranchesState {
     pub pull_status: PullStatus,
     /// Which rows are shown.
     pub filter: RowFilter,
-    /// Narrows rows to those whose name fuzzily contains this.
+    /// Narrows rows to those whose name fuzzily contains this, or whose pull
+    /// request has this number (`12` or `#12`).
     pub name_filter: String,
     /// Whether `name_filter` is being typed into.
     pub filter_editing: bool,
@@ -254,13 +255,25 @@ fn row_named(rows: &[Row<'_>], name: &str) -> Option<usize> {
 }
 
 /// Whether a row's branch, checkout directory or pull request name fuzzily
-/// contains `query`.
+/// contains `query`, or `query` is its pull request's number (`12` or `#12`).
 fn named_like(row: &Row<'_>, query: &str) -> bool {
-    fuzzy_match(row.name(), query)
+    numbered(row, query)
+        || fuzzy_match(row.name(), query)
         || row
             .branch
             .and_then(|b| b.worktree.as_ref())
             .is_some_and(|w| fuzzy_match(&w.name, query))
+}
+
+/// Whether `query` is the number of the row's pull request, with or
+/// without a leading `#`.
+fn numbered(row: &Row<'_>, query: &str) -> bool {
+    let digits = query.trim().trim_start_matches('#');
+    row.pull.is_some_and(|p| {
+        !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && digits.parse() == Ok(p.number)
+    })
 }
 
 /// The tip commit a branch's changes were measured at, when there were any.
@@ -2204,6 +2217,24 @@ mod tests {
         // Back on the tab, typing continues where it left off.
         press(&mut app, KeyCode::Char('a'));
         assert_eq!(app.branches.name_filter, "a");
+    }
+
+    #[test]
+    fn the_filter_matches_pull_request_numbers() {
+        let mut app = loaded();
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('8'));
+        assert_eq!(keys(&app), ["p:8"], "a number finds its pull request");
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        for c in "#7".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(keys(&app), ["b:feat"], "a leading # is allowed");
+        press(&mut app, KeyCode::Char('0'));
+        assert!(keys(&app).is_empty(), "#70 is not #7");
     }
 
     #[test]
