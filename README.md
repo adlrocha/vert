@@ -136,7 +136,7 @@ Press `?` inside vert for all keys. The essentials:
 | Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `r` ask again · `f` fix |
 | Fix       | type the feedback · `⏎` send · `esc` cancel · `ctrl-w`/`ctrl-u` delete |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
-| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names · `c` collisions · `d` remove · `r` refresh |
+| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names or PR number · `c` collisions · `d` remove · `r` refresh |
 
 ### Pull requests
 

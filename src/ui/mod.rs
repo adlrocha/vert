@@ -221,7 +221,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("c", "what this row collides with"),
             ("d", "remove worktree/branch"),
             ("f", "filter rows"),
-            ("/", "narrow by name"),
+            ("/", "narrow by name or PR #"),
         ],
     ),
     (
