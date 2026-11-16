@@ -115,6 +115,23 @@ impl Agent {
         }
     }
 
+    /// Who to credit in a `Co-authored-by:` trailer of a commit the agent's
+    /// edits became, when its maker publishes an address for that; the
+    /// others are named in the commit's body only.
+    ///
+    /// ```
+    /// use vert::explain::agent::Agent;
+    /// assert_eq!(Agent::Claude.co_author(), Some("Claude <noreply@anthropic.com>"));
+    /// assert_eq!(Agent::Pi.co_author(), None);
+    /// ```
+    #[must_use]
+    pub const fn co_author(&self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("Claude <noreply@anthropic.com>"),
+            Self::Codex | Self::Pi | Self::Custom(_) => None,
+        }
+    }
+
     /// Whether the agent's edits are kept inside the checkout it runs in by
     /// the agent itself, not only by asking it to: what a fix needs, since
     /// the checkout under review may hold instructions aimed at the agent.

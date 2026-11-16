@@ -69,8 +69,9 @@ in, and what deserves a second look.
 - **Fixes:** press `f` on a hunk, or on a concern in an explanation, write
   what should change (a concern starts as its own text), and Claude Code
   or Codex makes the edit in that line of work's checkout, confined to
-  it (or pi, unconfined, with a warning). It never commits, so the fix lands in the checkout's uncommitted
-  changes. See [Fixes](#fixes).
+  it (or pi, unconfined, with a warning). The agent never commits; when it
+  is done, vert commits its edits, and only those, on that checkout's
+  branch. Nothing is pushed. See [Fixes](#fixes).
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter. `e` opens `$VISUAL`/`$EDITOR` at that line
   (vim, nvim, helix, VS Code, Cursor, …).
@@ -151,7 +152,8 @@ and looks for one in this order:
 If no token is found, the Branches tab says so and shows everything else.
 vert only reads from GitHub: it lists open pull requests with their check
 status, and fetches a pull request's diff when you open it. It never fetches
-or writes to your repository. Besides your repository, vert sends one
+or pushes; the only write to your repository is committing a fix's edits
+(see [Fixes](#fixes)), which `--no-fix-commit` turns off. Besides your repository, vert sends one
 unauthenticated request a day to `api.github.com` for its own latest commit —
 no account, token or repository data involved — which is what powers the
 update notice. `--no-network` turns all GitHub access off.
@@ -265,15 +267,37 @@ For the full output, run the command from the table above in a terminal.
 Press `f` in a diff and write what should change. The coding agent then
 acts on it in the checkout the change belongs to, while you keep
 reviewing. The header shows `fixing in <checkout>` until it is done, and
-the footer shows the agent's one-line summary of what it changed.
+the footer shows the agent's one-line summary of what it changed and the
+commit it became, for example `Committed a1b2c3d to feat-x: …`.
 
-**Where the fix shows up.** The agent edits files and never commits, so
-its edits are that checkout's uncommitted changes: the *Uncommitted
-changes* entry of the feed for vert's own checkout, or the checkout's row
-in the Branches tab (`⏎` opens its uncommitted work). An open diff of
-those uncommitted changes refreshes as the agent edits. A commit, branch
-or pull-request diff shows committed content, so it stays as it was until
-the fix is committed.
+**Where the fix shows up.** The agent edits files and never commits. While
+it works, its edits are that checkout's uncommitted changes: the
+*Uncommitted changes* entry of the feed for vert's own checkout, or the
+checkout's row in the Branches tab (`⏎` opens its uncommitted work). An
+open diff of those uncommitted changes refreshes as the agent edits.
+
+**The fix is committed.** When the agent is done, vert commits what it
+changed on the checkout's branch, so the fix is part of the branch's diff,
+and of its pull request once you push. Nothing is pushed. To undo a fix,
+`git revert` its commit, or `git reset HEAD~1` before you push.
+
+- Only the agent's edits are committed. Before the agent starts, vert
+  records the checkout's files (without touching its index); when it is
+  done, what changed since is applied on top of `HEAD` and committed.
+  Uncommitted work you already had, staged or not, stays as it was.
+  Anything you edit in that checkout while the agent works counts as part
+  of the fix. Files git ignores aren't recorded, so edits to them stay
+  out of the commit.
+- The commit is `fix: <the agent's summary>`, with your feedback in the
+  body, made as your git `user.name` and `user.email`. A fix by Claude Code
+  credits it with a `Co-authored-by:` trailer; the other agents are named
+  in the body. Git hooks don't run.
+- The edits stay uncommitted, and the footer says why, when they overlap
+  lines you had already changed and not committed, `HEAD` is detached,
+  the branch has no commit yet, a merge or rebase is in progress, git has
+  no `user.name` or `user.email`, or `commit.gpgSign` is on (vert can't sign).
+- `--no-fix-commit` (or `VERT_NO_FIX_COMMIT=1`) leaves every fix
+  uncommitted.
 
 **What the agent is told.** The change it is looking at, where your
 feedback points, the hunk there, and your words. What `f` points at
@@ -310,7 +334,8 @@ when it is the only agent installed, and the fix prompt warns:
 
 Inside the checkout the agent can change any file, so it could also undo
 uncommitted work you have there; it is asked to touch only what the
-feedback is about. Neither Claude Code nor Codex can write to `.git`
+feedback is about. Such an edit overlaps your uncommitted work, so it is
+left uncommitted. Neither Claude Code nor Codex can write to `.git`
 (checked by hand for both: Claude Code is refused `.git/hooks`, and
 Codex's sandbox makes `git commit`, `stash` and `reset` fail); pi can.
 
@@ -361,6 +386,7 @@ checkout whose agent is idle.
 | `--github-timeout-secs`  | 15      | GitHub request timeout                          |
 | `--no-network`           | off     | Never contact GitHub, and no explanations or fixes |
 | `--no-update-check`      | off     | Never ask GitHub whether a newer vert exists    |
+| `--no-fix-commit` / `VERT_NO_FIX_COMMIT` | off | Leave a fix's edits uncommitted |
 | `--explain-agent` / `VERT_EXPLAIN_AGENT` | `auto` | Agent for `x` and `f`: `auto`, `claude`, `codex` or `pi` (pi fixes unconfined, with a warning) |
 | `--explain-model` / `VERT_EXPLAIN_MODEL` | agent's default | Model the agent uses, in its own naming |
 | `--explain-cmd` / `VERT_EXPLAIN_CMD` | — | Shell command to use instead of a known agent |
@@ -386,10 +412,10 @@ the event loop. This keeps all interaction logic testable without a terminal.
 
 | Module      | Responsibility                                                   |
 | ----------- | ---------------------------------------------------------------- |
-| `git`       | Feed entries (with a per-commit cache), branches and worktrees, collisions between them, structured diffs |
+| `git`       | Feed entries (with a per-commit cache), branches and worktrees, collisions between them, structured diffs, committing a fix's edits |
 | `github`    | `origin` detection, token lookup, open pull requests and their diffs |
 | `explain`   | Prompts, agent routing, answer validation and caching, follow-up questions, diagram layout |
-| `fix`       | Fix prompts and the agent's summary of what it changed           |
+| `fix`       | Fix prompts, the agent's summary of what it changed, and the fix commit's message |
 | `labels`    | Size, breadth and revert classification                          |
 | `hotspots`  | Ranking by change frequency                                      |
 | `search`    | Fuzzy file names (nucleo) and content search (ripgrep crates)    |

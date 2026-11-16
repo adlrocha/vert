@@ -2,9 +2,11 @@
 //! piece of feedback, in the checkout of the line of work under review.
 //!
 //! The feedback is typed (or taken from an explanation's concern) in a
-//! small prompt. Sending it runs the agent in the background; its edits are
-//! the checkout's uncommitted changes, which an open diff of them shows as
-//! they are made, and its one-line summary goes in the footer.
+//! small prompt. Sending it runs the agent in the background; an open diff
+//! of the checkout's uncommitted changes shows its edits as they are made.
+//! When it is done its edits are committed on the checkout's branch (or left
+//! uncommitted, and the footer says why), and its one-line summary goes in
+//! the footer.
 
 use std::path::PathBuf;
 
@@ -12,9 +14,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Effect, Focus, Item, View, concern_at, delete_word};
 use crate::explain::Ref;
-use crate::fix::{Fixer, Request, excerpt};
+use crate::fix::{Done, Fixer, Request, excerpt};
 use crate::git::Target;
 use crate::git::branches::Branch;
+use crate::git::commit::Outcome;
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
 use crate::highlight::sanitize;
@@ -305,19 +308,42 @@ impl App {
         }]
     }
 
-    /// The agent finished fix `id`: says what it did, and reloads what it
-    /// may have changed.
-    pub(super) fn on_fixed(&mut self, id: u64, result: Result<String, String>) -> Vec<Effect> {
+    /// The agent finished fix `id`: says what it did and where its edits
+    /// went, and reloads what it may have changed.
+    pub(super) fn on_fixed(&mut self, id: u64, result: Result<Done, String>) -> Vec<Effect> {
         let Some(i) = self.fix.running.iter().position(|r| r.id == id) else {
             return Vec::new();
         };
-        let done = self.fix.running.remove(i);
+        let run = self.fix.running.remove(i);
+        let committed = matches!(&result, Ok(d) if matches!(d.outcome, Outcome::Committed { .. }));
         self.notice = Some(match result {
-            Ok(summary) => format!("Fixed in {}: {summary}", done.checkout),
+            Ok(Done { summary, outcome }) => match outcome {
+                Outcome::Committed {
+                    id,
+                    branch,
+                    stale_index,
+                } => {
+                    let index = if stale_index {
+                        " (the index couldn't be updated, so git status may be off for the fixed files)"
+                    } else {
+                        ""
+                    };
+                    format!("Committed {id} to {}{index}: {summary}", sanitize(&branch))
+                }
+                Outcome::Unchanged => format!("Nothing changed in {}: {summary}", run.checkout),
+                Outcome::Kept(why) => format!(
+                    "Fixed in {}, left uncommitted ({}): {summary}",
+                    run.checkout,
+                    sanitize(&why)
+                ),
+            },
             // The agent's own error output: untrusted, like all it prints.
-            Err(why) => format!("Couldn't fix in {}: {}", done.checkout, sanitize(&why)),
+            Err(why) => format!("Couldn't fix in {}: {}", run.checkout, sanitize(&why)),
         });
         let mut effects = self.request_worktree();
+        if committed {
+            effects.extend(self.request_commits());
+        }
         effects.extend(self.request_branches());
         effects
     }

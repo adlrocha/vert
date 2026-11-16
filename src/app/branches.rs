@@ -548,7 +548,7 @@ impl App {
                 self.branches.loaded = true;
                 self.branches.error = None;
                 self.branches.reselect(selected.as_deref());
-                effects.extend(self.refresh_open_worktree());
+                effects.extend(self.refresh_open_detail());
                 if stale {
                     effects.extend(self.request_overlaps());
                 }
@@ -598,11 +598,27 @@ impl App {
         Vec::new()
     }
 
-    /// Reloads an open linked-worktree diff: with its latest changes, or
-    /// empty once the worktree is clean. A removed worktree is left alone.
-    fn refresh_open_worktree(&self) -> Option<Effect> {
+    /// Reloads an open diff the new list changed: a linked worktree's, with
+    /// its latest changes or empty once it is clean, and a branch's once its
+    /// tip moved (a fix committed to it, say). A removed worktree or branch
+    /// is left alone.
+    fn refresh_open_detail(&self) -> Option<Effect> {
         // Also under a view stacked on the diff (an explanation, a file).
         let d = self.views.iter().rev().find_map(View::as_detail)?;
+        if d.entry.branch().is_some() {
+            let moved = self
+                .branches
+                .list
+                .branches
+                .iter()
+                .filter_map(|b| b.changes.as_ref())
+                .find(|c| c.id == d.entry.id && c.target != d.entry.target)?;
+            return Some(Effect::LoadDiff {
+                entry: Box::new(moved.clone()),
+                refresh: true,
+                file: None,
+            });
+        }
         let root = d.entry.root.as_ref().filter(|_| d.entry.is_worktree())?;
         let checkout = self
             .branches
@@ -1867,6 +1883,69 @@ mod tests {
             root: None,
         });
         assert_eq!(app.update(Msg::Tick(99_999)), []);
+    }
+
+    #[test]
+    fn an_open_branch_diff_follows_the_branch_tip() {
+        let mut app = loaded();
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        let Some(Effect::LoadDiff { entry, .. }) = press(&mut app, KeyCode::Enter).pop() else {
+            panic!("diff")
+        };
+        assert_eq!(entry.id, "branch:feat");
+        app.update(Msg::Diff {
+            entry: entry.clone(),
+            result: Ok(Vec::new()),
+            refresh: false,
+            file: None,
+        });
+        let reloads = |effects: Vec<Effect>| -> Vec<Effect> {
+            effects
+                .into_iter()
+                .filter(|e| matches!(e, Effect::LoadDiff { .. }))
+                .collect()
+        };
+        let list = |head: git2::Oid| {
+            let mut feat = branch("feat", 500);
+            if let Some(c) = feat.changes.as_mut() {
+                c.target = Target::Range { base: None, head };
+            }
+            Branches {
+                base: Some("main".to_owned()),
+                branches: vec![checkout("main", true, false), feat],
+            }
+        };
+        // The same tip: nothing to reload.
+        let same = app.update(Msg::Branches(Ok(list(git2::Oid::ZERO_SHA1))));
+        assert_eq!(reloads(same), []);
+
+        // A commit landed on the branch (a fix, say): its diff reloads.
+        let tip = git2::Oid::from_bytes(&[7; 20]).expect("oid");
+        let moved = reloads(app.update(Msg::Branches(Ok(list(tip)))));
+        let [
+            Effect::LoadDiff {
+                entry: fresh,
+                refresh: true,
+                file: None,
+            },
+        ] = moved.as_slice()
+        else {
+            panic!("refresh expected: {moved:?}")
+        };
+        assert_eq!(fresh.id, entry.id);
+        assert_eq!(
+            fresh.target,
+            Target::Range {
+                base: None,
+                head: tip
+            }
+        );
+
+        // A branch that is gone is left alone.
+        let gone = app.update(Msg::Branches(Ok(Branches::default())));
+        assert_eq!(reloads(gone), []);
     }
 
     #[test]

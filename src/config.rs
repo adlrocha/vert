@@ -15,6 +15,10 @@ use crate::labels::{LabelError, Labeler};
 /// Understand what your agents are building: a live, navigable view of a git repo's changes.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "vert", version, about)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent on/off command-line flag, not a state machine"
+)]
 pub struct Config {
     /// Open straight on one line of work instead of the feed.
     #[command(subcommand)]
@@ -154,6 +158,11 @@ pub struct Config {
     /// replays the explanation and the newest earlier answers up to this.
     #[arg(long, global = true, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..), env = "VERT_EXPLAIN_MAX_DIFF_KB")]
     pub explain_max_diff_kb: u32,
+
+    /// Leave a fix's edits uncommitted instead of committing them on the
+    /// checkout's branch when the agent is done.
+    #[arg(long, global = true, env = "VERT_NO_FIX_COMMIT")]
+    pub no_fix_commit: bool,
 }
 
 /// A line of work to open on start, with the diff already showing.
@@ -326,6 +335,7 @@ impl Config {
             model: self.model(),
             timeout: Duration::from_secs(self.explain_timeout_secs),
             max_excerpt_bytes: self.max_diff_bytes(),
+            commit: !self.no_fix_commit,
         })
     }
 
@@ -550,6 +560,9 @@ mod tests {
         assert_eq!(fixer.model.as_deref(), Some("x/y"));
         assert_eq!(fixer.timeout, Duration::from_secs(60));
         assert_eq!(fixer.max_excerpt_bytes, 3072);
+        assert!(fixer.commit, "fixes are committed by default");
+        let uncommitted = fixer_with(&["claude"], &["--no-fix-commit"]).expect("claude");
+        assert!(!uncommitted.commit);
         let codex = fixer_with(&["pi", "codex"], &auto).expect("codex");
         assert_eq!(codex.agent, agent::Agent::Codex, "pi is passed over");
         let only_pi = fixer_with(&["pi"], &auto).expect("pi as a last resort");
