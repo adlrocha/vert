@@ -306,6 +306,7 @@ fn reports_and_one_per_checkout(mut app: App, id: u64) {
         result: Ok(done(Outcome::Committed {
             id: "a1b2c3d".to_owned(),
             branch: "feat-x".to_owned(),
+            stale_index: false,
         })),
     });
     assert!(effects.contains(&Effect::LoadWorktree), "{effects:?}");
@@ -341,6 +342,13 @@ fn reports_and_one_per_checkout(mut app: App, id: u64) {
         app.notice.as_deref(),
         Some("Fixed in this checkout, left uncommitted (HEAD is ·[31mdetached): named it LIMIT")
     );
+    sent_commit(&mut app);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some(
+            "Committed b2c3d4e to feat-x (the index couldn't be updated, so git status may be off for the fixed files): named it LIMIT"
+        )
+    );
     sent(&mut app, Outcome::Unchanged);
     assert_eq!(
         app.notice.as_deref(),
@@ -359,6 +367,22 @@ fn reports_and_one_per_checkout(mut app: App, id: u64) {
         Some("Couldn't fix in this checkout: claude failed: ·[31mred"),
         "escape sequences never reach the terminal"
     );
+}
+
+/// Sends one more fix and reports it committed, with an index that
+/// couldn't be updated.
+fn sent_commit(app: &mut App) {
+    press(app, KeyCode::Char('f'));
+    typed(app, "again");
+    let (next, _, _) = fix_of(&press(app, KeyCode::Enter));
+    app.update(Msg::Fixed {
+        id: next,
+        result: Ok(done(Outcome::Committed {
+            id: "b2c3d4e".to_owned(),
+            branch: "feat-x".to_owned(),
+            stale_index: true,
+        })),
+    });
 }
 
 /// A fix that said "named it LIMIT", with `outcome`.

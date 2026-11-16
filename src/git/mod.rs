@@ -1,5 +1,6 @@
 //! Reading changes out of a git repository, finding where lines of work
-//! collide, and removing the ones that are done: worktrees and branches.
+//! collide, committing a fix's edits, and removing the lines of work that
+//! are done: worktrees and branches.
 
 pub mod branches;
 pub mod commit;

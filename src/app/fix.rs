@@ -318,8 +318,17 @@ impl App {
         let committed = matches!(&result, Ok(d) if matches!(d.outcome, Outcome::Committed { .. }));
         self.notice = Some(match result {
             Ok(Done { summary, outcome }) => match outcome {
-                Outcome::Committed { id, branch } => {
-                    format!("Committed {id} to {}: {summary}", sanitize(&branch))
+                Outcome::Committed {
+                    id,
+                    branch,
+                    stale_index,
+                } => {
+                    let index = if stale_index {
+                        " (the index couldn't be updated, so git status may be off for the fixed files)"
+                    } else {
+                        ""
+                    };
+                    format!("Committed {id} to {}{index}: {summary}", sanitize(&branch))
                 }
                 Outcome::Unchanged => format!("Nothing changed in {}: {summary}", run.checkout),
                 Outcome::Kept(why) => format!(

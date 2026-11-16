@@ -7,9 +7,8 @@
 //! [`commit_edits`] takes a second snapshot: the difference between the two
 //! is what changed while the agent worked. That difference is applied to
 //! `HEAD`'s tree and committed, so uncommitted work the checkout already
-//! had stays uncommitted. The index is then refreshed for the committed
-//! paths only, which keeps `git status` true and leaves the rest staged as
-//! it was.
+//! had stays uncommitted. The same difference is then applied to the index,
+//! which keeps `git status` true and leaves what was staged staged.
 //!
 //! When the edits can't be committed (they overlap uncommitted work, `HEAD`
 //! is detached, a rebase is in progress, commits must be signed, …) they
@@ -18,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use git2::{DiffOptions, IndexAddOption, Oid, Repository, RepositoryState};
+use git2::{ApplyLocation, DiffOptions, IndexAddOption, Oid, Repository, RepositoryState};
 
 use super::{Context, GitError, short_id};
 
@@ -35,6 +34,9 @@ pub enum Outcome {
         id: String,
         /// The branch it was added to.
         branch: String,
+        /// The index couldn't be updated afterwards, so `git status` may
+        /// show the fix as undone in the index for the files it touched.
+        stale_index: bool,
     },
     /// Nothing changed.
     Unchanged,
@@ -108,20 +110,42 @@ pub fn commit_edits(dir: &Path, before: Snapshot, message: &str) -> Result<Outco
             "git has no user.name and user.email to commit as".to_owned(),
         ));
     };
-    // Updating HEAD checks it still points at `parent`, so a commit made
-    // meanwhile is never overwritten.
-    let Ok(id) = repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent]) else {
+    let Ok(name) = head.name() else {
+        return Ok(Outcome::Kept(format!("{branch} has a name git can't read")));
+    };
+    let id = repo
+        .commit(None, &sig, &sig, message, &tree, &[&parent])
+        .ctx("store the fix's commit")?;
+    // Moved only if it still points at `parent`, so a commit made meanwhile
+    // is never dropped from the branch.
+    let log = format!("commit: {}", message.lines().next().unwrap_or_default());
+    if repo
+        .reference_matching(name, id, true, parent.id(), &log)
+        .is_err()
+    {
         return Ok(Outcome::Kept(format!(
             "{branch} moved while the agent worked"
         )));
-    };
-    let commit = repo.find_object(id, None).ctx("read the new commit")?;
-    repo.reset_default(Some(&commit), paths.iter())
-        .ctx("refresh the index")?;
+    }
     Ok(Outcome::Committed {
         id: short_id(id),
         branch,
+        stale_index: !refresh_index(&repo, &diff, id, &paths),
     })
+}
+
+/// Brings the index up to date with commit `id` for the `paths` the fix
+/// touched, keeping what was staged there staged. Returns whether it could.
+fn refresh_index(repo: &Repository, diff: &git2::Diff<'_>, id: Oid, paths: &[PathBuf]) -> bool {
+    // The fix applied to the index as it is: other staged hunks stay.
+    if repo.apply(diff, ApplyLocation::Index, None).is_ok() {
+        return true;
+    }
+    // It overlaps staged hunks (or the agent staged its own edits): those
+    // files are reset to the commit instead.
+    repo.find_object(id, None)
+        .and_then(|commit| repo.reset_default(Some(&commit), paths.iter()))
+        .is_ok()
 }
 
 /// Why edits in `repo` can't become a commit on its branch, if they can't.
@@ -206,7 +230,11 @@ mod tests {
 
     fn committed(outcome: &Outcome) -> &str {
         match outcome {
-            Outcome::Committed { id, .. } => id,
+            Outcome::Committed {
+                id,
+                stale_index: false,
+                ..
+            } => id,
             other => panic!("not committed: {other:?}"),
         }
     }
@@ -255,6 +283,58 @@ mod tests {
                 ("staged.txt".to_owned(), Status::INDEX_NEW),
             ]
         );
+    }
+
+    #[test]
+    fn what_was_staged_in_a_fixed_file_stays_staged() {
+        let t = repo();
+        t.write("a.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
+        t.commit("longer");
+        t.write("a.txt", "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
+        let mut index = t.repo.index().expect("index");
+        index.add_path(Path::new("a.txt")).expect("stage");
+        index.write().expect("write");
+        let before = snapshot(t.path()).expect("snapshot");
+        t.write("a.txt", "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\n");
+        committed(&commit_edits(t.path(), before, "fix\n").expect("commit"));
+        assert_eq!(
+            head_file(&t, "a.txt").as_deref(),
+            Some("one\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\n")
+        );
+        assert_eq!(status(&t), [("a.txt".to_owned(), Status::INDEX_MODIFIED)]);
+    }
+
+    #[test]
+    fn edits_the_agent_staged_are_committed_and_clean() {
+        let t = repo();
+        let before = snapshot(t.path()).expect("snapshot");
+        t.write("a.txt", "one\nTWO\nthree\n");
+        let mut index = t.repo.index().expect("index");
+        index.add_path(Path::new("a.txt")).expect("stage");
+        index.write().expect("write");
+        committed(&commit_edits(t.path(), before, "fix\n").expect("commit"));
+        assert_eq!(head_file(&t, "a.txt").as_deref(), Some("one\nTWO\nthree\n"));
+        assert_eq!(status(&t), []);
+    }
+
+    #[test]
+    fn a_locked_index_still_commits_and_says_so() {
+        let t = repo();
+        let before = snapshot(t.path()).expect("snapshot");
+        t.write("a.txt", "one\nTWO\nthree\n");
+        std::fs::write(t.repo.path().join("index.lock"), "").expect("lock");
+        let outcome = commit_edits(t.path(), before, "fix\n").expect("commit");
+        assert!(
+            matches!(
+                &outcome,
+                Outcome::Committed {
+                    stale_index: true,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(head_file(&t, "a.txt").as_deref(), Some("one\nTWO\nthree\n"));
     }
 
     #[test]
