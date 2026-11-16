@@ -6,8 +6,9 @@
 //! limited to read-only tools to explain a change. To fix one, Claude Code
 //! gets file tools confined to the checkout (`--restricted`, no shell, no
 //! MCP servers) and Codex its workspace-write sandbox. pi can't be confined
-//! to the checkout, so it fixes only when asked for by name, with its file
-//! tools and nothing else. A custom command runs unconfined, with the
+//! to the checkout, so it fixes only when asked for by name or when no
+//! confining agent is installed, with its file tools and nothing else; its
+//! label and the fix prompt warn. A custom command runs unconfined, with the
 //! user's own permissions.
 
 use std::collections::BTreeSet;

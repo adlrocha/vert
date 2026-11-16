@@ -284,15 +284,16 @@ fix it from there. One fix runs per checkout at a time; checkouts don't
 wait for each other.
 
 **Which agent, and what it may do.** The code under review can contain
-instructions aimed at the agent (an `AGENTS.md`, a comment), so by default
-a fix only runs with an agent that keeps its edits inside the checkout by
-itself, not only because the prompt asks:
+instructions aimed at the agent (an `AGENTS.md`, a comment), so `auto`
+prefers an agent that keeps its edits inside the checkout by itself, not
+only because the prompt asks. pi, which can't, fixes when you choose it or
+when it is the only agent installed, and the fix prompt warns:
 
 | Agent       | Runs as                                                                                                                                       | Kept inside the checkout by                                   |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
 | Claude Code | `claude -p --output-format text --no-session-persistence --restricted --strict-mcp-config --tools Read,Grep,Glob,Edit,Write --permission-mode acceptEdits` | `--restricted`: file tools confined to the checkout and kept off `.git` (a write to `.git/hooks` is refused), no tool that runs code, no MCP servers, and the checkout's own settings ignored |
 | Codex       | `codex exec --sandbox workspace-write -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=true --skip-git-repo-check --ephemeral --color never -` | its workspace-write sandbox, with `/tmp` and `$TMPDIR` taken out of it: it can run commands, but writes only inside the checkout, never to `.git` (so no commit, stash or reset), and has no network |
-| pi          | `pi -p --no-session --no-extensions --no-mcp --no-skills --no-context-files --tools read,grep,find,ls,edit,write` | nothing: only when you choose it (see below) |
+| pi          | `pi -p --no-session --no-extensions --no-mcp --no-skills --no-context-files --tools read,grep,find,ls,edit,write` | nothing: only when you choose it or no confining agent is installed, with a warning (see below) |
 
 Inside the checkout the agent can change any file, so it could also undo
 uncommitted work you have there; it is asked to touch only what the
@@ -315,7 +316,7 @@ trust.
 
 A `--explain-cmd` only knows how to answer the explain prompt, so fixes
 skip it and use the agent `--explain-agent` names (with `auto`, the first
-of `claude` and `codex`).
+of `claude` and `codex`, then `pi`).
 
 The hunk sent is capped at `--explain-max-diff-kb`; the agent reads the
 file itself for the rest. Quitting vert stops any agent still working.
