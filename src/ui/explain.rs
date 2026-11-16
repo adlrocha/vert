@@ -1,6 +1,8 @@
 //! The explain view: an outline of the agent's walkthrough on the left, the
 //! selected part on the right, with the diagram drawn as a tree of arrows.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -8,8 +10,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::{Hints, empty_state, marker, panel, plural, spinner, truncate, width, wrap};
-use crate::app::{ExplainView, Item, Pane, Status, items};
+use crate::app::{ConcernFix, ExplainView, Item, Pane, Status, items};
 use crate::explain::{Change, Diagram, Explanation, Ref, tree};
+use crate::git::commit::Outcome;
+use crate::git::short_id;
+use crate::highlight::sanitize;
 use crate::theme;
 
 /// Footer hints for the explain view.
@@ -20,18 +25,33 @@ pub const EXPLAIN_HINTS: Hints = &[
     ("J/K", "scroll"),
     ("a", "ask"),
     ("r", "explain again"),
+    ("space", "mark"),
     ("f", "fix"),
+    ("c", "last fix"),
     ("esc", "back"),
 ];
 
+/// What the concerns pane shows beside each concern: whether it is marked
+/// to fix, and how a fix asked for it went.
+#[derive(Debug, Clone, Copy)]
+pub struct ConcernMarks<'a> {
+    /// Concerns marked with `space`.
+    pub marked: &'a BTreeSet<usize>,
+    /// Fixes asked for concerns of this diff, by concern.
+    pub fixes: Option<&'a BTreeMap<usize, ConcernFix>>,
+    /// The time now (Unix seconds), for how long a fix has run.
+    pub now: i64,
+}
+
 /// Draws the explain view.
 ///
-/// `asking` is since when the agent has been answering a follow-up question.
+/// `asking` is since when the agent has been answering a follow-up question,
+/// and `fixes` how the fixes asked for its concerns went.
 pub fn draw(
     frame: &mut Frame<'_>,
     area: Rect,
     v: &mut ExplainView,
-    asking: Option<i64>,
+    (asking, fixes): (Option<i64>, Option<&BTreeMap<usize, ConcernFix>>),
     now: i64,
     tick: usize,
 ) {
@@ -81,7 +101,7 @@ pub fn draw(
             ]));
             frame.render_widget(Paragraph::new(lines), inner);
         }
-        Status::Ready(..) => draw_ready(frame, body, v),
+        Status::Ready(..) => draw_ready(frame, body, v, fixes, now),
     }
 }
 
@@ -111,7 +131,41 @@ pub fn draw_question(frame: &mut Frame<'_>, area: Rect, v: &ExplainView) {
 }
 
 /// `m:ss` for a number of seconds.
-fn clock(secs: i64) -> String {
+/// How a concern's fix went, in a line and its colour.
+fn fix_status(fix: &ConcernFix, now: i64) -> (String, Style) {
+    match fix {
+        ConcernFix::Fixing { since } => (
+            format!("⋯ fixing {}", clock(now - since)),
+            Style::default().fg(theme::INFO),
+        ),
+        ConcernFix::Done(done) => match &done.outcome {
+            Outcome::Committed { id, branch, .. } => (
+                format!(
+                    "✓ committed {} to {}: {}",
+                    short_id(*id),
+                    sanitize(branch),
+                    done.summary
+                ),
+                Style::default().fg(theme::ADDED),
+            ),
+            Outcome::Unchanged => (
+                format!("– nothing changed: {}", done.summary),
+                theme::muted(),
+            ),
+            Outcome::Kept(why) => (
+                format!("○ left uncommitted ({}): {}", sanitize(why), done.summary),
+                Style::default().fg(theme::WARN),
+            ),
+        },
+        ConcernFix::Failed(why) => (
+            format!("✗ couldn't fix: {why}"),
+            Style::default().fg(theme::REMOVED),
+        ),
+    }
+}
+
+/// Minutes and seconds, as `m:ss`.
+pub(super) fn clock(secs: i64) -> String {
     let secs = secs.max(0);
     format!("{}:{:02}", secs / 60, secs % 60)
 }
@@ -167,7 +221,13 @@ fn draw_summary(
     );
 }
 
-fn draw_ready(frame: &mut Frame<'_>, area: Rect, v: &mut ExplainView) {
+fn draw_ready(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    v: &mut ExplainView,
+    fixes: Option<&BTreeMap<usize, ConcernFix>>,
+    now: i64,
+) {
     // Borrowed by field, so the scroll positions stay writable.
     let Status::Ready(e, _) = &v.status else {
         return;
@@ -221,7 +281,12 @@ fn draw_ready(frame: &mut Frame<'_>, area: Rect, v: &mut ExplainView) {
     let inner = block.inner(right);
     frame.render_widget(block, right);
     let selected = (v.pane == Pane::Detail).then_some(v.target);
-    let (lines, target_rows) = detail_lines(e, item, usize::from(inner.width), selected);
+    let marks = ConcernMarks {
+        marked: &v.marked,
+        fixes,
+        now,
+    };
+    let (lines, target_rows) = detail_lines(e, item, usize::from(inner.width), selected, marks);
     let h = usize::from(inner.height);
     v.height = h;
     v.rows = lines.len();
@@ -277,13 +342,14 @@ fn item_title(e: &Explanation, item: Item) -> String {
     }
 }
 
-/// Builds the right pane: text lines, and the row of each code pointer in
-/// the order [`crate::app::targets`] lists them.
+/// Builds the right pane: text lines, and the row of each place the cursor
+/// stops, in the order [`crate::app::stops`] lists them.
 fn detail_lines(
     e: &Explanation,
     item: Item,
     pane_width: usize,
     selected: Option<usize>,
+    marks: ConcernMarks<'_>,
 ) -> (Vec<Line<'static>>, Vec<usize>) {
     let mut out = Detail {
         lines: Vec::new(),
@@ -318,7 +384,22 @@ fn detail_lines(
                 if i > 0 {
                     out.blank();
                 }
-                out.prefixed("⚠ ", Style::default().fg(theme::WARN), &note.text);
+                // A concern without code is a stop of its own: its text.
+                let stop = note.refs.is_empty().then(|| out.target());
+                let first = out.lines.len();
+                let mark = if marks.marked.contains(&i) {
+                    "[x] ⚠ "
+                } else {
+                    "[ ] ⚠ "
+                };
+                out.prefixed(mark, Style::default().fg(theme::WARN), &note.text);
+                if stop == Some(true) {
+                    out.mark_at(first);
+                }
+                if let Some(fix) = marks.fixes.and_then(|f| f.get(&i)) {
+                    let (text, style) = fix_status(fix, marks.now);
+                    out.indented(4, &text, style);
+                }
                 for r in &note.refs {
                     out.reference(r);
                 }
@@ -404,6 +485,13 @@ impl Detail {
         }
     }
 
+    /// Wrapped text in `style`, every line indented by `indent` columns.
+    fn indented(&mut self, indent: usize, text: &str, style: Style) {
+        for l in wrap(text, self.width.saturating_sub(indent).max(1)) {
+            self.push(vec![Span::raw(" ".repeat(indent)), Span::styled(l, style)]);
+        }
+    }
+
     /// Marks the next line as the code pointer with the next target index,
     /// returning whether it is the selected one.
     fn target(&mut self) -> bool {
@@ -414,7 +502,12 @@ impl Detail {
 
     /// Starts the last pushed line with the selection marker.
     fn mark_last(&mut self) {
-        if let Some(line) = self.lines.last_mut()
+        self.mark_at(self.lines.len().saturating_sub(1));
+    }
+
+    /// Starts line `row` with the selection marker.
+    fn mark_at(&mut self, row: usize) {
+        if let Some(line) = self.lines.get_mut(row)
             && let Some(first) = line.spans.first_mut()
         {
             *first = marker(true);

@@ -66,7 +66,8 @@ in, and what deserves a second look.
   ones that name nothing, and lists the hunks nothing explains, which is
   where to look first. `a` asks the agent a follow-up question about the
   change. See [Explanations](#explanations).
-- **Fixes:** press `f` on a hunk, or on a concern in an explanation, write
+- **Fixes:** press `f` on a hunk, or on a concern in an explanation (mark
+  several with `space` to fix them together), write
   what should change (a concern starts as its own text), and Claude Code
   or Codex makes the edit in that line of work's checkout, confined to
   it (or pi, unconfined, with a warning). The agent never commits; when it
@@ -238,7 +239,13 @@ read from the cache. The explanation and the newest earlier answers are
 replayed up to `--explain-max-diff-kb`. Answers appear in the outline as `Q1`,
 `Q2`, …, and their code pointers jump to the diff like the steps' do.
 Questions are kept with the change: reopening it, or pressing `r` for a new
-explanation, keeps them.
+explanation, keeps them. When a fix has changed the code since, the questions
+stay with the old code they were about.
+
+**Explaining again.** `r` loads the change as it is now and explains that:
+uncommitted work as it is on disk, and a branch at its current tip, so a fix
+committed on it is part of the new explanation. A single commit is
+explained as it is; a fix to it is a new commit, which `c` opens.
 
 **Cache and privacy.** Answers are cached in `$XDG_CACHE_HOME/vert/explain`
 (`~/.cache/vert/explain` by default), readable only by you. The cache key
@@ -266,7 +273,8 @@ For the full output, run the command from the table above in a terminal.
 
 Press `f` in a diff and write what should change. The coding agent then
 acts on it in the checkout the change belongs to, while you keep
-reviewing. The header shows `fixing in <checkout>` until it is done, and
+reviewing. The header shows `fixing in <checkout>` and how long it has been
+running until it is done, and
 the footer shows the agent's one-line summary of what it changed and the
 commit it became, for example `Committed a1b2c3d to feat-x: …`.
 
@@ -308,6 +316,20 @@ depends on where you press it:
 - in an explanation: the selected code pointer. On *Concerns*, the
   feedback starts as the concern's text, so `f` then `⏎` asks the agent to
   deal with it. Edit the text first to steer it.
+
+**Fixing concerns.** On *Concerns*, `space` marks the concern under the
+cursor (`[x]`), and a concern that points at no code is a stop of its own.
+`f` then writes one request with every marked concern, numbered, with the
+places each points at and the hunks there, and `⏎` sends them all to the
+agent in one run, so they become one commit. Each concern sent shows how its
+fix is going: `⋯ fixing 1:15`, then `✓ committed a1b2c3d to feat-x`,
+`○ left uncommitted (why)`, `– nothing changed` or `✗ couldn't fix`, with
+the agent's summary.
+
+**After a fix.** When a fix finishes while an explanation is open, the
+footer offers `c` and `r`. `c` opens what the last fix changed: its commit,
+or the uncommitted changes of the checkout it edited. `r` explains the
+change again as it is now (see [Explaining again](#explanations)).
 
 **Where it runs.** In the line of work's own checkout: vert's checkout for
 its uncommitted work and its commits, a linked worktree for that

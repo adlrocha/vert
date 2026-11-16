@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, Effect, ExplainView, Focus, Msg, Pane, Status, View};
+use crate::app::{App, ConcernFix, Effect, ExplainView, Finished, Focus, Msg, Pane, Status, View};
 use crate::explain::agent::Agent;
 use crate::explain::{Explanation, Note, Ref};
 use crate::fix::{Done, Fixer, Request};
@@ -304,7 +304,7 @@ fn reports_and_one_per_checkout(mut app: App, id: u64) {
     let effects = app.update(Msg::Fixed {
         id,
         result: Ok(done(Outcome::Committed {
-            id: "a1b2c3d".to_owned(),
+            id: git2::Oid::from_str("a1b2c3d4e5").expect("oid"),
             branch: "feat-x".to_owned(),
             stale_index: false,
         })),
@@ -378,7 +378,7 @@ fn sent_commit(app: &mut App) {
     app.update(Msg::Fixed {
         id: next,
         result: Ok(done(Outcome::Committed {
-            id: "b2c3d4e".to_owned(),
+            id: git2::Oid::from_str("b2c3d4e5f6").expect("oid"),
             branch: "feat-x".to_owned(),
             stale_index: true,
         })),
@@ -643,6 +643,8 @@ fn explaining(concerns: Vec<Note>) -> App {
         height: 0,
         rows: 0,
         question: None,
+        marked: std::collections::BTreeSet::new(),
+        reloading: false,
     })));
     app
 }
@@ -715,9 +717,238 @@ fn a_concern_without_code_still_becomes_the_feedback() {
     assert_eq!(draft(&app).request.place, None);
     press(&mut app, KeyCode::Esc);
 
-    // Several without code: nothing to pick from.
-    let mut app = explaining(vec![lone.clone(), lone]);
-    select(&mut app, 2, 0);
+    // Several without code: each is a stop of its own.
+    let other = Note {
+        text: "And this?".to_owned(),
+        ..lone.clone()
+    };
+    let mut app = explaining(vec![lone, other]);
+    select(&mut app, 2, 1);
     press(&mut app, KeyCode::Char('f'));
-    assert_eq!(draft(&app).request.feedback, "");
+    assert_eq!(draft(&app).request.feedback, "And this?");
+    assert_eq!(draft(&app).concerns, Some((1, vec![1])));
+}
+
+fn view(app: &App) -> &ExplainView {
+    match app.views.last() {
+        Some(View::Explain(v)) => v,
+        _ => panic!("explaining"),
+    }
+}
+
+/// Two concerns with code (the first at two places, the second sharing one
+/// of them) and one without.
+fn three_concerns() -> App {
+    explaining(vec![
+        Note {
+            text: "Off by one".to_owned(),
+            refs: vec![r("src/a.rs", Some(1)), r("docs/x.md", None)],
+        },
+        Note {
+            text: "Unbounded".to_owned(),
+            refs: vec![r("src/a.rs", Some(1))],
+        },
+        Note {
+            text: "Is this wanted?".to_owned(),
+            refs: Vec::new(),
+        },
+    ])
+}
+
+#[test]
+fn concerns_are_marked_with_space() {
+    let mut app = three_concerns();
+    // Stops: Off by one ×2, Unbounded, Is this wanted?
+    select(&mut app, 2, 1);
+    press(&mut app, KeyCode::Char(' '));
+    select(&mut app, 2, 3);
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(view(&app).marked, [0, 2].into());
+    select(&mut app, 2, 0);
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(view(&app).marked, [2].into(), "a second press unmarks");
+
+    // Only concerns can be marked.
+    select(&mut app, 1, 0);
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(view(&app).marked, [2].into());
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Marking is for concerns: select one first")
+    );
+}
+
+#[test]
+fn marked_concerns_are_fixed_in_one_request_and_tracked() {
+    let mut app = three_concerns();
+    select(&mut app, 2, 3);
+    press(&mut app, KeyCode::Char(' '));
+    select(&mut app, 2, 0);
+    press(&mut app, KeyCode::Char(' '));
+    select(&mut app, 2, 2);
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('f'));
+    let request = &draft(&app).request;
+    assert_eq!(
+        request.feedback,
+        "Deal with each of these concerns a reviewer raised about the change:\n\
+         \n1. Off by one (at src/a.rs:41, docs/x.md)\
+         \n2. Unbounded (at src/a.rs:41)\
+         \n3. Is this wanted?"
+    );
+    assert_eq!(request.place, None, "the change as a whole");
+    assert_eq!(
+        request.excerpt,
+        "diff --git a/src/a.rs b/src/a.rs\n@@ -40 +41 @@\n-old\n+new\n\
+         diff --git a/docs/x.md b/docs/x.md\n@@ -1 +1,2 @@\n keep\n+first\n@@ -40 +41 @@\n-old\n+new\n",
+        "each hunk once"
+    );
+    assert_eq!(draft(&app).concerns, Some((1, vec![0, 1, 2])));
+
+    app.now = 200;
+    let (id, _, _) = fix_of(&press(&mut app, KeyCode::Enter));
+    assert_eq!(view(&app).marked, [].into(), "sent, so unmarked");
+    for i in 0..3 {
+        assert_eq!(
+            app.explain.concern_fix(1, i),
+            Some(&ConcernFix::Fixing { since: 200 })
+        );
+    }
+    assert_eq!(app.fix.running[0].since, 200);
+    // A concern being fixed can't be marked again.
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(view(&app).marked, [].into());
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("The agent is already fixing that concern")
+    );
+
+    let committed = Outcome::Committed {
+        id: git2::Oid::from_str("a1b2c3d4e5").expect("oid"),
+        branch: "feat-x".to_owned(),
+        stale_index: false,
+    };
+    app.update(Msg::Fixed {
+        id,
+        result: Ok(done(committed.clone())),
+    });
+    assert_eq!(
+        app.explain.concern_fix(1, 2),
+        Some(&ConcernFix::Done(done(committed)))
+    );
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Committed a1b2c3d to feat-x (c changes, r explain again): named it LIMIT"),
+        "the keys come before the agent's words"
+    );
+}
+
+#[test]
+fn the_selected_concern_alone_is_tracked_and_failures_are_kept() {
+    let mut app = three_concerns();
+    select(&mut app, 2, 2);
+    press(&mut app, KeyCode::Char('f'));
+    assert_eq!(draft(&app).request.feedback, "Unbounded");
+    assert_eq!(draft(&app).concerns, Some((1, vec![1])));
+    let (id, _, _) = fix_of(&press(&mut app, KeyCode::Enter));
+    app.update(Msg::Fixed {
+        id,
+        result: Err("pi: \u{1b}[31mboom".to_owned()),
+    });
+    assert_eq!(
+        app.explain.concern_fix(1, 1),
+        Some(&ConcernFix::Failed("pi: ·[31mboom".to_owned()))
+    );
+    assert_eq!(app.explain.concern_fix(1, 0), None, "only the one sent");
+    assert_eq!(
+        app.fix.last.as_ref().map(|l| &l.outcome),
+        Some(&Outcome::Kept("pi: ·[31mboom".to_owned())),
+        "its edits, if any, are uncommitted"
+    );
+
+    // Away from an explanation, the notice has no keys to offer.
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('f'));
+    typed(&mut app, "x");
+    let (id, _, _) = fix_of(&press(&mut app, KeyCode::Enter));
+    app.update(Msg::Fixed {
+        id,
+        result: Ok(done(Outcome::Unchanged)),
+    });
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Nothing changed in this checkout: named it LIMIT")
+    );
+}
+
+#[test]
+fn c_opens_what_the_last_fix_changed() {
+    let mut app = three_concerns();
+    assert_eq!(press(&mut app, KeyCode::Char('c')), []);
+    assert_eq!(app.notice.as_deref(), Some("No fix has finished yet"));
+
+    let finish = |app: &mut App, root: Option<&str>, outcome: Outcome| {
+        app.fix.last = Some(Finished {
+            root: root.map(PathBuf::from),
+            checkout: root.unwrap_or("this checkout").to_owned(),
+            outcome,
+        });
+        press(app, KeyCode::Char('c'))
+    };
+    let opened = |effects: &[Effect]| match effects {
+        [
+            Effect::LoadDiff {
+                entry,
+                refresh: false,
+                file: None,
+            },
+        ] => (**entry).clone(),
+        other => panic!("expected a diff to open, got {other:?}"),
+    };
+
+    // A commit vert lists opens as listed; another as a bare commit, in its
+    // checkout.
+    let id = git2::Oid::from_str("a1b2c3d4e5").expect("oid");
+    let mut listed = Entry::blank(Target::Commit(id));
+    "fix: named it".clone_into(&mut listed.summary);
+    app.update(Msg::Commits(Ok(vec![listed.clone()])));
+    let committed = || Outcome::Committed {
+        id,
+        branch: "main".to_owned(),
+        stale_index: false,
+    };
+    assert_eq!(opened(&finish(&mut app, None, committed())), listed);
+    app.update(Msg::Commits(Ok(Vec::new())));
+    let bare = opened(&finish(&mut app, Some("/wt/x"), committed()));
+    assert_eq!(bare.target, Target::Commit(id));
+    assert_eq!(bare.root, Some(PathBuf::from("/wt/x")));
+
+    // Uncommitted edits open as the checkout's uncommitted changes.
+    assert_eq!(finish(&mut app, None, Outcome::Unchanged), []);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("this checkout has no uncommitted changes")
+    );
+    let mut dirty = Entry::blank(Target::WorkingTree);
+    dirty.summary = "Uncommitted changes".to_owned();
+    app.update(Msg::Worktree(Ok(Some(dirty.clone()))));
+    let kept = || Outcome::Kept("why".to_owned());
+    assert_eq!(opened(&finish(&mut app, None, kept())), dirty);
+
+    let mut linked = branch("feat", Some(("x", false)));
+    let mut wt_dirty = Entry::blank(Target::WorkingTree);
+    wt_dirty.root = Some(PathBuf::from("/wt/x"));
+    if let Some(w) = linked.worktree.as_mut() {
+        w.dirty = Some(wt_dirty.clone());
+    }
+    app.update(Msg::Branches(Ok(Branches {
+        base: None,
+        branches: vec![linked],
+    })));
+    assert_eq!(opened(&finish(&mut app, Some("/wt/x"), kept())), wt_dirty);
+    assert_eq!(finish(&mut app, Some("/wt/gone"), kept()), []);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("/wt/gone has no uncommitted changes")
+    );
 }

@@ -1260,7 +1260,7 @@ mod tests {
             .expect("head")
             .peel_to_commit()
             .expect("commit");
-        assert!(head.id().to_string().starts_with(&id));
+        assert_eq!(head.id(), id);
         assert_eq!(head.summary().ok().flatten(), Some("fix: wrote it"));
         assert!(head.tree().expect("tree").get_name("marker").is_some());
     }

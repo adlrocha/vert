@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use git2::{ApplyLocation, DiffOptions, IndexAddOption, Oid, Repository, RepositoryState, Tree};
 
-use super::{Context, GitError, short_id};
+use super::{Context, GitError};
 
 /// The state of a checkout at one moment: its files, stored as a tree, and
 /// the branch it had checked out.
@@ -33,10 +33,10 @@ pub struct Snapshot {
 /// What became of the edits made since a [`Snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// They are commit `id` (short form) on `branch`.
+    /// They are commit `id` on `branch`.
     Committed {
-        /// The new commit, abbreviated.
-        id: String,
+        /// The new commit.
+        id: Oid,
         /// The branch it was added to.
         branch: String,
         /// The index couldn't be brought up to date for every file the fix
@@ -145,7 +145,7 @@ pub fn commit_edits(dir: &Path, before: &Snapshot, message: &str) -> Result<Outc
         )));
     }
     Ok(Outcome::Committed {
-        id: short_id(id),
+        id,
         branch,
         stale_index: !refresh_index(&repo, &diff, (id, &base, &tree), &paths),
     })
@@ -273,13 +273,13 @@ mod tests {
         out
     }
 
-    fn committed(outcome: &Outcome) -> &str {
+    fn committed(outcome: &Outcome) -> Oid {
         match outcome {
             Outcome::Committed {
                 id,
                 stale_index: false,
                 ..
-            } => id,
+            } => *id,
             other => panic!("not committed: {other:?}"),
         }
     }
@@ -308,7 +308,7 @@ mod tests {
             .expect("head")
             .peel_to_commit()
             .expect("commit");
-        assert!(head.id().to_string().starts_with(id));
+        assert_eq!(head.id(), id);
         assert_eq!(head.message().ok(), Some("fix: shout\n"));
         assert_eq!(head.parent_count(), 1);
         assert_eq!(head_file(&t, "a.txt").as_deref(), Some("one\nTWO\nthree\n"));

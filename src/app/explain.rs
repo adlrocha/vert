@@ -1,11 +1,13 @@
 //! The explain view: an agent's walkthrough of the open change, stacked over
 //! its diff. `x` opens it, `⏎` jumps from a claim to the hunk it is about,
-//! and `a` asks the agent a follow-up question.
+//! `a` asks the agent a follow-up question, `space` marks concerns for `f`
+//! to fix together, and `r` explains the change again as it is now.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::fix::ConcernFix;
 use super::{App, Effect, Focus, ListPos, View, half_page, max_scroll};
 use crate::explain::question::{Ask, Question};
 use crate::explain::{Answer, Diagram, Explainer, Explanation, Note, Ref, diff_key, tree};
@@ -76,6 +78,19 @@ pub struct ExplainView {
     pub rows: usize,
     /// A follow-up question being written.
     pub question: Option<String>,
+    /// Concerns marked to fix together, by index.
+    pub marked: BTreeSet<usize>,
+    /// Whether `r` is waiting for the change's diff as it is now.
+    pub reloading: bool,
+}
+
+/// A place the cursor of the detail pane can stop at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stop<'a> {
+    /// The code it points at, if any.
+    pub pointer: Option<&'a Ref>,
+    /// The concern it belongs to, on *Concerns*.
+    pub concern: Option<usize>,
 }
 
 impl ExplainView {
@@ -109,8 +124,23 @@ impl ExplainView {
         }
     }
 
+    /// Where the detail pane's cursor can stop in the selected item.
+    #[must_use]
+    pub fn stops(&self) -> Vec<Stop<'_>> {
+        match (self.explanation(), self.item()) {
+            (Some(e), Some(item)) => stops(e, item),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Where the detail pane's cursor is.
+    #[must_use]
+    pub fn stop(&self) -> Option<Stop<'_>> {
+        self.stops().get(self.target).copied()
+    }
+
     fn select(&mut self, delta: isize) {
-        let len = self.targets().len();
+        let len = self.stops().len();
         self.target = if len == 0 {
             0
         } else {
@@ -155,22 +185,44 @@ pub fn targets(e: &Explanation, item: Item) -> Vec<&Ref> {
     }
 }
 
-/// The concern that [`targets`]`(e, Item::Concerns)[target]` belongs to;
-/// the only concern when none has a pointer. Kept beside `targets` so the
-/// two agree on how concerns flatten into pointers.
+/// Where the cursor can stop in `item`: each of its code pointers, in
+/// [`targets`] order. On *Concerns*, each pointer also names its concern,
+/// and a concern that points at no code gets a stop of its own, so every
+/// concern can be marked.
 #[must_use]
-pub fn concern_at(e: &Explanation, target: usize) -> Option<&Note> {
-    let mut seen = 0;
+pub fn stops(e: &Explanation, item: Item) -> Vec<Stop<'_>> {
+    if item != Item::Concerns {
+        return targets(e, item)
+            .into_iter()
+            .map(|r| Stop {
+                pointer: Some(r),
+                concern: None,
+            })
+            .collect();
+    }
     e.concerns
         .iter()
-        .find(|n| {
-            seen += n.refs.len();
-            target < seen
+        .enumerate()
+        .flat_map(|(i, n)| {
+            let pointers: Vec<Option<&Ref>> = if n.refs.is_empty() {
+                vec![None]
+            } else {
+                n.refs.iter().map(Some).collect()
+            };
+            pointers.into_iter().map(move |pointer| Stop {
+                pointer,
+                concern: Some(i),
+            })
         })
-        .or(match e.concerns.as_slice() {
-            [only] => Some(only),
-            _ => None,
-        })
+        .collect()
+}
+
+/// The concern the [`stops`]`(e, Item::Concerns)[target]` belongs to, by
+/// index.
+#[must_use]
+pub fn concern_at(e: &Explanation, target: usize) -> Option<(usize, &Note)> {
+    let i = stops(e, Item::Concerns).get(target)?.concern?;
+    e.concerns.get(i).map(|n| (i, n))
 }
 
 /// The code pointer a diagram row offers: the first ref of a node drawn for
@@ -201,6 +253,8 @@ pub struct ExplainState {
     unshown: HashMap<u64, Vec<Question>>,
     /// The last explain view left, to come back to where it was.
     parked: Option<Box<ExplainView>>,
+    /// Fixes asked for concerns, by [`diff_key`] and concern index.
+    pub(super) fixes: HashMap<u64, BTreeMap<usize, ConcernFix>>,
 }
 
 impl ExplainState {
@@ -209,6 +263,18 @@ impl ExplainState {
     #[must_use]
     pub fn question_asked(&self, key: u64) -> Option<i64> {
         self.questioning.get(&key).copied()
+    }
+
+    /// The fixes asked for concerns of the diff `key`, by concern.
+    #[must_use]
+    pub fn concern_fixes(&self, key: u64) -> Option<&BTreeMap<usize, ConcernFix>> {
+        self.fixes.get(&key)
+    }
+
+    /// The fix asked for concern `concern` of the diff `key`, if any.
+    #[must_use]
+    pub fn concern_fix(&self, key: u64, concern: usize) -> Option<&ConcernFix> {
+        self.fixes.get(&key)?.get(&concern)
     }
 }
 
@@ -278,6 +344,8 @@ impl App {
             height: 0,
             rows: 0,
             question: None,
+            marked: BTreeSet::new(),
+            reloading: false,
         })));
         effects
     }
@@ -347,24 +415,9 @@ impl App {
         };
         match (key.code, v.pane) {
             (KeyCode::Char('a'), _) => return self.start_question(),
-            (KeyCode::Char('r'), _) => {
-                let old = std::mem::replace(&mut v.status, Status::Asking(self.now));
-                let (k, entry, files) = (v.key, v.entry.clone(), v.files.clone());
-                // The questions join the new explanation even when the cache
-                // that would hand them over can't be written.
-                let questions = self
-                    .explain
-                    .answers
-                    .remove(&k)
-                    .map(|(e, _)| e.questions)
-                    .or(match old {
-                        Status::Ready(e, _) => Some(e.questions),
-                        Status::Asking(_) | Status::Failed(_) => None,
-                    })
-                    .unwrap_or_default();
-                self.explain.unshown.entry(k).or_default().extend(questions);
-                return self.ask(k, &entry, &files, true);
-            }
+            (KeyCode::Char('r'), _) => return self.explain_again(),
+            (KeyCode::Char('c'), _) => return self.open_last_fix(),
+            (KeyCode::Char(' '), _) => self.toggle_mark(),
             (KeyCode::Tab | KeyCode::BackTab, _) => {
                 v.pane = match v.pane {
                     Pane::Outline => Pane::Detail,
@@ -380,7 +433,7 @@ impl App {
             (KeyCode::PageDown, _) => scroll(v, half * 2),
             (KeyCode::PageUp, _) => scroll(v, -half * 2),
             (KeyCode::Enter | KeyCode::Char('o'), _) => {
-                if let Some(r) = v.targets().get(v.target).map(|r| (*r).clone()) {
+                if let Some(r) = v.stop().and_then(|s| s.pointer).cloned() {
                     self.jump(&r);
                 }
             }
@@ -398,6 +451,126 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// `r`: explains the change again as it is now. Its diff is loaded
+    /// afresh first, since a fix may have changed it (see [`App::on_reloaded`]).
+    fn explain_again(&mut self) -> Vec<Effect> {
+        let Some(View::Explain(v)) = self.views.last() else {
+            return Vec::new();
+        };
+        if v.reloading {
+            return Vec::new();
+        }
+        let entry = self.current_entry(&v.entry);
+        let Some(View::Explain(v)) = self.views.last_mut() else {
+            return Vec::new();
+        };
+        let old = std::mem::replace(&mut v.status, Status::Asking(self.now));
+        v.reloading = true;
+        v.marked.clear();
+        // The questions join the new explanation even when the cache that
+        // would hand them over can't be written.
+        let k = v.key;
+        let questions = self
+            .explain
+            .answers
+            .remove(&k)
+            .map(|(e, _)| e.questions)
+            .or(match old {
+                Status::Ready(e, _) => Some(e.questions),
+                Status::Asking(_) | Status::Failed(_) => None,
+            })
+            .unwrap_or_default();
+        self.explain.unshown.entry(k).or_default().extend(questions);
+        vec![Effect::LoadDiff {
+            entry: Box::new(entry),
+            refresh: true,
+            file: None,
+        }]
+    }
+
+    /// `entry` as vert last saw it: a branch at its current tip, uncommitted
+    /// work as it is now. A commit or pull request stays as it is; loading
+    /// its diff again fetches what it holds now.
+    fn current_entry(&self, entry: &Entry) -> Entry {
+        let branch = entry.branch().and_then(|name| {
+            self.branches
+                .list
+                .branches
+                .iter()
+                .find(|b| b.name == name)?
+                .changes
+                .clone()
+        });
+        let own = entry
+            .is_own_worktree()
+            .then(|| self.feed.worktree.clone())
+            .flatten();
+        branch.or(own).unwrap_or_else(|| entry.clone())
+    }
+
+    /// The diff of `entry` came: an explain view waiting for it (`r`)
+    /// explains it, under the key of the diff as it is now. The questions
+    /// asked about it stay with it when it is unchanged; when a fix changed
+    /// it, they stay with the old diff, as they are about that code.
+    pub(super) fn on_reloaded(
+        &mut self,
+        entry: &Entry,
+        result: &Result<Vec<FileDiff>, String>,
+    ) -> Vec<Effect> {
+        let open = self.views.iter_mut().filter_map(|v| match v {
+            View::Explain(x) => Some(x.as_mut()),
+            _ => None,
+        });
+        let Some(v) = open
+            .chain(self.explain.parked.as_deref_mut())
+            .find(|v| v.reloading && v.entry.id == entry.id)
+        else {
+            return Vec::new();
+        };
+        v.reloading = false;
+        let files = match result {
+            Ok(files) if files.is_empty() => {
+                v.status = Status::Failed("Nothing to explain: the change is empty now".to_owned());
+                return Vec::new();
+            }
+            Ok(files) => files.clone(),
+            Err(why) => {
+                v.status = Status::Failed(format!("Couldn't load the change as it is now: {why}"));
+                return Vec::new();
+            }
+        };
+        let key = diff_key(entry, &files);
+        v.key = key;
+        v.entry = entry.clone();
+        v.files.clone_from(&files);
+        v.pos = ListPos::default();
+        v.target = 0;
+        v.scroll = 0;
+        self.ask(key, entry, &files, true)
+    }
+
+    /// `space` on *Concerns*: marks the concern under the cursor to fix, or
+    /// unmarks it.
+    fn toggle_mark(&mut self) {
+        let Some(View::Explain(v)) = self.views.last_mut() else {
+            return;
+        };
+        let Some(i) = v.stop().and_then(|s| s.concern) else {
+            if v.explanation().is_some() {
+                self.notice = Some("Marking is for concerns: select one first".to_owned());
+            }
+            return;
+        };
+        if matches!(
+            self.explain.concern_fix(v.key, i),
+            Some(ConcernFix::Fixing { .. })
+        ) {
+            self.notice = Some("The agent is already fixing that concern".to_owned());
+        } else if !v.marked.remove(&i) {
+            v.marked.insert(i);
+        }
     }
 
     /// `a`: starts writing a follow-up question, once the explanation is
@@ -512,7 +685,7 @@ impl App {
     }
 
     /// The explain views of the diff `key`, open or parked.
-    fn explain_views(&mut self, key: u64) -> impl Iterator<Item = &mut ExplainView> {
+    pub(super) fn explain_views(&mut self, key: u64) -> impl Iterator<Item = &mut ExplainView> {
         let open = self.views.iter_mut().filter_map(move |v| match v {
             View::Explain(x) if x.key == key => Some(x.as_mut()),
             _ => None,
@@ -780,6 +953,29 @@ mod tests {
         }
     }
 
+    /// Presses `r`, checks it reloads the change's diff, and hands that diff
+    /// back unchanged: what follows.
+    fn explain_again(a: &mut App) -> Vec<Effect> {
+        let effects = press(a, KeyCode::Char('r'));
+        let [
+            Effect::LoadDiff {
+                entry,
+                refresh: true,
+                file: None,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("expected the diff to reload, got {effects:?}");
+        };
+        let files = view(a).files.clone();
+        a.update(Msg::Diff {
+            entry: entry.clone(),
+            result: Ok(files),
+            refresh: true,
+            file: None,
+        })
+    }
+
     /// The key of the only explain request in `effects`.
     fn asked(effects: &[Effect], fresh_wanted: bool) -> u64 {
         match effects {
@@ -883,10 +1079,13 @@ mod tests {
         assert_eq!(press(&mut a, KeyCode::Char('x')), [], "kept in memory");
         assert!(matches!(view(&a).status, Status::Ready(_, true)));
 
-        let again = asked(&press(&mut a, KeyCode::Char('r')), true);
+        let again = asked(&explain_again(&mut a), true);
         assert_eq!(again, key);
         assert_eq!(view(&a).status, Status::Asking(100));
-        assert_eq!(press(&mut a, KeyCode::Char('r')), [], "already asking");
+        assert!(!view(&a).reloading);
+        // Asked again while the agent works: the diff reloads, but the
+        // agent isn't asked twice.
+        assert_eq!(explain_again(&mut a), [], "already asking");
         a.update(Msg::Explained {
             key,
             result: Err("pi failed".to_owned()),
@@ -1012,6 +1211,163 @@ mod tests {
     }
 
     #[test]
+    fn explaining_again_explains_a_branch_at_its_current_tip() {
+        let mut a = app();
+        a.set_explainer(&Ok(pi_for_tests()));
+        let tip = |n: u8| {
+            let mut e = Entry::blank(Target::Range {
+                base: None,
+                head: git2::Oid::from_bytes(&[n; 20]).expect("oid"),
+            });
+            e.id = Entry::branch_id("feat");
+            e
+        };
+        a.update(Msg::Diff {
+            entry: Box::new(tip(1)),
+            result: Ok(vec![file("src/a.rs")]),
+            refresh: false,
+            file: None,
+        });
+        let old = asked(&press(&mut a, KeyCode::Char('x')), false);
+        a.update(Msg::Explained {
+            key: old,
+            result: Ok(answer(false)),
+        });
+        a.update(Msg::Answered {
+            key: old,
+            result: Ok(reply(Vec::new())),
+        });
+        view_mut(&mut a).marked.insert(0);
+
+        // A fix committed on the branch moved it.
+        a.update(Msg::Branches(Ok(crate::git::branches::Branches {
+            base: None,
+            branches: vec![crate::git::branches::Branch {
+                name: "feat".to_owned(),
+                branch: Some("feat".to_owned()),
+                remote: false,
+                ahead_behind: None,
+                changes: Some(tip(2)),
+                worktree: None,
+            }],
+        })));
+        let effects = press(&mut a, KeyCode::Char('r'));
+        let [
+            Effect::LoadDiff {
+                entry,
+                refresh: true,
+                ..
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("expected the diff to reload, got {effects:?}");
+        };
+        assert_eq!(**entry, tip(2), "the branch as it is now");
+        assert!(view(&a).reloading);
+        assert_eq!(
+            view(&a).marked,
+            BTreeSet::new(),
+            "marks are about the old concerns"
+        );
+        assert_eq!(press(&mut a, KeyCode::Char('r')), [], "already reloading");
+
+        let effects = a.update(Msg::Diff {
+            entry: entry.clone(),
+            result: Ok(vec![file("src/a.rs"), file("src/fixed.rs")]),
+            refresh: true,
+            file: None,
+        });
+        let new = asked(&effects, true);
+        assert_ne!(new, old, "a new diff, under its own key");
+        assert_eq!(view(&a).key, new);
+        assert_eq!(view(&a).files.len(), 2);
+        assert_eq!(view(&a).entry, tip(2));
+        a.update(Msg::Explained {
+            key: new,
+            result: Ok(answer(false)),
+        });
+        assert_eq!(
+            view(&a).explanation().map(|e| e.questions.len()),
+            Some(0),
+            "questions stay with the code they were about"
+        );
+        assert_eq!(a.explain.unshown.get(&old).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn explaining_again_says_when_the_change_can_t_be_reloaded() {
+        let (mut a, _) = explained();
+        let reload = |a: &mut App, result: Result<Vec<FileDiff>, String>| {
+            let effects = press(a, KeyCode::Char('r'));
+            let [Effect::LoadDiff { entry, .. }] = effects.as_slice() else {
+                panic!("expected the diff to reload, got {effects:?}");
+            };
+            let effects = a.update(Msg::Diff {
+                entry: entry.clone(),
+                result,
+                refresh: true,
+                file: None,
+            });
+            assert_eq!(effects, []);
+            assert!(!view(a).reloading);
+        };
+        reload(&mut a, Err("gone".to_owned()));
+        assert_eq!(
+            view(&a).status,
+            Status::Failed("Couldn't load the change as it is now: gone".to_owned())
+        );
+        assert_eq!(a.notice.as_deref(), Some("Could not load diff: gone"));
+        reload(&mut a, Ok(Vec::new()));
+        assert_eq!(
+            view(&a).status,
+            Status::Failed("Nothing to explain: the change is empty now".to_owned())
+        );
+
+        // A diff that reloads for another view leaves this one alone.
+        let other = a.update(Msg::Diff {
+            entry: Box::new(change("other")),
+            result: Ok(vec![file("x.rs")]),
+            refresh: true,
+            file: None,
+        });
+        assert_eq!(other, []);
+    }
+
+    #[test]
+    fn explaining_again_finds_its_parked_view() {
+        let (mut a, key) = explained();
+        let effects = press(&mut a, KeyCode::Char('r'));
+        let [Effect::LoadDiff { entry, .. }] = effects.as_slice() else {
+            panic!("expected the diff to reload, got {effects:?}");
+        };
+        let entry = entry.clone();
+        press(&mut a, KeyCode::Esc);
+        let effects = a.update(Msg::Diff {
+            entry,
+            result: Ok(vec![file("src/a.rs"), file("docs/x.md")]),
+            refresh: true,
+            file: None,
+        });
+        assert_eq!(asked(&effects, true), key, "the same diff");
+        let parked = a.explain.parked.as_ref().expect("parked");
+        assert!(!parked.reloading);
+    }
+
+    #[test]
+    fn own_uncommitted_work_reloads_as_it_is_now() {
+        let (mut a, _) = explained();
+        let mut wt = Entry::blank(Target::WorkingTree);
+        view_mut(&mut a).entry = wt.clone();
+        "Uncommitted changes".clone_into(&mut wt.summary);
+        a.update(Msg::Worktree(Ok(Some(wt.clone()))));
+        let effects = press(&mut a, KeyCode::Char('r'));
+        let [Effect::LoadDiff { entry, .. }] = effects.as_slice() else {
+            panic!("expected the diff to reload, got {effects:?}");
+        };
+        assert_eq!(**entry, wt);
+    }
+
+    #[test]
     fn questions_wait_for_the_explanation() {
         let mut a = app();
         a.set_explainer(&Ok(pi_for_tests()));
@@ -1112,7 +1468,7 @@ mod tests {
         });
         // The new explanation comes back without them, as when the cache
         // could not be written.
-        press(&mut a, KeyCode::Char('r'));
+        explain_again(&mut a);
         a.update(Msg::Explained {
             key,
             result: Ok(answer(false)),
@@ -1120,12 +1476,12 @@ mod tests {
         let count = |a: &App| view(a).explanation().map(|e| e.questions.len());
         assert_eq!(count(&a), Some(1));
         // Twice over, through a failure, and without duplicates.
-        press(&mut a, KeyCode::Char('r'));
+        explain_again(&mut a);
         a.update(Msg::Explained {
             key,
             result: Err("x".to_owned()),
         });
-        press(&mut a, KeyCode::Char('r'));
+        explain_again(&mut a);
         a.update(Msg::Explained {
             key,
             result: Ok(Answer {
@@ -1187,7 +1543,7 @@ mod tests {
         press(&mut a, KeyCode::Char('a'));
         type_text(&mut a, "More?");
         press(&mut a, KeyCode::Enter);
-        press(&mut a, KeyCode::Char('r'));
+        explain_again(&mut a);
         a.update(Msg::Explained {
             key,
             result: Err("gone".to_owned()),
@@ -1205,7 +1561,7 @@ mod tests {
             result: Ok(more.clone()),
         });
         assert_eq!(a.notice, None, "nothing to show it in yet");
-        press(&mut a, KeyCode::Char('r'));
+        explain_again(&mut a);
         a.update(Msg::Explained {
             key,
             result: Ok(answer(false)),

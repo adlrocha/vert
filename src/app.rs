@@ -20,9 +20,10 @@ pub use branches::{
 #[cfg(test)]
 pub(crate) use explain::pi_for_tests;
 pub use explain::{
-    ExplainState, ExplainView, Item, Pane, Status, concern_at, items, row_pointer, targets,
+    ExplainState, ExplainView, Item, Pane, Status, Stop, concern_at, items, row_pointer, stops,
+    targets,
 };
-pub use fix::{Draft, FixState, Running};
+pub use fix::{ConcernFix, Concerns, Draft, Finished, FixState, Running};
 
 use crate::explain::Answer;
 use crate::git::RepoInfo;
@@ -766,8 +767,15 @@ impl App {
                 refresh,
                 file,
             } => {
+                if refresh {
+                    let effects = self.on_reloaded(&entry, &result);
+                    match result {
+                        Ok(files) => self.refresh_detail(*entry, files),
+                        Err(e) => self.notice = Some(format!("Could not load diff: {e}")),
+                    }
+                    return effects;
+                }
                 match result {
-                    Ok(files) if refresh => self.refresh_detail(*entry, files),
                     Ok(files) => self.open_detail(*entry, files, file.as_deref()),
                     Err(e) => self.notice = Some(format!("Could not load diff: {e}")),
                 }
