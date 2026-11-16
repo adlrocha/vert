@@ -18,15 +18,25 @@ pub const EXPLAIN_HINTS: Hints = &[
     ("j/k", "move"),
     ("⏎", "go to code"),
     ("J/K", "scroll"),
-    ("r", "ask again"),
+    ("a", "ask"),
+    ("r", "explain again"),
     ("f", "fix"),
     ("esc", "back"),
 ];
 
 /// Draws the explain view.
-pub fn draw(frame: &mut Frame<'_>, area: Rect, v: &mut ExplainView, now: i64, tick: usize) {
+///
+/// `asking` is since when the agent has been answering a follow-up question.
+pub fn draw(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    v: &mut ExplainView,
+    asking: Option<i64>,
+    now: i64,
+    tick: usize,
+) {
     let [summary, body] = Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(area);
-    draw_summary(frame, summary, v, now, tick);
+    draw_summary(frame, summary, v, asking, now, tick);
     match &v.status {
         Status::Asking(since) => {
             let block = panel(true);
@@ -75,13 +85,45 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, v: &mut ExplainView, now: i64, ti
     }
 }
 
+/// Draws the follow-up question being written over everything else.
+pub fn draw_question(frame: &mut Frame<'_>, area: Rect, v: &ExplainView) {
+    let Some(typed) = &v.question else {
+        return;
+    };
+    let earlier = v.explanation().map_or(0, |e| e.questions.len());
+    super::prompt::draw_prompt(frame, area, " Ask ", typed, |inner| {
+        let context = if earlier == 0 {
+            "It sees the change and its explanation".to_owned()
+        } else {
+            format!(
+                "It sees the change, its explanation and {}",
+                plural(earlier, "earlier answer")
+            )
+        };
+        vec![
+            Line::from(Span::styled(
+                truncate(&format!("Ask {} about this change", v.agent), inner),
+                theme::bold(),
+            )),
+            Line::from(Span::styled(truncate(&context, inner), theme::muted())),
+        ]
+    });
+}
+
 /// `m:ss` for a number of seconds.
 fn clock(secs: i64) -> String {
     let secs = secs.max(0);
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-fn draw_summary(frame: &mut Frame<'_>, area: Rect, v: &ExplainView, now: i64, tick: usize) {
+fn draw_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    v: &ExplainView,
+    asking: Option<i64>,
+    now: i64,
+    tick: usize,
+) {
     let e = &v.entry;
     let title = if e.is_own_worktree() {
         "Uncommitted changes"
@@ -99,12 +141,19 @@ fn draw_summary(frame: &mut Frame<'_>, area: Rect, v: &ExplainView, now: i64, ti
         ]),
         l1,
     );
-    let state = match &v.status {
+    let mut state = match &v.status {
         Status::Asking(since) => format!("{} asking {}", spinner(tick), clock(now - since)),
-        Status::Ready(_, true) => "from cache · r asks again".to_owned(),
+        Status::Ready(_, true) => "from cache · r explains again".to_owned(),
         Status::Ready(_, false) => "just now".to_owned(),
         Status::Failed(_) => "failed".to_owned(),
     };
+    if let Some(since) = asking {
+        state = format!(
+            "{state} · {} answering your question {}",
+            spinner(tick),
+            clock(now - since)
+        );
+    }
     frame.render_widget(
         Line::from(vec![
             Span::raw(" "),
@@ -207,6 +256,14 @@ fn outline_row(e: &Explanation, item: Item) -> (String, Style) {
             format!("? Unexplained {}", e.unexplained.len()),
             Style::default().fg(theme::HIGHLIGHT),
         ),
+        Item::Question(i) => (
+            format!(
+                "Q{} {}",
+                i + 1,
+                e.questions.get(i).map_or("", |q| q.question.as_str())
+            ),
+            Style::default().fg(theme::INFO),
+        ),
     }
 }
 
@@ -216,6 +273,7 @@ fn item_title(e: &Explanation, item: Item) -> String {
         Item::Step(i) => format!("Step {} of {}", i + 1, e.steps.len()),
         Item::Concerns => "Worth a second look".to_owned(),
         Item::Unexplained => "Not covered by the walkthrough".to_owned(),
+        Item::Question(i) => format!("Question {} of {}", i + 1, e.questions.len()),
     }
 }
 
@@ -275,6 +333,25 @@ fn detail_lines(
             out.blank();
             for r in &e.unexplained {
                 out.reference(r);
+            }
+        }
+        Item::Question(i) => {
+            if let Some(q) = e.questions.get(i) {
+                out.prefixed("Q ", Style::default().fg(theme::INFO), &q.question);
+                out.blank();
+                for (n, paragraph) in q.answer.split("\n\n").enumerate() {
+                    if n > 0 {
+                        out.blank();
+                    }
+                    out.text(paragraph, theme::text());
+                }
+                if !q.refs.is_empty() {
+                    out.blank();
+                    out.heading("Code");
+                }
+                for r in &q.refs {
+                    out.reference(r);
+                }
             }
         }
     }

@@ -7,6 +7,7 @@ mod explain;
 mod feed;
 mod fix;
 mod hotspots;
+mod prompt;
 mod search;
 
 use ratatui::Frame;
@@ -45,7 +46,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Some(View::Explain(v)) => {
             draw_crumbs(frame, tabs, &[app.tab.title(), &v.entry.short, "Explain"]);
-            explain::draw(frame, body, v, app.now, app.tick);
+            let asking = app.explain.question_asked(v.key);
+            explain::draw(frame, body, v, asking, app.now, app.tick);
             explain::EXPLAIN_HINTS
         }
         None => {
@@ -67,6 +69,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.fix.draft.is_some() {
         fix::draw_draft(frame, frame.area(), app);
+    }
+    if let Some(View::Explain(v)) = app.views.last() {
+        explain::draw_question(frame, frame.area(), v);
     }
     if app.help {
         draw_help(frame);
@@ -243,7 +248,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("j k", "move"),
             ("⏎", "go to the code"),
             ("J K", "scroll"),
-            ("r", "ask the agent again"),
+            ("a", "ask a follow-up question"),
+            ("r", "explain again, keeping questions"),
             ("f", "fix the selected pointer"),
         ],
     ),
@@ -1254,6 +1260,92 @@ mod render_tests {
     }
 
     #[test]
+    fn follow_up_questions_render() {
+        use crate::explain::question::Question;
+        use crate::explain::{Answer, Explanation};
+
+        let (_t, mut app, files, key) = explaining();
+        let explanation =
+            Explanation::validate(r#"{"intent": "Say hello."}"#, &files).expect("valid");
+        app.update(Msg::Explained {
+            key,
+            result: Ok(Answer {
+                explanation,
+                cached: false,
+            }),
+        });
+        let press = |app: &mut App, code| {
+            app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        assert!(screen(&mut app, 140, 30).contains("a ask"), "hint");
+        press(&mut app, KeyCode::Char('a'));
+        for c in "why hello?".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let s = screen(&mut app, 100, 24);
+        for needle in [
+            " Ask ",
+            "Ask pi about this change",
+            "It sees the change and its explanation",
+            "why hello?▏",
+            "⏎ send · esc cancel",
+        ] {
+            assert!(s.contains(needle), "missing {needle}:\n{s}");
+        }
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+        press(&mut app, KeyCode::Enter);
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("answering your question 0:00"), "{s}");
+        assert!(!s.contains("Ask pi about"), "the prompt closed: {s}");
+        let path = files[0].stat.path.clone();
+        app.update(Msg::Answered {
+            key,
+            result: Ok(Question {
+                question: "why hello?".to_owned(),
+                answer: "It is friendlier.\n\nAnd longer.".to_owned(),
+                refs: vec![crate::explain::Ref {
+                    path: path.clone(),
+                    hunk: Some(0),
+                    label: "@@ hunk".to_owned(),
+                }],
+            }),
+        });
+        let s = screen(&mut app, 140, 30);
+        for needle in [
+            "Q1 why hello?",
+            "Question 1 of 1",
+            "Q why hello?",
+            "It is friendlier.",
+            "And longer.",
+            "Code",
+            &format!("› {path}  @@ hunk"),
+        ] {
+            assert!(s.contains(needle), "missing {needle}:\n{s}");
+        }
+        assert!(!s.contains("answering"), "{s}");
+        press(&mut app, KeyCode::Char('a'));
+        let s = screen(&mut app, 100, 24);
+        assert!(s.contains("its explanation and 1 earlier answer"), "{s}");
+        press(&mut app, KeyCode::Esc);
+        // An answer without code has no Code heading.
+        app.update(Msg::Answered {
+            key,
+            result: Ok(Question {
+                question: "and?".to_owned(),
+                answer: "Nothing else.".to_owned(),
+                refs: Vec::new(),
+            }),
+        });
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Question 2 of 2") && !s.contains(" Code"), "{s}");
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+    }
+
+    #[test]
     fn diagram_less_explanations_say_so() {
         use crate::explain::Explanation;
 
@@ -1274,6 +1366,7 @@ mod render_tests {
             scroll: 0,
             height: 0,
             rows: 0,
+            question: None,
         };
         view.entry.root = None;
         app.views.push(crate::app::View::Explain(Box::new(view)));

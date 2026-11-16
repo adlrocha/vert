@@ -1,14 +1,17 @@
 //! The explain view: an agent's walkthrough of the open change, stacked over
-//! its diff. `x` opens it, `⏎` jumps from a claim to the hunk it is about.
+//! its diff. `x` opens it, `⏎` jumps from a claim to the hunk it is about,
+//! and `a` asks the agent a follow-up question.
 
 use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Effect, Focus, ListPos, View, half_page, max_scroll};
+use crate::explain::question::{Ask, Question};
 use crate::explain::{Answer, Diagram, Explainer, Explanation, Note, Ref, diff_key, tree};
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
+use crate::highlight::sanitize;
 use crate::ui::detail::build_diff;
 
 /// One entry of the outline on the left.
@@ -22,6 +25,8 @@ pub enum Item {
     Concerns,
     /// Hunks nothing explains.
     Unexplained,
+    /// A follow-up question and its answer.
+    Question(usize),
 }
 
 /// Where an explanation is at.
@@ -69,6 +74,8 @@ pub struct ExplainView {
     pub height: usize,
     /// Rows of the detail pane's content in the last frame.
     pub rows: usize,
+    /// A follow-up question being written.
+    pub question: Option<String>,
 }
 
 impl ExplainView {
@@ -113,13 +120,14 @@ impl ExplainView {
 }
 
 /// The outline of `e`: the overview, each step, then concerns and the
-/// unexplained hunks when there are any.
+/// unexplained hunks when there are any, then the follow-up questions.
 #[must_use]
 pub fn items(e: &Explanation) -> Vec<Item> {
     std::iter::once(Item::Overview)
         .chain((0..e.steps.len()).map(Item::Step))
         .chain((!e.concerns.is_empty()).then_some(Item::Concerns))
         .chain((!e.unexplained.is_empty()).then_some(Item::Unexplained))
+        .chain((0..e.questions.len()).map(Item::Question))
         .collect()
 }
 
@@ -140,6 +148,10 @@ pub fn targets(e: &Explanation, item: Item) -> Vec<&Ref> {
             .map_or_else(Vec::new, |s| s.refs.iter().collect()),
         Item::Concerns => e.concerns.iter().flat_map(|n| &n.refs).collect(),
         Item::Unexplained => e.unexplained.iter().collect(),
+        Item::Question(i) => e
+            .questions
+            .get(i)
+            .map_or_else(Vec::new, |q| q.refs.iter().collect()),
     }
 }
 
@@ -181,8 +193,31 @@ pub struct ExplainState {
     answers: HashMap<u64, (Explanation, bool)>,
     /// Diffs an agent is working on.
     asking: HashSet<u64>,
+    /// Since when an agent has been answering a question about a diff; one
+    /// at a time per diff.
+    questioning: HashMap<u64, i64>,
+    /// Answers that came while their diff had no explanation to join,
+    /// added to the next one.
+    unshown: HashMap<u64, Vec<Question>>,
     /// The last explain view left, to come back to where it was.
     parked: Option<Box<ExplainView>>,
+}
+
+impl ExplainState {
+    /// Since when (Unix time) an agent has been answering a question about
+    /// the diff `key`, if it is.
+    #[must_use]
+    pub fn question_asked(&self, key: u64) -> Option<i64> {
+        self.questioning.get(&key).copied()
+    }
+}
+
+/// Adds `q` to `e`'s questions unless it is there already (a new
+/// explanation may have read it from the cache).
+fn add_question(e: &mut Explanation, q: &Question) {
+    if !e.questions.contains(q) {
+        e.questions.push(q.clone());
+    }
 }
 
 impl App {
@@ -242,6 +277,7 @@ impl App {
             scroll: 0,
             height: 0,
             rows: 0,
+            question: None,
         })));
         effects
     }
@@ -263,6 +299,12 @@ impl App {
     /// An agent answered about the diff `key`.
     pub(super) fn on_explained(&mut self, key: u64, result: Result<Answer, String>) {
         self.explain.asking.remove(&key);
+        let result = result.map(|mut answer| {
+            for q in self.explain.unshown.remove(&key).unwrap_or_default() {
+                add_question(&mut answer.explanation, &q);
+            }
+            answer
+        });
         if let Ok(answer) = &result {
             self.explain
                 .answers
@@ -304,10 +346,23 @@ impl App {
             v.scroll = v.scroll.saturating_add_signed(delta).min(bottom);
         };
         match (key.code, v.pane) {
+            (KeyCode::Char('a'), _) => return self.start_question(),
             (KeyCode::Char('r'), _) => {
-                v.status = Status::Asking(self.now);
+                let old = std::mem::replace(&mut v.status, Status::Asking(self.now));
                 let (k, entry, files) = (v.key, v.entry.clone(), v.files.clone());
-                self.explain.answers.remove(&k);
+                // The questions join the new explanation even when the cache
+                // that would hand them over can't be written.
+                let questions = self
+                    .explain
+                    .answers
+                    .remove(&k)
+                    .map(|(e, _)| e.questions)
+                    .or(match old {
+                        Status::Ready(e, _) => Some(e.questions),
+                        Status::Asking(_) | Status::Failed(_) => None,
+                    })
+                    .unwrap_or_default();
+                self.explain.unshown.entry(k).or_default().extend(questions);
                 return self.ask(k, &entry, &files, true);
             }
             (KeyCode::Tab | KeyCode::BackTab, _) => {
@@ -343,6 +398,131 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// `a`: starts writing a follow-up question, once the explanation is
+    /// in and no other question about it is being answered.
+    fn start_question(&mut self) -> Vec<Effect> {
+        let Some(View::Explain(v)) = self.views.last_mut() else {
+            return Vec::new();
+        };
+        if v.explanation().is_none() {
+            self.notice = Some("Wait for the explanation before asking about it".to_owned());
+        } else if self.explain.questioning.contains_key(&v.key) {
+            self.notice = Some(format!("{} is still answering your last question", v.agent));
+        } else {
+            v.question = Some(String::new());
+        }
+        Vec::new()
+    }
+
+    /// Keys while a question is being written: text edits it, `⏎` sends
+    /// it, `esc` drops it.
+    pub(super) fn on_question_key(&mut self, key: &KeyEvent) -> Vec<Effect> {
+        let Some(View::Explain(v)) = self.views.last_mut() else {
+            return Vec::new();
+        };
+        let Some(text) = v.question.as_mut() else {
+            return Vec::new();
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => v.question = None,
+            KeyCode::Enter => return self.send_question(),
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Char('u') if ctrl => text.clear(),
+            KeyCode::Char('w') if ctrl => super::delete_word(text, char::is_whitespace),
+            KeyCode::Char(c) if !ctrl => text.push(c),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Sends the question being written, unless it is empty.
+    fn send_question(&mut self) -> Vec<Effect> {
+        let now = self.now;
+        let Some(View::Explain(v)) = self.views.last_mut() else {
+            return Vec::new();
+        };
+        let question = v.question.as_deref().map(str::trim).unwrap_or_default();
+        if question.is_empty() {
+            self.notice = Some("Write a question first".to_owned());
+            return Vec::new();
+        }
+        let Some(explanation) = v.explanation() else {
+            return Vec::new();
+        };
+        let question = question.to_owned();
+        let effect = Effect::Ask(Box::new(Ask {
+            key: v.key,
+            entry: v.entry.clone(),
+            files: v.files.clone(),
+            explanation: explanation.clone(),
+            question: question.clone(),
+        }));
+        v.question = None;
+        self.explain.questioning.insert(v.key, now);
+        vec![effect]
+    }
+
+    /// The agent answered a question about the diff `key`: the answer joins
+    /// the explanation wherever it is kept, and is selected when its view
+    /// is on top.
+    pub(super) fn on_answered(&mut self, key: u64, result: Result<Question, String>) {
+        self.explain.questioning.remove(&key);
+        let answered = match result {
+            Ok(q) => q,
+            Err(why) => {
+                // The agent's own error output: untrusted, like all it prints.
+                self.notice = Some(format!("Couldn't answer: {}", sanitize(&why)));
+                return;
+            }
+        };
+        let mut kept = false;
+        if let Some((e, _)) = self.explain.answers.get_mut(&key) {
+            add_question(e, &answered);
+            kept = true;
+        }
+        let on_top = matches!(self.views.last(), Some(View::Explain(v)) if v.key == key);
+        let mut shown = false;
+        for view in self.explain_views(key) {
+            if let Status::Ready(e, _) = &mut view.status {
+                add_question(e, &answered);
+                shown = true;
+            }
+        }
+        if !shown && !kept {
+            // Being explained again: the answer joins the new explanation.
+            self.explain.unshown.entry(key).or_default().push(answered);
+            return;
+        }
+        if on_top && let Some(View::Explain(v)) = self.views.last_mut() {
+            let items = v.items();
+            if let Some(i) = items.iter().rposition(|it| matches!(it, Item::Question(_))) {
+                v.pos.selected = i;
+                v.pane = Pane::Outline;
+                v.target = 0;
+                v.scroll = 0;
+            }
+        } else {
+            self.notice = Some("An answer is ready: open the change and press x".to_owned());
+        }
+    }
+
+    /// The explain views of the diff `key`, open or parked.
+    fn explain_views(&mut self, key: u64) -> impl Iterator<Item = &mut ExplainView> {
+        let open = self.views.iter_mut().filter_map(move |v| match v {
+            View::Explain(x) if x.key == key => Some(x.as_mut()),
+            _ => None,
+        });
+        open.chain(
+            self.explain
+                .parked
+                .as_deref_mut()
+                .filter(move |v| v.key == key),
+        )
     }
 
     /// Leaves the explain view on top, keeping it to come back to.
@@ -450,6 +630,7 @@ mod tests {
             }],
             unexplained: vec![r("docs/x.md", Some(0))],
             dropped: 0,
+            questions: Vec::new(),
         }
     }
 
@@ -802,6 +983,235 @@ mod tests {
             a.notice.as_deref(),
             Some("gone.rs is no longer part of this change")
         );
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    fn reply(refs: Vec<Ref>) -> Question {
+        Question {
+            question: "Why retry?".to_owned(),
+            answer: "GitHub flakes.".to_owned(),
+            refs,
+        }
+    }
+
+    /// An app with the explanation of `c1` on screen, and its key.
+    fn explained() -> (App, u64) {
+        let mut a = app();
+        a.set_explainer(&Ok(pi_for_tests()));
+        let key = asked(&press(&mut a, KeyCode::Char('x')), false);
+        a.update(Msg::Explained {
+            key,
+            result: Ok(answer(false)),
+        });
+        (a, key)
+    }
+
+    #[test]
+    fn questions_wait_for_the_explanation() {
+        let mut a = app();
+        a.set_explainer(&Ok(pi_for_tests()));
+        press(&mut a, KeyCode::Char('x'));
+        assert_eq!(press(&mut a, KeyCode::Char('a')), []);
+        assert_eq!(view(&a).question, None);
+        assert!(a.notice.as_deref().is_some_and(|n| n.contains("Wait")));
+    }
+
+    #[test]
+    fn a_question_is_written_sent_answered_and_selected() {
+        let (mut a, key) = explained();
+        press(&mut a, KeyCode::Char('a'));
+        assert_eq!(view(&a).question.as_deref(), Some(""));
+        // Keys type instead of acting, esc included.
+        type_text(&mut a, "jrxaf q");
+        assert_eq!(view(&a).question.as_deref(), Some("jrxaf q"));
+        press(&mut a, KeyCode::Backspace);
+        ctrl(&mut a, 'w');
+        assert_eq!(view(&a).question.as_deref(), Some(""));
+        type_text(&mut a, "gone");
+        ctrl(&mut a, 'u');
+        assert_eq!(view(&a).question.as_deref(), Some(""));
+        ctrl(&mut a, 'x');
+        assert_eq!(
+            view(&a).question.as_deref(),
+            Some(""),
+            "other ctrl keys do nothing"
+        );
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(view(&a).question, None, "esc drops the question");
+        assert!(
+            matches!(a.views.last(), Some(View::Explain(_))),
+            "and stays"
+        );
+
+        press(&mut a, KeyCode::Char('a'));
+        type_text(&mut a, "  ");
+        assert_eq!(press(&mut a, KeyCode::Enter), []);
+        assert_eq!(a.notice.as_deref(), Some("Write a question first"));
+        assert!(view(&a).question.is_some(), "still writing");
+        type_text(&mut a, "Why retry? ");
+        let effects = press(&mut a, KeyCode::Enter);
+        let [Effect::Ask(asking)] = &effects[..] else {
+            panic!("{effects:?}")
+        };
+        assert_eq!(asking.key, key);
+        assert_eq!(asking.question, "Why retry?");
+        assert_eq!(asking.explanation, explanation());
+        assert_eq!(asking.files.len(), 2);
+        assert_eq!(view(&a).question, None);
+        let asked_now = |a: &App| a.explain.question_asked(key);
+        assert_eq!(asked_now(&a), Some(100));
+        assert_eq!(press(&mut a, KeyCode::Char('a')), []);
+        assert!(
+            a.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("still answering"))
+        );
+        assert_eq!(view(&a).question, None);
+
+        a.update(Msg::Answered {
+            key,
+            result: Ok(reply(vec![r("src/a.rs", Some(1))])),
+        });
+        assert_eq!(asked_now(&a), None);
+        assert_eq!(
+            view(&a).item(),
+            Some(Item::Question(0)),
+            "the answer is selected"
+        );
+        assert_eq!(view(&a).targets(), [&r("src/a.rs", Some(1))]);
+        // The same answer read back by a new explanation isn't added twice.
+        a.update(Msg::Answered {
+            key,
+            result: Ok(reply(vec![r("src/a.rs", Some(1))])),
+        });
+        assert_eq!(view(&a).explanation().map(|e| e.questions.len()), Some(1));
+        press(&mut a, KeyCode::Enter);
+        let d = detail(&a);
+        assert_eq!(d.scroll, d.rendered.hunk_starts[1], "the answer's code");
+
+        // Kept with the change: back from the parked view, and from memory.
+        press(&mut a, KeyCode::Char('x'));
+        assert_eq!(view(&a).item(), Some(Item::Question(0)));
+        press(&mut a, KeyCode::Esc);
+        a.explain.parked = None;
+        press(&mut a, KeyCode::Char('x'));
+        assert_eq!(view(&a).items().last(), Some(&Item::Question(0)));
+    }
+
+    #[test]
+    fn explaining_again_keeps_questions_without_a_cache() {
+        let (mut a, key) = explained();
+        a.update(Msg::Answered {
+            key,
+            result: Ok(reply(Vec::new())),
+        });
+        // The new explanation comes back without them, as when the cache
+        // could not be written.
+        press(&mut a, KeyCode::Char('r'));
+        a.update(Msg::Explained {
+            key,
+            result: Ok(answer(false)),
+        });
+        let count = |a: &App| view(a).explanation().map(|e| e.questions.len());
+        assert_eq!(count(&a), Some(1));
+        // Twice over, through a failure, and without duplicates.
+        press(&mut a, KeyCode::Char('r'));
+        a.update(Msg::Explained {
+            key,
+            result: Err("x".to_owned()),
+        });
+        press(&mut a, KeyCode::Char('r'));
+        a.update(Msg::Explained {
+            key,
+            result: Ok(Answer {
+                explanation: Explanation {
+                    questions: vec![reply(Vec::new())],
+                    ..explanation()
+                },
+                cached: false,
+            }),
+        });
+        assert_eq!(count(&a), Some(1));
+    }
+
+    #[test]
+    fn answers_elsewhere_and_failures_are_told() {
+        let (mut a, key) = explained();
+        let asked_now = |a: &App| a.explain.question_asked(key);
+        press(&mut a, KeyCode::Char('a'));
+        type_text(&mut a, "Why?");
+        press(&mut a, KeyCode::Enter);
+        a.update(Msg::Answered {
+            key,
+            result: Err("pi: \u{1b}[31mboom".to_owned()),
+        });
+        assert_eq!(asked_now(&a), None);
+        assert_eq!(a.notice.as_deref(), Some("Couldn't answer: pi: ·[31mboom"));
+
+        // Asked, then left: the question keeps going, and blocks another
+        // from a view built afresh.
+        press(&mut a, KeyCode::Char('a'));
+        type_text(&mut a, "Why?");
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Esc);
+        a.explain.parked = None;
+        press(&mut a, KeyCode::Char('x'));
+        press(&mut a, KeyCode::Char('a'));
+        assert_eq!(view(&a).question, None);
+        assert!(
+            a.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("still answering"))
+        );
+        press(&mut a, KeyCode::Esc);
+        a.update(Msg::Answered {
+            key,
+            result: Ok(reply(Vec::new())),
+        });
+        assert!(
+            a.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("An answer is ready"))
+        );
+        let parked = a.explain.parked.as_ref().expect("parked");
+        assert!(parked.items().contains(&Item::Question(0)));
+
+        // An answer that comes while the change is explained again, even
+        // when that fails, joins the next explanation.
+        press(&mut a, KeyCode::Char('x'));
+        press(&mut a, KeyCode::Char('a'));
+        type_text(&mut a, "More?");
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Char('r'));
+        a.update(Msg::Explained {
+            key,
+            result: Err("gone".to_owned()),
+        });
+        assert_eq!(asked_now(&a), Some(100), "More? is still being answered");
+        press(&mut a, KeyCode::Char('a'));
+        assert_eq!(view(&a).question, None, "the explanation is gone");
+        let more = Question {
+            question: "More?".to_owned(),
+            ..reply(Vec::new())
+        };
+        a.notice = None;
+        a.update(Msg::Answered {
+            key,
+            result: Ok(more.clone()),
+        });
+        assert_eq!(a.notice, None, "nothing to show it in yet");
+        press(&mut a, KeyCode::Char('r'));
+        a.update(Msg::Explained {
+            key,
+            result: Ok(answer(false)),
+        });
+        let questions = view(&a).explanation().map(|e| e.questions.clone());
+        assert_eq!(questions, Some(vec![reply(Vec::new()), more]), "both kept");
     }
 
     #[test]

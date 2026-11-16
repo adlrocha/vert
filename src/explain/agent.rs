@@ -51,7 +51,7 @@ pub enum Choice {
 /// What an agent may do in the checkout it runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
-    /// Read files only: explanations.
+    /// Read files only: explanations and follow-up questions.
     ReadOnly,
     /// Read and edit files: fixes.
     Edit,

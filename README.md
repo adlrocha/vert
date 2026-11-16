@@ -64,7 +64,8 @@ in, and what deserves a second look.
   Steps and boxes point at the hunks the agent placed in the diff, and `⏎`
   jumps to them. vert checks each pointer against the real diff, drops the
   ones that name nothing, and lists the hunks nothing explains, which is
-  where to look first. See [Explanations](#explanations).
+  where to look first. `a` asks the agent a follow-up question about the
+  change. See [Explanations](#explanations).
 - **Fixes:** press `f` on a hunk, or on a concern in an explanation, write
   what should change (a concern starts as its own text), and Claude Code
   or Codex makes the edit in that line of work's checkout, confined to
@@ -133,7 +134,7 @@ Press `?` inside vert for all keys. The essentials:
 | Feed      | `n` next new change · `esc` clear filter · `r` reload                   |
 | Hotspots  | `w` time window · `m` files/modules · `⏎` filter feed · `o`/`e` view/edit |
 | Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit · `x` explain · `f` fix |
-| Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `r` ask again · `f` fix |
+| Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `a` ask a question · `r` explain again · `f` fix |
 | Fix       | type the feedback · `⏎` send · `esc` cancel · `ctrl-w`/`ctrl-u` delete |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
 | Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names or PR number · `c` collisions · `d` remove · `r` refresh |
@@ -226,11 +227,23 @@ the end for the others. Each agent gets `--explain-timeout-secs` (default
 sent in full only up to that size; later hunks are sent by their header
 alone.
 
+**Follow-up questions.** Press `a` in an explanation to ask the agent about
+the change, type the question and press `⏎`. Each question is a new
+read-only run of the same agent (a `--explain-cmd` runs unconfined, as it
+does to explain) with the change, its explanation and the earlier
+questions and answers, so it works with every agent and with explanations
+read from the cache. The explanation and the newest earlier answers are
+replayed up to `--explain-max-diff-kb`. Answers appear in the outline as `Q1`,
+`Q2`, …, and their code pointers jump to the diff like the steps' do.
+Questions are kept with the change: reopening it, or pressing `r` for a new
+explanation, keeps them.
+
 **Cache and privacy.** Answers are cached in `$XDG_CACHE_HOME/vert/explain`
 (`~/.cache/vert/explain` by default), readable only by you. The cache key
 covers the agent, the model and the exact diff, so each commit is explained
 once and a working tree that has moved on gets a fresh answer. `r` asks
-again. The diff leaves your machine through the agent, as with any prompt
+again. Follow-up questions are cached under the exact diff alone, whichever
+agent answered. The diff leaves your machine through the agent, as with any prompt
 you give it. `--no-network` turns explanations off.
 
 **Troubleshooting.** When there is no agent to ask, `x` shows
@@ -352,7 +365,7 @@ checkout whose agent is idle.
 | `--explain-model` / `VERT_EXPLAIN_MODEL` | agent's default | Model the agent uses, in its own naming |
 | `--explain-cmd` / `VERT_EXPLAIN_CMD` | — | Shell command to use instead of a known agent |
 | `--explain-timeout-secs` / `VERT_EXPLAIN_TIMEOUT_SECS` | 600 | How long an agent may take to explain or fix |
-| `--explain-max-diff-kb` / `VERT_EXPLAIN_MAX_DIFF_KB` | 256 | Diff sent in full; to explain, later hunks go by header only; to fix, the excerpt stops at a line |
+| `--explain-max-diff-kb` / `VERT_EXPLAIN_MAX_DIFF_KB` | 256 | Diff sent in full; to explain, later hunks go by header only; to fix, the excerpt stops at a line; to ask, also caps the replayed explanation and answers |
 
 ## Development
 
@@ -375,7 +388,7 @@ the event loop. This keeps all interaction logic testable without a terminal.
 | ----------- | ---------------------------------------------------------------- |
 | `git`       | Feed entries (with a per-commit cache), branches and worktrees, collisions between them, structured diffs |
 | `github`    | `origin` detection, token lookup, open pull requests and their diffs |
-| `explain`   | Prompts, agent routing, answer validation and caching, diagram layout |
+| `explain`   | Prompts, agent routing, answer validation and caching, follow-up questions, diagram layout |
 | `fix`       | Fix prompts and the agent's summary of what it changed           |
 | `labels`    | Size, breadth and revert classification                          |
 | `hotspots`  | Ranking by change frequency                                      |
