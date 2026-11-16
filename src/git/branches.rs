@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use git2::{BranchType, Oid, Repository, WorktreePruneOptions};
 
-use super::feed::{Entry, WORKTREE_ID, file_stats, load_worktree, lossy};
+use super::feed::{Entry, file_stats, load_worktree, lossy};
 use super::{Context, FileStat, GitError, Target, short_id};
 use crate::labels::Labeler;
 
@@ -236,9 +236,7 @@ fn list_worktrees(
             );
             let mut dirty = load_worktree(r, opts.labeler, opts.now)?;
             if let Some(e) = dirty.as_mut().filter(|_| !is_current) {
-                e.id = format!("{WORKTREE_ID}:{}", path.display());
-                e.summary = format!("Uncommitted changes in {name}");
-                e.root = Some(path.clone());
+                e.for_linked_worktree(&path, &name);
             }
             let head = r.head().ok().and_then(|h| {
                 let oid = h.peel_to_commit().ok()?.id();
@@ -785,7 +783,7 @@ mod tests {
             .and_then(|w| w.dirty.as_ref());
         let main_dirty = main_dirty.expect("main is dirty");
         assert!(b.branches[0].worktree.as_ref().expect("wt").main);
-        assert_eq!(main_dirty.id, WORKTREE_ID);
+        assert_eq!(main_dirty.id, super::super::feed::WORKTREE_ID);
         assert_eq!(main_dirty.root, None);
 
         let agent = find(&b, "agent");
@@ -812,7 +810,10 @@ mod tests {
         let wt = b.branches[0].worktree.as_ref().expect("wt");
         assert!(wt.current);
         assert!(!wt.main);
-        assert_eq!(wt.dirty.as_ref().map(|d| d.id.as_str()), Some(WORKTREE_ID));
+        assert_eq!(
+            wt.dirty.as_ref().map(|d| d.id.as_str()),
+            Some(super::super::feed::WORKTREE_ID)
+        );
         assert!(
             b.branches[1].worktree.as_ref().is_some_and(|w| w.main),
             "the main checkout keeps its flag from any vantage point"

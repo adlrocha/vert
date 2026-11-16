@@ -25,7 +25,6 @@ use crate::git::branches::Branch;
 use crate::git::commit::Outcome;
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
-use crate::git::feed::WORKTREE_ID;
 use crate::git::short_id;
 use crate::highlight::sanitize;
 
@@ -313,18 +312,18 @@ impl App {
             return Vec::new();
         };
         let entry = v.entry.clone();
-        if let Some(e) = v.explanation()
-            && !v.marked.is_empty()
-        {
-            let marked: Vec<usize> = v.marked.iter().copied().collect();
-            let notes: Vec<&Note> = marked.iter().filter_map(|&i| e.concerns.get(i)).collect();
-            let (text, excerpt) = crate::fix::concerns_request(&notes, &v.files);
-            let texts = marked
+        // The marked concerns this explanation has, in its order: a mark
+        // names a concern by its key, never by position.
+        let marked: Vec<&Note> = v.explanation().map_or_else(Vec::new, |e| {
+            e.concerns
                 .iter()
-                .filter_map(|&i| e.concerns.get(i))
-                .map(concern_key)
-                .collect();
-            let concerns = Some((v.key, texts));
+                .filter(|n| v.marked.contains(&concern_key(n)))
+                .collect()
+        });
+        if !marked.is_empty() {
+            let (text, excerpt) = crate::fix::concerns_request(&marked, &v.files);
+            let keys = marked.iter().map(|n| concern_key(n)).collect();
+            let concerns = Some((v.key, keys));
             self.start_draft(&entry, None, excerpt, text, concerns);
             return Vec::new();
         }
@@ -540,10 +539,9 @@ impl App {
                         .find(|w| &w.path == root)
                         .map(|w| {
                             w.dirty.clone().unwrap_or_else(|| {
+                                // Its files and totals come with the diff.
                                 let mut e = Entry::blank(Target::WorkingTree);
-                                e.id = format!("{WORKTREE_ID}:{}", root.display());
-                                e.summary = format!("Uncommitted changes in {}", w.name);
-                                e.root = Some(root.clone());
+                                e.for_linked_worktree(root, &w.name);
                                 e
                             })
                         }),

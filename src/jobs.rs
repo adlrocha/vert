@@ -504,9 +504,14 @@ fn load_diff(entry: &mut Entry, ctx: &Context) -> Result<Vec<git::diff::FileDiff
         entry.relabel(files.iter().map(|f| f.stat.clone()).collect(), &ctx.labeler);
         return Ok(files);
     }
-    git::open(ctx.dir(entry.root.as_deref()))
+    let files = git::open(ctx.dir(entry.root.as_deref()))
         .and_then(|repo| git::diff::load(&repo, entry.target))
-        .map_err(|e| describe(&e))
+        .map_err(|e| describe(&e))?;
+    // Uncommitted changes move: the entry says what they are now.
+    if entry.target == Target::WorkingTree {
+        entry.relabel(files.iter().map(|f| f.stat.clone()).collect(), &ctx.labeler);
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -623,14 +628,15 @@ mod tests {
         };
         assert_eq!(diff[0].stat.path, "src/main.rs");
 
+        // An entry that doesn't know its files yet learns them.
         let Some(Msg::Reloaded {
             reload: 7,
             result: Ok(diff),
-            ..
+            entry,
         }) = run(
             Effect::ReloadDiff {
                 reload: 7,
-                entry: Box::new(wt),
+                entry: Box::new(Entry::blank(Target::WorkingTree)),
             },
             &c,
         )
@@ -638,6 +644,8 @@ mod tests {
             panic!("reloaded diff")
         };
         assert_eq!(diff[0].stat.path, "src/main.rs");
+        assert_eq!(entry.files, wt.files);
+        assert_eq!((entry.added, entry.removed), (wt.added, wt.removed));
     }
 
     #[test]

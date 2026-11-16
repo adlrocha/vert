@@ -110,7 +110,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 "{} fixing in {} {}  ",
                 spinner(app.tick),
                 one.checkout,
-                explain::clock(app.now - one.since)
+                clock(app.now - one.since)
             ),
             Style::default().fg(theme::INFO),
         )),
@@ -502,6 +502,18 @@ fn stat_spans(added: u64, removed: u64) -> Vec<Span<'static>> {
         ));
     }
     spans
+}
+
+/// Minutes and seconds, as `m:ss`.
+///
+/// ```
+/// assert_eq!(vert::ui::clock(75), "1:15");
+/// assert_eq!(vert::ui::clock(-3), "0:00");
+/// ```
+#[must_use]
+pub fn clock(secs: i64) -> String {
+    let secs = secs.max(0);
+    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// `"1 file"`, `"3 files"`.

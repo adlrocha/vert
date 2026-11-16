@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::{Hints, empty_state, marker, panel, plural, spinner, truncate, width, wrap};
+use super::{Hints, clock, empty_state, marker, panel, plural, spinner, truncate, width, wrap};
 use crate::app::{ConcernFix, ExplainView, Item, Pane, Status, concern_key, items};
 use crate::explain::{Change, Diagram, Explanation, Ref, tree};
 use crate::git::commit::Outcome;
@@ -36,7 +36,7 @@ pub const EXPLAIN_HINTS: Hints = &[
 #[derive(Debug, Clone, Copy)]
 pub struct ConcernMarks<'a> {
     /// Concerns marked with `space`.
-    pub marked: &'a BTreeSet<usize>,
+    pub marked: &'a BTreeSet<String>,
     /// Fixes asked for concerns of this diff, by [`concern_key`].
     pub fixes: Option<&'a BTreeMap<String, ConcernFix>>,
     /// The time now (Unix seconds), for how long a fix has run.
@@ -161,12 +161,6 @@ fn fix_status(fix: &ConcernFix, now: i64) -> (String, Style) {
             Style::default().fg(theme::REMOVED),
         ),
     }
-}
-
-/// Minutes and seconds, as `m:ss`.
-pub(super) fn clock(secs: i64) -> String {
-    let secs = secs.max(0);
-    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 fn draw_summary(
@@ -386,7 +380,7 @@ fn detail_lines(
                 // A concern without code is a stop of its own: its text.
                 let selected_stop = note.refs.is_empty() && out.target();
                 let first = out.lines.len();
-                let mark = if marks.marked.contains(&i) {
+                let mark = if marks.marked.contains(&concern_key(note)) {
                     "[x] ⚠ "
                 } else {
                     "[ ] ⚠ "
@@ -650,16 +644,4 @@ fn diagram(out: &mut Detail, d: &Diagram) {
         .chain([Span::styled("↺ drawn above", theme::muted())])
         .collect();
     out.push(legend);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clocks_count_minutes() {
-        assert_eq!(clock(0), "0:00");
-        assert_eq!(clock(75), "1:15");
-        assert_eq!(clock(-3), "0:00");
-    }
 }

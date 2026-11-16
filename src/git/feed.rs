@@ -140,6 +140,14 @@ impl Entry {
         }
     }
 
+    /// Makes this the uncommitted changes of the linked worktree `name` at
+    /// `path`: the id, summary and checkout such an entry has.
+    pub fn for_linked_worktree(&mut self, path: &Path, name: &str) {
+        self.id = format!("{WORKTREE_ID}:{}", path.display());
+        self.summary = format!("Uncommitted changes in {name}");
+        self.root = Some(path.to_path_buf());
+    }
+
     /// Replaces the changed files and recomputes the totals and labels.
     pub fn relabel(&mut self, files: Vec<FileStat>, labeler: &Labeler) {
         self.added = files.iter().map(|f| f.added).sum();

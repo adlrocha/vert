@@ -68,7 +68,9 @@ pub struct ExplainView {
     pub pos: ListPos,
     /// Focused pane.
     pub pane: Pane,
-    /// Selected code pointer of the item.
+    /// Where the detail pane's cursor is, among the item's [`stops`] (on
+    /// *Concerns*, a concern without code is a stop too): see
+    /// [`ExplainView::stop`].
     pub target: usize,
     /// First visible row of the detail pane.
     pub scroll: usize,
@@ -78,8 +80,9 @@ pub struct ExplainView {
     pub rows: usize,
     /// A follow-up question being written.
     pub question: Option<String>,
-    /// Concerns marked to fix together, by index.
-    pub marked: BTreeSet<usize>,
+    /// Concerns marked to fix together, by [`concern_key`], so a mark stays
+    /// with its concern when an explanation asked again reorders them.
+    pub marked: BTreeSet<String>,
     /// The explanation being asked again (`r`), while the change as it is
     /// now loads.
     pub reload: Option<Reload>,
@@ -270,6 +273,9 @@ pub struct ExplainState {
     /// Answers that came while their diff had no explanation to join,
     /// added to the next one.
     unshown: HashMap<u64, Vec<Question>>,
+    /// Diffs explained again under a new key, to the key they moved to:
+    /// where an answer still on its way for the old one goes.
+    moved: HashMap<u64, u64>,
     /// The last reload (`r`) started, numbering them.
     reloads: u64,
     /// The last explain view left, to come back to where it was.
@@ -297,6 +303,18 @@ impl ExplainState {
     #[must_use]
     pub fn concern_fix(&self, key: u64, concern: &str) -> Option<&ConcernFix> {
         self.fixes.get(&key)?.get(concern)
+    }
+
+    /// The diff `old` was explained again as `new`: work still on its way
+    /// for `old`, or for a diff that had moved to `old`, goes to `new`.
+    fn moved_to(&mut self, old: u64, new: u64) {
+        for to in self.moved.values_mut().filter(|to| **to == old) {
+            *to = new;
+        }
+        // Back to a diff it once was: that one is current again.
+        self.moved.remove(&new);
+        self.moved.retain(|from, to| from != to);
+        self.moved.insert(old, new);
     }
 
     /// Records how the fix asked for `concerns` of the diff `key` stands.
@@ -424,7 +442,8 @@ impl App {
             view.scroll = 0;
             shown = true;
         }
-        if !shown {
+        // One for a diff since explained again is superseded: kept, unsaid.
+        if !shown && !self.explain.moved.contains_key(&key) {
             self.notice = Some(match result {
                 Ok(_) => "An explanation is ready: open the change and press x".to_owned(),
                 Err(why) => format!("Couldn't explain a change: {why}"),
@@ -570,11 +589,10 @@ impl App {
             View::Explain(x) => Some(x.as_mut()),
             _ => None,
         });
-        let Some(v) = open.chain(self.explain.parked.as_deref_mut()).find(|v| {
-            v.reload
-                .as_ref()
-                .is_some_and(|r| r.id == reload && !r.awaiting_branches)
-        }) else {
+        let Some(v) = open
+            .chain(self.explain.parked.as_deref_mut())
+            .find(|v| v.reload.as_ref().is_some_and(|r| r.id == reload))
+        else {
             return Vec::new();
         };
         let Some(Reload { previous, .. }) = v.reload.take() else {
@@ -583,7 +601,11 @@ impl App {
         let files = match result {
             Ok(files) if !files.is_empty() => files.clone(),
             _ => {
-                v.status = previous;
+                // Unless the explanation the view was waiting for came
+                // meanwhile.
+                if matches!(v.status, Status::Asking(_)) {
+                    v.status = previous;
+                }
                 // A failed load says so itself.
                 if result.is_ok() {
                     self.notice = Some(if self.fix.last.is_some() {
@@ -610,11 +632,6 @@ impl App {
             })
             .unwrap_or_default();
         let key = diff_key(entry, &files);
-        // Marks are by position in the old concerns; they hold while the
-        // change didn't move.
-        if key != old {
-            v.marked.clear();
-        }
         v.key = key;
         v.entry = entry.clone();
         v.files.clone_from(&files);
@@ -626,6 +643,9 @@ impl App {
             .entry(old)
             .or_default()
             .extend(questions);
+        if key != old {
+            self.explain.moved_to(old, key);
+        }
         self.ask(key, entry, &files, true)
     }
 
@@ -651,8 +671,8 @@ impl App {
             Some(ConcernFix::Fixing { .. })
         ) {
             self.notice = Some("The agent is already fixing that concern".to_owned());
-        } else if !v.marked.remove(&i) {
-            v.marked.insert(i);
+        } else if !v.marked.remove(&concern) {
+            v.marked.insert(concern);
         }
     }
 
@@ -728,6 +748,13 @@ impl App {
     /// is on top.
     pub(super) fn on_answered(&mut self, key: u64, result: Result<Question, String>) {
         self.explain.questioning.remove(&key);
+        // Asked before its explanation was asked again about the change as
+        // it is now: the answer joins the view there.
+        let moved = self.explain.moved.get(&key).copied();
+        let key = match moved {
+            Some(new) if self.explain_views(key).next().is_none() => new,
+            _ => key,
+        };
         let answered = match result {
             Ok(q) => q,
             Err(why) => {
@@ -1285,6 +1312,78 @@ mod tests {
         (a, key)
     }
 
+    /// Presses `r` and returns the reload it starts.
+    fn reload_of(a: &mut App) -> (u64, Box<Entry>) {
+        let effects = press(a, KeyCode::Char('r'));
+        let [Effect::ReloadDiff { reload, entry }] = effects.as_slice() else {
+            panic!("expected the diff to reload, got {effects:?}");
+        };
+        (*reload, entry.clone())
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_an_explanation_that_came_meanwhile() {
+        let mut a = app();
+        a.set_explainer(&Ok(pi_for_tests()));
+        let key = asked(&press(&mut a, KeyCode::Char('x')), false);
+        let (reload, entry) = reload_of(&mut a);
+        a.update(Msg::Explained {
+            key,
+            result: Ok(answer(false)),
+        });
+        a.update(Msg::Reloaded {
+            reload,
+            entry,
+            result: Err("gone".to_owned()),
+        });
+        assert!(
+            matches!(view(&a).status, Status::Ready(..)),
+            "not back to waiting for nothing"
+        );
+    }
+
+    #[test]
+    fn work_on_its_way_for_a_moved_diff_follows_the_view() {
+        let (mut a, old) = explained();
+        a.explain.questioning.insert(old, 0);
+        let (reload, entry) = reload_of(&mut a);
+        let effects = a.update(Msg::Reloaded {
+            reload,
+            entry,
+            result: Ok(vec![file("src/a.rs"), file("src/new.rs")]),
+        });
+        let new = asked(&effects, true);
+        assert_ne!(new, old);
+        // An explanation of the old diff landing late is superseded.
+        a.notice = None;
+        a.update(Msg::Explained {
+            key: old,
+            result: Ok(answer(false)),
+        });
+        assert_eq!(a.notice, None);
+        a.update(Msg::Explained {
+            key: new,
+            result: Ok(answer(false)),
+        });
+        // The question asked before `r` is answered in the view.
+        a.update(Msg::Answered {
+            key: old,
+            result: Ok(reply(Vec::new())),
+        });
+        assert_eq!(view(&a).explanation().map(|e| e.questions.len()), Some(1));
+    }
+
+    #[test]
+    fn moves_chain_and_undo() {
+        let mut s = ExplainState::default();
+        s.moved_to(1, 2);
+        s.moved_to(2, 3);
+        assert_eq!(s.moved, [(1, 3), (2, 3)].into());
+        // Back to diff 1: it is current again, the others lead to it.
+        s.moved_to(3, 1);
+        assert_eq!(s.moved, [(2, 1), (3, 1)].into());
+    }
+
     #[test]
     fn explaining_again_explains_a_branch_at_its_current_tip() {
         let mut a = app();
@@ -1305,7 +1404,11 @@ mod tests {
             key: old,
             result: Ok(reply(Vec::new())),
         });
-        view_mut(&mut a).marked.insert(0);
+        let mark = view(&a)
+            .explanation()
+            .map(|e| concern_key(&e.concerns[0]))
+            .expect("a concern");
+        view_mut(&mut a).marked.insert(mark.clone());
 
         let list = |n: u8| {
             Msg::Branches(Ok(crate::git::branches::Branches {
@@ -1341,7 +1444,11 @@ mod tests {
         };
         assert_eq!(**entry, tip(2), "the branch as it is now");
         assert!(view(&a).reload.is_some());
-        assert_eq!(view(&a).marked, [0].into(), "kept until the diff is in");
+        assert_eq!(
+            view(&a).marked,
+            [mark.clone()].into(),
+            "kept while it reloads"
+        );
         assert_eq!(press(&mut a, KeyCode::Char('r')), [], "already reloading");
 
         // A refresh of the same change asked before `r` (the diff under
@@ -1364,8 +1471,8 @@ mod tests {
         assert_eq!(view(&a).key, new);
         assert_eq!(
             view(&a).marked,
-            BTreeSet::new(),
-            "marks are about the old concerns"
+            [mark].into(),
+            "a mark names its concern, wherever it now is"
         );
         assert_eq!(view(&a).files.len(), 2);
         assert_eq!(view(&a).entry, tip(2));
@@ -1481,10 +1588,14 @@ mod tests {
     #[test]
     fn marks_survive_explaining_again_an_unchanged_change() {
         let (mut a, key) = explained();
-        view_mut(&mut a).marked.insert(0);
+        let mark = view(&a)
+            .explanation()
+            .map(|e| concern_key(&e.concerns[0]))
+            .expect("a concern");
+        view_mut(&mut a).marked.insert(mark.clone());
         explain_again(&mut a);
         assert_eq!(view(&a).key, key);
-        assert_eq!(view(&a).marked, [0].into());
+        assert_eq!(view(&a).marked, [mark].into());
     }
 
     #[test]

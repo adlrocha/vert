@@ -766,18 +766,42 @@ fn concerns_are_marked_with_space() {
     press(&mut app, KeyCode::Char(' '));
     select(&mut app, 2, 3);
     press(&mut app, KeyCode::Char(' '));
-    assert_eq!(view(&app).marked, [0, 2].into());
+    let (off, wanted) = (
+        "Off by one\n@src/a.rs#1\n@docs/x.md".to_owned(),
+        "Is this wanted?".to_owned(),
+    );
+    assert_eq!(view(&app).marked, [off, wanted.clone()].into());
     select(&mut app, 2, 0);
     press(&mut app, KeyCode::Char(' '));
-    assert_eq!(view(&app).marked, [2].into(), "a second press unmarks");
+    assert_eq!(
+        view(&app).marked,
+        [wanted.clone()].into(),
+        "a second press unmarks"
+    );
 
     // Only concerns can be marked.
     select(&mut app, 1, 0);
     press(&mut app, KeyCode::Char(' '));
-    assert_eq!(view(&app).marked, [2].into());
+    assert_eq!(view(&app).marked, [wanted].into());
     assert_eq!(
         app.notice.as_deref(),
         Some("Marking is for concerns: select one first")
+    );
+}
+
+#[test]
+fn a_mark_whose_concern_is_gone_sends_nothing() {
+    let mut app = three_concerns();
+    // Marked on an earlier answer whose concerns this one lacks.
+    if let Some(View::Explain(v)) = app.views.last_mut() {
+        v.marked.insert("Gone\n@src/a.rs#0".to_owned());
+    }
+    select(&mut app, 2, 2);
+    press(&mut app, KeyCode::Char('f'));
+    assert_eq!(
+        draft(&app).request.feedback,
+        "Unbounded",
+        "the selected concern, not an empty list"
     );
 }
 
