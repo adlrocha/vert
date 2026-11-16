@@ -48,6 +48,8 @@ pub struct Running {
 pub struct FixState {
     /// The agent's name, or why fixes are unavailable.
     pub agent: Option<Result<String, String>>,
+    /// Whether the agent's edits can land outside the checkout it fixes.
+    pub unconfined: bool,
     /// Feedback being written.
     pub draft: Option<Draft>,
     /// Fixes in progress, oldest first.
@@ -59,6 +61,7 @@ impl App {
     /// Sets the agent fixes come from, or why there is none.
     pub fn set_fixer(&mut self, fixer: &Result<Fixer, String>) {
         self.fix.agent = Some(fixer.as_ref().map(Fixer::label).map_err(Clone::clone));
+        self.fix.unconfined = fixer.as_ref().is_ok_and(|f| !f.agent.confines_edits());
     }
 
     /// The checkout a fix to `entry` goes to, and its name for the user.

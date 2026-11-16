@@ -835,7 +835,7 @@ mod render_tests {
     }
 
     #[test]
-    fn the_way_to_fix_with_pi_fits_an_80_column_footer() {
+    fn no_fixing_agent_fits_an_80_column_footer() {
         let (t, mut app) = real_app();
         let none = crate::explain::agent::select_editor(crate::explain::agent::Choice::Auto, None);
         app.set_fixer(&none.map(|agent| crate::fix::Fixer {
@@ -854,7 +854,37 @@ mod render_tests {
         });
         press(&mut app, KeyCode::Char('f'));
         let s = screen(&mut app, 80, 24);
-        assert!(s.contains("VERT_EXPLAIN_AGENT=pi"), "{s}");
+        assert!(s.contains("install Claude Code, Codex or pi"), "{s}");
+    }
+
+    #[test]
+    fn the_fix_prompt_warns_when_pi_is_not_kept_in_the_checkout() {
+        let (t, mut app) = real_app();
+        app.set_fixer(&Ok(crate::fix::Fixer {
+            agent: crate::explain::agent::Agent::Pi,
+            model: None,
+            timeout: std::time::Duration::from_secs(1),
+            max_excerpt_bytes: 1024,
+        }));
+        let entry = app.feed.commits[0].clone();
+        let files = git::diff::load(&t.repo, entry.target).map_err(|e| e.to_string());
+        app.update(Msg::Diff {
+            entry: Box::new(entry),
+            result: files,
+            refresh: false,
+            file: None,
+        });
+        press(&mut app, KeyCode::Char('f'));
+        let s = screen(&mut app, 80, 24);
+        assert!(s.contains("pi, unconfined edits"), "{s}");
+        assert!(s.contains("can't be kept inside"), "{s}");
+        app.set_fixer(&Ok(crate::fix::Fixer {
+            agent: crate::explain::agent::Agent::Claude,
+            model: None,
+            timeout: std::time::Duration::from_secs(1),
+            max_excerpt_bytes: 1024,
+        }));
+        assert!(!screen(&mut app, 80, 24).contains("can't be kept inside"));
     }
 
     #[test]

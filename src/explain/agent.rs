@@ -6,8 +6,9 @@
 //! limited to read-only tools to explain a change. To fix one, Claude Code
 //! gets file tools confined to the checkout (`--restricted`, no shell, no
 //! MCP servers) and Codex its workspace-write sandbox. pi can't be confined
-//! to the checkout, so it fixes only when asked for by name, with its file
-//! tools and nothing else. A custom command runs unconfined, with the
+//! to the checkout, so it fixes only when asked for by name or when no
+//! confining agent is installed, with its file tools and nothing else; its
+//! label and the fix prompt warn. A custom command runs unconfined, with the
 //! user's own permissions.
 
 use std::collections::BTreeSet;
@@ -66,8 +67,8 @@ pub enum Agent {
     /// Codex: its read-only sandbox to explain, its workspace-write one to fix.
     Codex,
     /// pi: read, grep, find and ls to explain; with edit and write to fix.
-    /// It can't be confined to a checkout, so it fixes only when chosen by
-    /// name (see [`select_editor`]).
+    /// It can't be confined to a checkout, so `auto` fixes with it only when
+    /// no confining agent is installed (see [`select_editor`]).
     Pi,
     /// A shell command that reads the prompt on stdin and answers on stdout.
     Custom(String),
@@ -298,20 +299,23 @@ pub fn select(choice: Choice, custom: Option<&str>, path: Option<&OsStr>) -> Res
 
 /// Picks the agent to fix changes with, from `choice`, checked against the
 /// directories of `path`. `auto` takes the first installed agent that
-/// [`confines_edits`](Agent::confines_edits); pi, which doesn't, fixes only
-/// when chosen by name.
+/// [`confines_edits`](Agent::confines_edits), and pi, which doesn't, only
+/// when neither of those is installed; its label then warns the user.
 ///
 /// # Errors
 /// Explains, for the user, why no agent can fix.
 pub fn select_editor(choice: Choice, path: Option<&OsStr>) -> Result<Agent, String> {
     if choice == Choice::Auto {
-        return AUTO
+        let found = |agent: &Agent| path.is_some_and(|p| on_path(agent.name(), p));
+        let (confined, unconfined): (Vec<_>, Vec<_>) =
+            AUTO.into_iter().partition(Agent::confines_edits);
+        return confined
             .into_iter()
-            .filter(Agent::confines_edits)
-            .find(|agent| path.is_some_and(|p| on_path(agent.name(), p)))
+            .chain(unconfined)
+            .find(found)
             // Short enough for an 80-column footer after "Can't fix: ".
             .ok_or_else(|| {
-                "no claude or codex; install one or set VERT_EXPLAIN_AGENT=pi".to_owned()
+                "no claude, codex or pi on PATH: install Claude Code, Codex or pi".to_owned()
             });
     }
     select(choice, None, path)
