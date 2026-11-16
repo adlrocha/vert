@@ -26,12 +26,12 @@ pub const EXPLAIN_HINTS: Hints = &[
 
 /// Draws the explain view.
 ///
-/// `asking` is the follow-up question the agent is answering, and since when.
+/// `asking` is since when the agent has been answering a follow-up question.
 pub fn draw(
     frame: &mut Frame<'_>,
     area: Rect,
     v: &mut ExplainView,
-    asking: Option<&(String, i64)>,
+    asking: Option<i64>,
     now: i64,
     tick: usize,
 ) {
@@ -91,7 +91,7 @@ pub fn draw_question(frame: &mut Frame<'_>, area: Rect, v: &ExplainView) {
         return;
     };
     let earlier = v.explanation().map_or(0, |e| e.questions.len());
-    super::fix::draw_prompt(frame, area, " Ask ", typed, |inner| {
+    super::prompt::draw_prompt(frame, area, " Ask ", typed, |inner| {
         let context = if earlier == 0 {
             "It sees the change and its explanation".to_owned()
         } else {
@@ -120,7 +120,7 @@ fn draw_summary(
     frame: &mut Frame<'_>,
     area: Rect,
     v: &ExplainView,
-    asking: Option<&(String, i64)>,
+    asking: Option<i64>,
     now: i64,
     tick: usize,
 ) {
@@ -143,11 +143,11 @@ fn draw_summary(
     );
     let mut state = match &v.status {
         Status::Asking(since) => format!("{} asking {}", spinner(tick), clock(now - since)),
-        Status::Ready(_, true) => "from cache · r asks again".to_owned(),
+        Status::Ready(_, true) => "from cache · r explains again".to_owned(),
         Status::Ready(_, false) => "just now".to_owned(),
         Status::Failed(_) => "failed".to_owned(),
     };
-    if let Some((_, since)) = asking {
+    if let Some(since) = asking {
         state = format!(
             "{state} · {} answering your question {}",
             spinner(tick),

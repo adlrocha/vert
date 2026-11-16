@@ -7,6 +7,7 @@ mod explain;
 mod feed;
 mod fix;
 mod hotspots;
+mod prompt;
 mod search;
 
 use ratatui::Frame;

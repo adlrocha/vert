@@ -193,9 +193,9 @@ pub struct ExplainState {
     answers: HashMap<u64, (Explanation, bool)>,
     /// Diffs an agent is working on.
     asking: HashSet<u64>,
-    /// The question an agent is answering about a diff, and since when;
-    /// one at a time per diff.
-    questioning: HashMap<u64, (String, i64)>,
+    /// Since when an agent has been answering a question about a diff; one
+    /// at a time per diff.
+    questioning: HashMap<u64, i64>,
     /// Answers that came while their diff had no explanation to join,
     /// added to the next one.
     unshown: HashMap<u64, Vec<Question>>,
@@ -204,11 +204,11 @@ pub struct ExplainState {
 }
 
 impl ExplainState {
-    /// The question an agent is answering about the diff `key`, and since
-    /// when (Unix time).
+    /// Since when (Unix time) an agent has been answering a question about
+    /// the diff `key`, if it is.
     #[must_use]
-    pub fn question_asked(&self, key: u64) -> Option<&(String, i64)> {
-        self.questioning.get(&key)
+    pub fn question_asked(&self, key: u64) -> Option<i64> {
+        self.questioning.get(&key).copied()
     }
 }
 
@@ -348,9 +348,21 @@ impl App {
         match (key.code, v.pane) {
             (KeyCode::Char('a'), _) => return self.start_question(),
             (KeyCode::Char('r'), _) => {
-                v.status = Status::Asking(self.now);
+                let old = std::mem::replace(&mut v.status, Status::Asking(self.now));
                 let (k, entry, files) = (v.key, v.entry.clone(), v.files.clone());
-                self.explain.answers.remove(&k);
+                // The questions join the new explanation even when the cache
+                // that would hand them over can't be written.
+                let questions = self
+                    .explain
+                    .answers
+                    .remove(&k)
+                    .map(|(e, _)| e.questions)
+                    .or(match old {
+                        Status::Ready(e, _) => Some(e.questions),
+                        Status::Asking(_) | Status::Failed(_) => None,
+                    })
+                    .unwrap_or_default();
+                self.explain.unshown.entry(k).or_default().extend(questions);
                 return self.ask(k, &entry, &files, true);
             }
             (KeyCode::Tab | KeyCode::BackTab, _) => {
@@ -451,7 +463,7 @@ impl App {
             question: question.clone(),
         }));
         v.question = None;
-        self.explain.questioning.insert(v.key, (question, now));
+        self.explain.questioning.insert(v.key, now);
         vec![effect]
     }
 
@@ -1051,8 +1063,8 @@ mod tests {
         assert_eq!(asking.explanation, explanation());
         assert_eq!(asking.files.len(), 2);
         assert_eq!(view(&a).question, None);
-        let asked_now = |a: &App| a.explain.question_asked(key).cloned();
-        assert_eq!(asked_now(&a), Some(("Why retry?".to_owned(), 100)));
+        let asked_now = |a: &App| a.explain.question_asked(key);
+        assert_eq!(asked_now(&a), Some(100));
         assert_eq!(press(&mut a, KeyCode::Char('a')), []);
         assert!(
             a.notice
@@ -1092,9 +1104,45 @@ mod tests {
     }
 
     #[test]
+    fn explaining_again_keeps_questions_without_a_cache() {
+        let (mut a, key) = explained();
+        a.update(Msg::Answered {
+            key,
+            result: Ok(reply(Vec::new())),
+        });
+        // The new explanation comes back without them, as when the cache
+        // could not be written.
+        press(&mut a, KeyCode::Char('r'));
+        a.update(Msg::Explained {
+            key,
+            result: Ok(answer(false)),
+        });
+        let count = |a: &App| view(a).explanation().map(|e| e.questions.len());
+        assert_eq!(count(&a), Some(1));
+        // Twice over, through a failure, and without duplicates.
+        press(&mut a, KeyCode::Char('r'));
+        a.update(Msg::Explained {
+            key,
+            result: Err("x".to_owned()),
+        });
+        press(&mut a, KeyCode::Char('r'));
+        a.update(Msg::Explained {
+            key,
+            result: Ok(Answer {
+                explanation: Explanation {
+                    questions: vec![reply(Vec::new())],
+                    ..explanation()
+                },
+                cached: false,
+            }),
+        });
+        assert_eq!(count(&a), Some(1));
+    }
+
+    #[test]
     fn answers_elsewhere_and_failures_are_told() {
         let (mut a, key) = explained();
-        let asked_now = |a: &App| a.explain.question_asked(key).cloned();
+        let asked_now = |a: &App| a.explain.question_asked(key);
         press(&mut a, KeyCode::Char('a'));
         type_text(&mut a, "Why?");
         press(&mut a, KeyCode::Enter);
@@ -1144,7 +1192,7 @@ mod tests {
             key,
             result: Err("gone".to_owned()),
         });
-        assert_eq!(asked_now(&a).map(|(q, _)| q), Some("More?".to_owned()));
+        assert_eq!(asked_now(&a), Some(100), "More? is still being answered");
         press(&mut a, KeyCode::Char('a'));
         assert_eq!(view(&a).question, None, "the explanation is gone");
         let more = Question {
@@ -1163,7 +1211,7 @@ mod tests {
             result: Ok(answer(false)),
         });
         let questions = view(&a).explanation().map(|e| e.questions.clone());
-        assert_eq!(questions, Some(vec![more]));
+        assert_eq!(questions, Some(vec![reply(Vec::new()), more]), "both kept");
     }
 
     #[test]

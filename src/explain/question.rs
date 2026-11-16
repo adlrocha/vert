@@ -73,8 +73,7 @@ pub struct Question {
 
 #[derive(Debug, Deserialize)]
 struct RawAnswer {
-    #[serde(default)]
-    answer: String,
+    answer: Option<String>,
     #[serde(default)]
     refs: Vec<RawRef>,
 }
@@ -91,8 +90,9 @@ struct Saved {
 
 impl Question {
     /// Parses an agent's answer to `question` and checks its pointers
-    /// against `files`. An answer in prose rather than JSON is kept whole,
-    /// without pointers; a JSON one must hold an answer.
+    /// against `files`. An answer that isn't a JSON object with an
+    /// `answer` is taken as prose and kept whole, without pointers; one
+    /// whose `answer` is blank is refused.
     ///
     /// ```
     /// let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
@@ -107,10 +107,11 @@ impl Question {
     /// Says so when the answer is empty.
     pub fn validate(question: &str, answer: &str, files: &[FileDiff]) -> Result<Self, String> {
         let mut resolve = Resolver { files, dropped: 0 };
-        let parsed =
-            extract_json(answer).and_then(|json| serde_json::from_str::<RawAnswer>(json).ok());
+        let parsed = extract_json(answer)
+            .and_then(|json| serde_json::from_str::<RawAnswer>(json).ok())
+            .and_then(|raw| Some((raw.answer?, raw.refs)));
         let (text, refs) = match parsed {
-            Some(raw) => (clean(&raw.answer), resolve.many(&raw.refs)),
+            Some((text, refs)) => (clean(&text), resolve.many(&refs)),
             None => (clean(answer), Vec::new()),
         };
         if text.is_empty() {
@@ -468,7 +469,17 @@ mod tests {
         let q = Question::validate("Why?", "  Just \u{1b}[31mbecause\t. ", &files).expect("prose");
         assert_eq!(q.answer, "Just ·[31mbecause    .", "sanitized");
         assert_eq!(q.refs, Vec::<Ref>::new());
-        assert!(Question::validate("Why?", r#"{"text": "x"}"#, &files).is_err());
+        let braces = Question::validate("Why?", r#"It now sends {"n": 2} first."#, &files);
+        assert_eq!(
+            braces.map(|q| q.answer),
+            Ok(r#"It now sends {"n": 2} first."#.to_owned()),
+            "prose with braces is still prose"
+        );
+        let shapeless = Question::validate("Why?", r#"{"text": "x"}"#, &files);
+        assert_eq!(
+            shapeless.map(|q| q.answer),
+            Ok(r#"{"text": "x"}"#.to_owned())
+        );
         assert!(Question::validate("Why?", "  \n ", &files).is_err());
         assert!(Question::validate("Why?", r#"{"answer": " "}"#, &files).is_err());
     }
