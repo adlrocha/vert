@@ -2,6 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
@@ -37,8 +38,18 @@ pub(super) fn draw_draft(frame: &mut Frame<'_>, area: Rect, app: &App) {
             theme::bold(),
         )),
         Line::from(Span::styled(truncate(place, inner), theme::muted())),
-        Line::raw(""),
     ];
+    if app.fix.unconfined {
+        lines.extend(
+            wrap(
+                "it can't be kept inside the checkout: its edits can land anywhere you can write",
+                inner,
+            )
+            .into_iter()
+            .map(|l| Line::from(Span::styled(l, Style::default().fg(theme::WARN)))),
+        );
+    }
+    lines.push(Line::raw(""));
     let typed = format!("{}▏", draft.request.feedback);
     let wrapped = wrap(&typed, inner);
     let skip = wrapped.len().saturating_sub(MAX_TEXT_LINES);
