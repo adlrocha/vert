@@ -140,6 +140,23 @@ impl Entry {
         }
     }
 
+    /// Uncommitted changes not yet scanned: their files and totals come
+    /// with their diff (see [`Entry::relabel`]).
+    #[must_use]
+    pub fn uncommitted() -> Self {
+        let mut entry = Self::blank(Target::WorkingTree);
+        "Uncommitted changes".clone_into(&mut entry.summary);
+        entry
+    }
+
+    /// Makes this the uncommitted changes of the linked worktree `name` at
+    /// `path`: the id, summary and checkout such an entry has.
+    pub fn for_linked_worktree(&mut self, path: &Path, name: &str) {
+        self.id = format!("{WORKTREE_ID}:{}", path.display());
+        self.summary = format!("Uncommitted changes in {name}");
+        self.root = Some(path.to_path_buf());
+    }
+
     /// Replaces the changed files and recomputes the totals and labels.
     pub fn relabel(&mut self, files: Vec<FileStat>, labeler: &Labeler) {
         self.added = files.iter().map(|f| f.added).sum();
@@ -265,7 +282,12 @@ pub fn load_commits_cached(
     Ok(entries)
 }
 
-fn commit_entry(repo: &Repository, oid: Oid, labeler: &Labeler) -> Result<Entry, GitError> {
+/// The entry of commit `oid` in `repo`: its summary, body, author, time
+/// and changed files.
+///
+/// # Errors
+/// Returns an error when the commit or its changes can't be read.
+pub fn commit_entry(repo: &Repository, oid: Oid, labeler: &Labeler) -> Result<Entry, GitError> {
     let commit = repo.find_commit(oid).ctx("read commit")?;
     let files = file_stats(repo, Target::Commit(oid))?;
     let mut entry = Entry::new(Target::Commit(oid), files, labeler);
@@ -317,8 +339,8 @@ pub fn load_worktree(
         return Ok(None);
     }
     let workdir = super::workdir(repo)?;
-    let mut entry = Entry::new(Target::WorkingTree, files, labeler);
-    "Uncommitted changes".clone_into(&mut entry.summary);
+    let mut entry = Entry::uncommitted();
+    entry.relabel(files, labeler);
     entry.time = entry
         .files
         .iter()

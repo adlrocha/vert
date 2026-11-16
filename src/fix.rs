@@ -1,10 +1,12 @@
-//! Fixes: a coding agent already set up on the machine acts on one piece of
-//! review feedback, editing files in the checkout of the line of work under
+//! Fixes: a coding agent already set up on the machine acts on review
+//! feedback, editing files in the checkout of the line of work under
 //! review.
 //!
-//! vert sends the agent the change it is looking at, the place the feedback
-//! is about (a file and line, with the hunk around it) and the feedback in
-//! the reviewer's words. The agent edits files and never commits. Once it is
+//! vert sends the agent the change it is looking at and the feedback in the
+//! reviewer's words: either one request with the place it is about (a file
+//! and line, with the hunk around it), or several concerns from an
+//! explanation as a numbered list, each with the places it points at, and
+//! the hunks there file by file (see [`concerns_request`]). The agent edits files and never commits. Once it is
 //! done, vert commits what it changed (and only that) on the checkout's
 //! branch, unless that is turned off or can't be done safely (see
 //! [`crate::git::commit`]); the edits then stay uncommitted.
@@ -14,12 +16,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::explain::agent::{self, Access, Agent, Groups};
+use crate::explain::{Note, Ref};
 use crate::git::commit::{self, Outcome};
 use crate::git::diff::FileDiff;
 use crate::highlight::sanitize;
 
 /// Bumped whenever the prompt changes.
-const PROMPT_VERSION: &str = "vert-fix-3";
+const PROMPT_VERSION: &str = "vert-fix-4";
 /// The line an agent starts its one-line summary with.
 const SUMMARY: &str = "SUMMARY:";
 /// Most characters of an agent's summary repeated to the user.
@@ -28,27 +31,98 @@ const SUMMARY_CHARS: usize = 300;
 /// usual width, so logs and pull requests show it whole.
 const SUBJECT_CHARS: usize = 72;
 
-const INSTRUCTIONS: &str = r"A person is reviewing a code change in this repository, in the current directory, and asked you to act on one piece of feedback.
+const INSTRUCTIONS: &str = r"A person is reviewing a code change in this repository, in the current directory, and asked you to act on their feedback: one request, or a numbered list of concerns, each naming the places it is about.
 
 Rules:
 - Do what the feedback asks with the smallest edit that does it. Don't refactor, reformat or touch unrelated code.
+- When the feedback is a numbered list, deal with every concern in it, not just the first.
 - Edit files in the current directory only. Don't run git commands that commit, stage, stash, reset, check out, clean, push or switch branches: the person reviews your edits once you are done, next to any uncommitted work they already have.
 - The files on disk are the source of truth. The excerpt shows where the person was looking when they wrote the feedback; it may be out of date.
-- If the feedback is unclear, wrong, or already addressed, change nothing and say why.
-- End your answer with one line that starts with SUMMARY: and says what you changed, or why you changed nothing.";
+- If the feedback (or one concern in the list) is unclear, wrong, or already addressed, leave it and say why.
+- End your answer with one line that starts with SUMMARY: and says what you changed, or why you changed nothing; for a numbered list, say it for each concern by its number.";
 
 /// One piece of feedback for an agent to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     /// The change under review, as the person sees it: `"a1b2c3d Add login"`.
     pub change: String,
-    /// Where the feedback points: `"src/auth.rs:42"`, a file, or `None`
-    /// for the change as a whole.
+    /// Where the feedback points (see [`place`]): `"src/auth.rs:42"`, a
+    /// file, or `None` for the change as a whole, as for several concerns.
     pub place: Option<String>,
-    /// The hunk around that place, in diff form; empty when there is none.
+    /// The hunk around that place, in diff form, or for several concerns
+    /// (see [`concerns_request`]) each hunk they point at under its file's
+    /// `diff --git` header; empty when there is none.
     pub excerpt: String,
     /// The feedback, in the person's words.
     pub feedback: String,
+}
+
+/// A place in the change as the agent is told it: `path:line`, or the
+/// path alone for a whole file.
+///
+/// ```
+/// assert_eq!(vert::fix::place("src/a.rs", Some(42)), "src/a.rs:42");
+/// assert_eq!(vert::fix::place("src/a.rs", None), "src/a.rs");
+/// ```
+#[must_use]
+pub fn place(path: &str, line: Option<u32>) -> String {
+    line.map_or_else(|| path.to_owned(), |l| format!("{path}:{l}"))
+}
+
+/// Where code pointer `r` lands in the diff `files`: its file, if the diff
+/// has it, and the first changed line of its hunk, if it names one there.
+#[must_use]
+pub fn locate<'a>(r: &Ref, files: &'a [FileDiff]) -> (Option<&'a FileDiff>, Option<u32>) {
+    let file = files.iter().find(|f| f.stat.path == r.path);
+    let line = file
+        .zip(r.hunk)
+        .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
+    (file, line)
+}
+
+/// The feedback and excerpt asking to fix several `concerns` of a change
+/// whose diff is `files`: the concerns as a numbered list, each with the
+/// places it points at, and each hunk there once, under its file's header.
+#[must_use]
+pub fn concerns_request(concerns: &[&Note], files: &[FileDiff]) -> (String, String) {
+    let mut text =
+        "Deal with each of these concerns a reviewer raised about the change:\n".to_owned();
+    // Each file pointed at, in order, with the hunks pointed at in it.
+    let mut shown: Vec<(&FileDiff, Vec<Option<usize>>)> = Vec::new();
+    for (n, note) in concerns.iter().enumerate() {
+        let _ = write!(text, "\n{}. {}", n + 1, note.text.trim());
+        let places: Vec<String> = note
+            .refs
+            .iter()
+            .map(|r| {
+                let (file, line) = locate(r, files);
+                if let Some(f) = file {
+                    match shown.iter_mut().find(|(s, _)| s.stat.path == r.path) {
+                        Some((_, hunks)) if !hunks.contains(&r.hunk) => hunks.push(r.hunk),
+                        Some(_) => {}
+                        None => shown.push((f, vec![r.hunk])),
+                    }
+                }
+                place(&r.path, line)
+            })
+            .collect();
+        if !places.is_empty() {
+            let _ = write!(text, " (at {})", places.join(", "));
+        }
+    }
+    let mut excerpts = String::new();
+    for (f, hunks) in shown {
+        let _ = writeln!(excerpts, "diff --git a/{0} b/{0}", f.stat.path);
+        // The whole file covers any of its hunks.
+        if hunks.contains(&None) {
+            excerpts.push_str(&excerpt(f, None));
+        } else {
+            for hunk in hunks {
+                excerpts.push_str(&excerpt(f, hunk));
+            }
+        }
+    }
+    (text, excerpts)
 }
 
 /// The hunk `hunk` of `file` in diff form (`+`, `-` and ` ` prefixes), or
@@ -278,6 +352,8 @@ mod tests {
     fn the_prompt_carries_the_change_place_excerpt_and_feedback() {
         let p = prompt(&request(), 1 << 10);
         assert!(p.starts_with(PROMPT_VERSION));
+        // Marked concerns go as one numbered list: each must be handled.
+        assert!(p.contains("deal with every concern in it"));
         assert!(p.contains("Don't run git commands that commit, stage, stash, reset"));
         assert!(p.contains("# The change\n\na1b2c3d Add login\n"));
         assert!(p.contains(
@@ -328,6 +404,63 @@ mod tests {
             "@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n@@ -9 +9 @@\n-x\n+y\n"
         );
         assert_eq!(excerpt(&files[0], Some(5)), "");
+    }
+
+    #[test]
+    fn several_concerns_go_as_a_numbered_list_with_each_hunk_once() {
+        use crate::explain::Ref;
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n@@ -9 +9 @@\n-x\n+y\n";
+        let files = crate::git::diff::parse(diff).expect("diff");
+        let at = |path: &str, hunk| Ref {
+            path: path.to_owned(),
+            hunk,
+            label: String::new(),
+        };
+        let first = Note {
+            text: " Off by one ".to_owned(),
+            refs: vec![at("a.rs", Some(1)), at("gone.rs", None)],
+        };
+        let second = Note {
+            text: "Same file".to_owned(),
+            refs: vec![at("a.rs", Some(1)), at("a.rs", Some(0))],
+        };
+        let third = Note {
+            text: "No code".to_owned(),
+            refs: Vec::new(),
+        };
+        let (text, excerpt) = concerns_request(&[&first, &second, &third], &files);
+        assert_eq!(
+            text,
+            "Deal with each of these concerns a reviewer raised about the change:\n\
+             \n1. Off by one (at a.rs:9, gone.rs)\
+             \n2. Same file (at a.rs:9, a.rs:2)\
+             \n3. No code"
+        );
+        // One header per file, each hunk once.
+        assert_eq!(
+            excerpt,
+            "diff --git a/a.rs b/a.rs\n@@ -9 +9 @@\n-x\n+y\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n"
+        );
+        let whole = Note {
+            text: "Whole".to_owned(),
+            refs: vec![at("a.rs", Some(1)), at("a.rs", None)],
+        };
+        let (_, excerpt_whole) = concerns_request(&[&whole], &files);
+        assert_eq!(
+            excerpt_whole,
+            "diff --git a/a.rs b/a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n@@ -9 +9 @@\n-x\n+y\n"
+        );
+        // And the prompt carries both, with no single place.
+        let p = prompt(
+            &Request {
+                place: None,
+                excerpt,
+                feedback: text,
+                ..request()
+            },
+            1 << 20,
+        );
+        assert!(p.contains("1. Off by one") && p.contains("diff --git a/a.rs"));
     }
 
     #[test]

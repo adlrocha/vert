@@ -47,7 +47,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Some(View::Explain(v)) => {
             draw_crumbs(frame, tabs, &[app.tab.title(), &v.entry.short, "Explain"]);
             let asking = app.explain.question_asked(v.key);
-            explain::draw(frame, body, v, asking, app.now, app.tick);
+            let fixes = app.explain.concern_fixes(v.key);
+            explain::draw(frame, body, v, (asking, fixes), app.now, app.tick);
             explain::EXPLAIN_HINTS
         }
         None => {
@@ -105,7 +106,12 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     match app.fix.running.as_slice() {
         [] => {}
         [one] => right.push(Span::styled(
-            format!("{} fixing in {}  ", spinner(app.tick), one.checkout),
+            format!(
+                "{} fixing in {} {}  ",
+                spinner(app.tick),
+                one.checkout,
+                clock(app.now - one.since)
+            ),
             Style::default().fg(theme::INFO),
         )),
         many => right.push(Span::styled(
@@ -249,8 +255,10 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("⏎", "go to the code"),
             ("J K", "scroll"),
             ("a", "ask a follow-up question"),
-            ("r", "explain again, keeping questions"),
-            ("f", "fix the selected pointer"),
+            ("r", "explain it as it is now"),
+            ("space", "mark a concern to fix"),
+            ("f", "fix marked, else selected"),
+            ("c", "see the last fix"),
         ],
     ),
     (
@@ -494,6 +502,18 @@ fn stat_spans(added: u64, removed: u64) -> Vec<Span<'static>> {
         ));
     }
     spans
+}
+
+/// Minutes and seconds, as `m:ss`.
+///
+/// ```
+/// assert_eq!(vert::ui::clock(75), "1:15");
+/// assert_eq!(vert::ui::clock(-3), "0:00");
+/// ```
+#[must_use]
+pub fn clock(secs: i64) -> String {
+    let secs = secs.max(0);
+    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// `"1 file"`, `"3 files"`.
@@ -938,6 +958,8 @@ mod render_tests {
             id: 99,
             root: Some("/wt/x".into()),
             checkout: "x".to_owned(),
+            since: app.now,
+            concerns: None,
         });
         assert!(screen(&mut app, 140, 30).contains("2 fixes"));
         app.notice = Some(format!("Fixed in x: {}", "long ".repeat(40)));
@@ -1371,6 +1393,8 @@ mod render_tests {
             height: 0,
             rows: 0,
             question: None,
+            marked: std::collections::BTreeSet::new(),
+            reload: None,
         };
         view.entry.root = None;
         app.views.push(crate::app::View::Explain(Box::new(view)));
@@ -1379,6 +1403,112 @@ mod render_tests {
         assert!(s.contains("No diagram"), "{s}");
         assert!(s.contains("every hunk explained"), "{s}");
         assert!(s.contains("just now"), "{s}");
+    }
+
+    #[test]
+    fn concerns_show_their_marks_and_how_their_fixes_went() {
+        use crate::explain::Explanation;
+        use crate::git::commit::Outcome;
+
+        let (_t, mut app) = real_app();
+        app.set_fixer(&Ok(crate::fix::Fixer {
+            commit: true,
+            agent: crate::explain::agent::Agent::Claude,
+            model: None,
+            timeout: std::time::Duration::from_secs(1),
+            max_excerpt_bytes: 1024,
+        }));
+        let mut entry = app.feed.worktree.clone().expect("dirty");
+        entry.root = None;
+        let json = r#"{"intent": "Tidy.", "concerns": [
+            {"text": "First"}, {"text": "Second"}, {"text": "Third"}, {"text": "Fourth"}]}"#;
+        app.views.push(crate::app::View::Explain(Box::new(
+            crate::app::ExplainView {
+                key: 0,
+                entry,
+                files: Vec::new(),
+                agent: "pi".to_owned(),
+                status: crate::app::Status::Ready(
+                    Box::new(Explanation::validate(json, &[]).expect("valid")),
+                    false,
+                ),
+                pos: crate::app::ListPos {
+                    selected: 1,
+                    ..crate::app::ListPos::default()
+                },
+                pane: crate::app::Pane::Detail,
+                target: 0,
+                scroll: 0,
+                height: 0,
+                rows: 0,
+                question: None,
+                marked: BTreeSet::new(),
+                reload: None,
+            },
+        )));
+        press(&mut app, KeyCode::Char(' '));
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("[x] ⚠ First"), "{s}");
+        assert!(s.contains("[ ] ⚠ Second"), "{s}");
+        assert!(s.contains("space mark"), "the footer tells how: {s}");
+
+        // Fixes concern `target`, then answers it with `result`.
+        let fix = |app: &mut App, target: usize, result: Result<Outcome, String>| {
+            if let Some(crate::app::View::Explain(v)) = app.views.last_mut() {
+                v.target = target;
+            }
+            if target > 0 {
+                press(app, KeyCode::Char(' '));
+            }
+            press(app, KeyCode::Char('f'));
+            let effects = app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            let [crate::app::Effect::Fix { id, .. }] = effects.as_slice() else {
+                panic!("expected a fix, got {effects:?}");
+            };
+            let id = *id;
+            move |app: &mut App| {
+                app.update(Msg::Fixed {
+                    id,
+                    result: result.map(|outcome| crate::fix::Done {
+                        summary: "did it".to_owned(),
+                        outcome,
+                    }),
+                });
+            }
+        };
+        let answer = fix(
+            &mut app,
+            0,
+            Ok(Outcome::Committed {
+                id: git2::Oid::from_str("a1b2c3d4e5").expect("oid"),
+                branch: "main".to_owned(),
+                stale_index: false,
+            }),
+        );
+        app.now += 75;
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("⋯ fixing 1:15"), "{s}");
+        assert!(
+            s.contains("fixing in this checkout 1:15"),
+            "the header: {s}"
+        );
+        assert!(s.contains("[ ] ⚠ First"), "sent, so unmarked: {s}");
+        answer(&mut app);
+        fix(
+            &mut app,
+            1,
+            Ok(Outcome::Kept("HEAD is detached".to_owned())),
+        )(&mut app);
+        fix(&mut app, 2, Ok(Outcome::Unchanged))(&mut app);
+        fix(&mut app, 3, Err("timed out".to_owned()))(&mut app);
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("✓ committed a1b2c3d to main: did it"), "{s}");
+        assert!(
+            s.contains("○ left uncommitted (HEAD is detached): did it"),
+            "{s}"
+        );
+        assert!(s.contains("– nothing changed: did it"), "{s}");
+        assert!(s.contains("✗ couldn't fix: timed out"), "{s}");
     }
 
     #[test]

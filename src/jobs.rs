@@ -195,6 +195,16 @@ fn diff_message(mut entry: Box<Entry>, refresh: bool, file: Option<String>, ctx:
     }
 }
 
+/// Loads `entry`'s diff for the explanation reload `reload`.
+fn reload_message(reload: u64, mut entry: Box<Entry>, ctx: &Context) -> Msg {
+    let result = load_diff(&mut entry, ctx);
+    Msg::Reloaded {
+        reload,
+        entry,
+        result,
+    }
+}
+
 /// Finds where the lines of work in `list` collide.
 fn find_overlaps(
     list: &git::branches::Branches,
@@ -261,6 +271,7 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
             refresh,
             file,
         } => diff_message(entry, refresh, file, ctx),
+        Effect::ReloadDiff { reload, entry } => reload_message(reload, entry, ctx),
         Effect::LoadBranches => {
             let mut cache = ctx
                 .branch_cache
@@ -493,9 +504,23 @@ fn load_diff(entry: &mut Entry, ctx: &Context) -> Result<Vec<git::diff::FileDiff
         entry.relabel(files.iter().map(|f| f.stat.clone()).collect(), &ctx.labeler);
         return Ok(files);
     }
-    git::open(ctx.dir(entry.root.as_deref()))
-        .and_then(|repo| git::diff::load(&repo, entry.target))
-        .map_err(|e| describe(&e))
+    let repo = git::open(ctx.dir(entry.root.as_deref())).map_err(|e| describe(&e))?;
+    // A commit vert only knows by id (a fix's, made on a branch the feed
+    // doesn't walk) is described from the commit itself.
+    if let Target::Commit(oid) = entry.target
+        && entry.summary.is_empty()
+    {
+        let mut known =
+            git::feed::commit_entry(&repo, oid, &ctx.labeler).map_err(|e| describe(&e))?;
+        known.root = entry.root.take();
+        *entry = known;
+    }
+    let files = git::diff::load(&repo, entry.target).map_err(|e| describe(&e))?;
+    // Uncommitted changes move: the entry says what they are now.
+    if entry.target == Target::WorkingTree {
+        entry.relabel(files.iter().map(|f| f.stat.clone()).collect(), &ctx.labeler);
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -601,7 +626,7 @@ mod tests {
             ..
         }) = run(
             Effect::LoadDiff {
-                entry: Box::new(wt),
+                entry: Box::new(wt.clone()),
                 refresh: true,
                 file: None,
             },
@@ -611,6 +636,44 @@ mod tests {
             panic!("diff")
         };
         assert_eq!(diff[0].stat.path, "src/main.rs");
+
+        // A commit known only by id is described from the commit.
+        let Some(Msg::Diff {
+            entry: described,
+            result: Ok(_),
+            ..
+        }) = run(
+            Effect::LoadDiff {
+                entry: Box::new(Entry::blank(commits[0].target)),
+                refresh: false,
+                file: None,
+            },
+            &c,
+        )
+        else {
+            panic!("commit diff")
+        };
+        assert_eq!(described.summary, commits[0].summary);
+        assert_eq!(described.files, commits[0].files);
+
+        // An entry that doesn't know its files yet learns them.
+        let Some(Msg::Reloaded {
+            reload: 7,
+            result: Ok(diff),
+            entry,
+        }) = run(
+            Effect::ReloadDiff {
+                reload: 7,
+                entry: Box::new(Entry::blank(Target::WorkingTree)),
+            },
+            &c,
+        )
+        else {
+            panic!("reloaded diff")
+        };
+        assert_eq!(diff[0].stat.path, "src/main.rs");
+        assert_eq!(entry.files, wt.files);
+        assert_eq!((entry.added, entry.removed), (wt.added, wt.removed));
     }
 
     #[test]
@@ -1260,7 +1323,7 @@ mod tests {
             .expect("head")
             .peel_to_commit()
             .expect("commit");
-        assert!(head.id().to_string().starts_with(&id));
+        assert_eq!(head.id(), id);
         assert_eq!(head.summary().ok().flatten(), Some("fix: wrote it"));
         assert!(head.tree().expect("tree").get_name("marker").is_some());
     }

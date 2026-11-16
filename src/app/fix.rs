@@ -7,20 +7,92 @@
 //! When it is done its edits are committed on the checkout's branch (or left
 //! uncommitted, and the footer says why), and its one-line summary goes in
 //! the footer.
+//!
+//! In an explanation, `space` marks concerns and `f` sends them all as one
+//! request. Each concern sent shows how its fix is going, and `c` opens what
+//! the last fix changed.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Effect, Focus, Item, View, concern_at, delete_word};
-use crate::explain::Ref;
-use crate::fix::{Done, Fixer, Request, excerpt};
+use crate::explain::Note;
+use crate::fix::{Done, Fixer, Request, excerpt, place};
 use crate::git::Target;
 use crate::git::branches::Branch;
 use crate::git::commit::Outcome;
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
+use crate::git::short_id;
 use crate::highlight::sanitize;
+
+/// The concerns of one explained diff a fix is about: the diff's key and
+/// each concern's [`concern_key`].
+pub type Concerns = (u64, Vec<String>);
+
+/// What a concern's fix status is kept by: its text and the code it points
+/// at. Not its position, so the status stays with its concern when the
+/// diff is explained again and the concerns reorder; not its text alone, so
+/// two concerns worded alike about different code each keep their own.
+///
+/// ```
+/// use vert::app::concern_key;
+/// use vert::explain::{Note, Ref};
+///
+/// let at = |path: &str| Note {
+///     text: "Unchecked index".into(),
+///     refs: vec![Ref { path: path.into(), hunk: Some(0), label: String::new() }],
+/// };
+/// assert_ne!(concern_key(&at("a.rs")), concern_key(&at("b.rs")));
+/// assert_eq!(concern_key(&at("a.rs")), concern_key(&at("a.rs")));
+/// ```
+#[must_use]
+pub fn concern_key(note: &Note) -> String {
+    note.refs.iter().fold(note.text.clone(), |mut key, r| {
+        let _ = write!(key, "\n@{}", r.path);
+        if let Some(hunk) = r.hunk {
+            let _ = write!(key, "#{hunk}");
+        }
+        key
+    })
+}
+
+/// How the fix asked for a concern went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConcernFix {
+    /// The agent is working on it, since this Unix time.
+    Fixing {
+        /// When it was sent.
+        since: i64,
+    },
+    /// The agent is done: what it said, and what became of its edits.
+    Done(Done),
+    /// The agent failed, for this reason (sanitized).
+    Failed(String),
+}
+
+/// A fix that has finished: where, and what became of its edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finished {
+    /// The checkout it edited.
+    pub root: Option<PathBuf>,
+    /// That checkout, named for the user.
+    pub checkout: String,
+    /// What became of its edits, or why the agent failed (it may have
+    /// edited nothing).
+    pub outcome: Result<Outcome, String>,
+}
+
+impl Finished {
+    /// Whether the fix changed anything there is to show (`c`): not when
+    /// it changed nothing, nor when the agent failed.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.outcome.as_ref().is_ok_and(Outcome::changed)
+    }
+}
 
 /// Feedback being written, before it goes to the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +105,8 @@ pub struct Draft {
     /// What the agent will be told: the change, where, and the feedback
     /// as typed so far (trimmed on sending).
     pub request: Request,
+    /// The concerns of an explanation it is about, if any.
+    pub concerns: Option<Concerns>,
 }
 
 /// A fix the agent is working on.
@@ -44,6 +118,10 @@ pub struct Running {
     pub root: Option<PathBuf>,
     /// That checkout, named for the user.
     pub checkout: String,
+    /// When it was sent (Unix time).
+    pub since: i64,
+    /// The concerns of an explanation it is about, if any.
+    pub concerns: Option<Concerns>,
 }
 
 /// Fixes: which agent makes them, the one being written and those running.
@@ -57,6 +135,8 @@ pub struct FixState {
     pub draft: Option<Draft>,
     /// Fixes in progress, oldest first.
     pub running: Vec<Running>,
+    /// The fix that finished last, which `c` opens.
+    pub last: Option<Finished>,
     next: u64,
 }
 
@@ -144,14 +224,30 @@ impl App {
     }
 
     /// Starts writing feedback on `entry`, about `file`'s hunk `hunk` at
-    /// `line` (or the whole file, or the whole change), prefilled with `text`.
+    /// `line` (or the whole file, or the whole change), prefilled with `text`
+    /// and fixing `concerns`, if it comes from some.
     fn draft_fix(
         &mut self,
         entry: &Entry,
-        file: Option<&FileDiff>,
-        hunk: Option<usize>,
-        line: Option<u32>,
+        (file, hunk, line): (Option<&FileDiff>, Option<usize>, Option<u32>),
         text: String,
+        concerns: Option<Concerns>,
+    ) {
+        let place = file.map(|f| place(&f.stat.path, line));
+        let excerpt = file.map(|f| excerpt(f, hunk)).unwrap_or_default();
+        self.start_draft(entry, place, excerpt, text, concerns);
+    }
+
+    /// Starts writing feedback on `entry` about `place`, showing `excerpt`,
+    /// prefilled with `text`, unless fixes are unavailable or `entry` has no
+    /// checkout to fix.
+    fn start_draft(
+        &mut self,
+        entry: &Entry,
+        place: Option<String>,
+        excerpt: String,
+        text: String,
+        concerns: Option<Concerns>,
     ) {
         match &self.fix.agent {
             Some(Ok(_)) => {}
@@ -171,19 +267,16 @@ impl App {
                 return;
             }
         };
-        let place = file.map(|f| match line {
-            Some(line) => format!("{}:{line}", f.stat.path),
-            None => f.stat.path.clone(),
-        });
         self.fix.draft = Some(Draft {
             root,
             checkout,
             request: Request {
                 change: entry.headline(),
                 place,
-                excerpt: file.map(|f| excerpt(f, hunk)).unwrap_or_default(),
+                excerpt,
                 feedback: text,
             },
+            concerns,
         });
     }
 
@@ -216,34 +309,47 @@ impl App {
             }
             _ => (None, None),
         };
-        self.draft_fix(&entry, file.as_ref(), hunk, line, String::new());
+        self.draft_fix(&entry, (file.as_ref(), hunk, line), String::new(), None);
         Vec::new()
     }
 
-    /// `f` in an explanation: feedback on the selected code pointer,
-    /// prefilled with the selected concern.
+    /// `f` in an explanation: feedback on the concerns marked with `space`,
+    /// all in one request; else on the selected code pointer, prefilled with
+    /// the selected concern.
     pub(super) fn draft_fix_from_explain(&mut self) -> Vec<Effect> {
         let Some(View::Explain(v)) = self.views.last() else {
             return Vec::new();
         };
-        let target = v.targets().get(v.target).map(|r| (*r).clone());
-        let text = match (v.item(), v.explanation()) {
-            (Some(Item::Concerns), Some(e)) => concern_at(e, v.target)
-                .map(|n| n.text.clone())
-                .unwrap_or_default(),
-            _ => String::new(),
-        };
         let entry = v.entry.clone();
-        let file = target
+        // The marked concerns this explanation has, in its order: a mark
+        // names a concern by its key, never by position.
+        let marked: Vec<&Note> = v.explanation().map_or_else(Vec::new, |e| {
+            e.concerns
+                .iter()
+                .filter(|n| v.marked.contains(&concern_key(n)))
+                .collect()
+        });
+        if !marked.is_empty() {
+            let (text, excerpt) = crate::fix::concerns_request(&marked, &v.files);
+            let keys = marked.iter().map(|n| concern_key(n)).collect();
+            let concerns = Some((v.key, keys));
+            self.start_draft(&entry, None, excerpt, text, concerns);
+            return Vec::new();
+        }
+        let stop = v.stop();
+        let target = stop.and_then(|s| s.pointer).cloned();
+        let concern = match (v.item(), v.explanation()) {
+            (Some(Item::Concerns), Some(e)) => concern_at(e, v.target),
+            _ => None,
+        };
+        let text = concern.map(|(_, n)| n.text.clone()).unwrap_or_default();
+        let concerns = concern.map(|(_, n)| (v.key, vec![concern_key(n)]));
+        let (file, line) = target
             .as_ref()
-            .and_then(|r: &Ref| v.files.iter().find(|f| f.stat.path == r.path))
-            .cloned();
+            .map_or((None, None), |r| crate::fix::locate(r, &v.files));
+        let file = file.cloned();
         let hunk = target.as_ref().and_then(|r| r.hunk);
-        let line = file
-            .as_ref()
-            .zip(hunk)
-            .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
-        self.draft_fix(&entry, file.as_ref(), hunk, line, text);
+        self.draft_fix(&entry, (file.as_ref(), hunk, line), text, concerns);
         Vec::new()
     }
 
@@ -292,10 +398,19 @@ impl App {
         };
         self.fix.next += 1;
         let id = self.fix.next;
+        if let Some((key, concerns)) = &draft.concerns {
+            self.explain
+                .set_concern_fixes(*key, concerns, &ConcernFix::Fixing { since: self.now });
+            for view in self.explain_views(*key) {
+                view.marked.clear();
+            }
+        }
         self.fix.running.push(Running {
             id,
             root: draft.root.clone(),
             checkout: draft.checkout.clone(),
+            since: self.now,
+            concerns: draft.concerns,
         });
         self.notice = Some(format!("Asked the agent to fix this in {}", draft.checkout));
         vec![Effect::Fix {
@@ -316,6 +431,31 @@ impl App {
         };
         let run = self.fix.running.remove(i);
         let committed = matches!(&result, Ok(d) if matches!(d.outcome, Outcome::Committed { .. }));
+        let concern = match &result {
+            Ok(done) => ConcernFix::Done(done.clone()),
+            Err(why) => ConcernFix::Failed(sanitize(why)),
+        };
+        if let Some((key, concerns)) = &run.concerns {
+            self.explain.set_concern_fixes(*key, concerns, &concern);
+        }
+        self.fix.last = Some(Finished {
+            root: run.root.clone(),
+            checkout: run.checkout.clone(),
+            outcome: match &result {
+                Ok(done) => Ok(done.outcome.clone()),
+                Err(why) => Err(sanitize(why)),
+            },
+        });
+        // In an explanation, the keys to see the fix and explain again come
+        // before the agent's words, which may be too long for the footer.
+        // With nothing changed, or a failed agent, there is no fix for `c`
+        // to show.
+        let shown = self.fix.last.as_ref().is_some_and(Finished::changed);
+        let hint = match self.views.last() {
+            Some(View::Explain(_)) if !shown => " (r explain again)",
+            Some(View::Explain(_)) => " (c changes, r explain again)",
+            _ => "",
+        };
         self.notice = Some(match result {
             Ok(Done { summary, outcome }) => match outcome {
                 Outcome::Committed {
@@ -328,17 +468,23 @@ impl App {
                     } else {
                         ""
                     };
-                    format!("Committed {id} to {}{index}: {summary}", sanitize(&branch))
+                    format!(
+                        "Committed {} to {}{index}{hint}: {summary}",
+                        short_id(id),
+                        sanitize(&branch)
+                    )
                 }
-                Outcome::Unchanged => format!("Nothing changed in {}: {summary}", run.checkout),
+                Outcome::Unchanged => {
+                    format!("Nothing changed in {}{hint}: {summary}", run.checkout)
+                }
                 Outcome::Kept(why) => format!(
-                    "Fixed in {}, left uncommitted ({}): {summary}",
+                    "Fixed in {}, left uncommitted ({}){hint}: {summary}",
                     run.checkout,
                     sanitize(&why)
                 ),
             },
             // The agent's own error output: untrusted, like all it prints.
-            Err(why) => format!("Couldn't fix in {}: {}", run.checkout, sanitize(&why)),
+            Err(why) => format!("Couldn't fix in {}{hint}: {}", run.checkout, sanitize(&why)),
         });
         let mut effects = self.request_worktree();
         if committed {
@@ -346,6 +492,82 @@ impl App {
         }
         effects.extend(self.request_branches());
         effects
+    }
+}
+
+impl App {
+    /// `c` in an explanation: opens what the last fix changed, its commit or
+    /// the uncommitted changes of the checkout it edited.
+    pub(super) fn open_last_fix(&mut self) -> Vec<Effect> {
+        let Some(last) = self.fix.last.as_ref() else {
+            self.notice = Some("No fix has finished yet".to_owned());
+            return Vec::new();
+        };
+        if !last.changed() {
+            self.notice = Some(if last.outcome.is_err() {
+                format!(
+                    "The last fix in {} failed: there is nothing of it to show",
+                    last.checkout
+                )
+            } else {
+                format!("The last fix in {} changed nothing", last.checkout)
+            });
+            return Vec::new();
+        }
+        let entry = if let Ok(Outcome::Committed { id, .. }) = &last.outcome {
+            let id = *id;
+            let known = self
+                .feed
+                .commits
+                .iter()
+                .find(|e| e.target == Target::Commit(id))
+                .cloned();
+            known.unwrap_or_else(|| {
+                let mut entry = Entry::blank(Target::Commit(id));
+                entry.root.clone_from(&last.root);
+                entry
+            })
+        } else {
+            // Uncommitted edits (the rest changed nothing, said above).
+            let dirty = match &last.root {
+                // Its files and totals come with the diff, read from
+                // disk, even before a scan has seen the fix's edits.
+                None => Some(
+                    self.feed
+                        .worktree
+                        .clone()
+                        .unwrap_or_else(Entry::uncommitted),
+                ),
+                // The last scan may predate the fix's edits, and linked
+                // worktrees aren't watched: the diff is read from disk
+                // as it opens either way.
+                Some(root) => self
+                    .branches
+                    .list
+                    .branches
+                    .iter()
+                    .filter_map(|b| b.worktree.as_ref())
+                    .find(|w| &w.path == root)
+                    .map(|w| {
+                        w.dirty.clone().unwrap_or_else(|| {
+                            // Its files and totals come with the diff.
+                            let mut e = Entry::uncommitted();
+                            e.for_linked_worktree(root, &w.name);
+                            e
+                        })
+                    }),
+            };
+            let Some(entry) = dirty else {
+                self.notice = Some(format!("{} has no uncommitted changes", last.checkout));
+                return Vec::new();
+            };
+            entry
+        };
+        vec![Effect::LoadDiff {
+            entry: Box::new(entry),
+            refresh: false,
+            file: None,
+        }]
     }
 }
 

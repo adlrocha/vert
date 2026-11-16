@@ -20,9 +20,10 @@ pub use branches::{
 #[cfg(test)]
 pub(crate) use explain::pi_for_tests;
 pub use explain::{
-    ExplainState, ExplainView, Item, Pane, Status, concern_at, items, row_pointer, targets,
+    ExplainState, ExplainView, Item, Pane, Reload, Status, Stop, concern_at, items, row_pointer,
+    stops, targets,
 };
-pub use fix::{Draft, FixState, Running};
+pub use fix::{ConcernFix, Concerns, Draft, Finished, FixState, Running, concern_key};
 
 use crate::explain::Answer;
 use crate::git::RepoInfo;
@@ -454,6 +455,15 @@ pub enum Msg {
         /// The file to start on, if not the first.
         file: Option<String>,
     },
+    /// The diff an explanation asked again (`r`) reloads was loaded.
+    Reloaded {
+        /// Which reload it answers: [`Reload::id`].
+        reload: u64,
+        /// Change the diff belongs to.
+        entry: Box<Entry>,
+        /// Outcome.
+        result: Result<Vec<FileDiff>, String>,
+    },
     /// A file for the viewer was read.
     File {
         /// Path relative to the repository.
@@ -536,6 +546,14 @@ pub enum Effect {
         refresh: bool,
         /// The file to start on, if not the first.
         file: Option<String>,
+    },
+    /// Load the diff of an entry for an explanation asked again (`r`); it
+    /// also refreshes the open detail view.
+    ReloadDiff {
+        /// Which reload this is: [`Reload::id`].
+        reload: u64,
+        /// The change.
+        entry: Box<Entry>,
     },
     /// Read a file for the viewer.
     OpenFile {
@@ -772,6 +790,18 @@ impl App {
                     Err(e) => self.notice = Some(format!("Could not load diff: {e}")),
                 }
                 Vec::new()
+            }
+            Msg::Reloaded {
+                reload,
+                entry,
+                result,
+            } => {
+                let effects = self.on_reloaded(reload, &entry, &result);
+                match result {
+                    Ok(files) => self.refresh_detail(*entry, files),
+                    Err(e) => self.notice = Some(format!("Could not load diff: {e}")),
+                }
+                effects
             }
             Msg::File {
                 path,

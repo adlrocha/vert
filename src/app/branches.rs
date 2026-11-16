@@ -557,6 +557,9 @@ impl App {
         }
         if follow_up {
             effects.push(Effect::LoadBranches);
+        } else {
+            // Read after any `r` that waits for it.
+            effects.extend(self.reload_branch_explanations());
         }
         effects.extend(self.try_start());
         effects
