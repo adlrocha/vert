@@ -74,8 +74,8 @@ pub fn place(path: &str, line: Option<u32>) -> String {
 pub fn concerns_request(concerns: &[&Note], files: &[FileDiff]) -> (String, String) {
     let mut text =
         "Deal with each of these concerns a reviewer raised about the change:\n".to_owned();
-    let mut shown: Vec<(&str, Option<usize>)> = Vec::new();
-    let mut excerpts = String::new();
+    // Each file pointed at, in order, with the hunks pointed at in it.
+    let mut shown: Vec<(&FileDiff, Vec<Option<usize>>)> = Vec::new();
     for (n, note) in concerns.iter().enumerate() {
         let _ = write!(text, "\n{}. {}", n + 1, note.text.trim());
         let places: Vec<String> = note
@@ -86,18 +86,30 @@ pub fn concerns_request(concerns: &[&Note], files: &[FileDiff]) -> (String, Stri
                 let line = file
                     .zip(r.hunk)
                     .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
-                if let Some(f) = file
-                    && !shown.contains(&(r.path.as_str(), r.hunk))
-                {
-                    shown.push((r.path.as_str(), r.hunk));
-                    let _ = writeln!(excerpts, "diff --git a/{0} b/{0}", r.path);
-                    excerpts.push_str(&excerpt(f, r.hunk));
+                if let Some(f) = file {
+                    match shown.iter_mut().find(|(s, _)| s.stat.path == r.path) {
+                        Some((_, hunks)) if !hunks.contains(&r.hunk) => hunks.push(r.hunk),
+                        Some(_) => {}
+                        None => shown.push((f, vec![r.hunk])),
+                    }
                 }
                 place(&r.path, line)
             })
             .collect();
         if !places.is_empty() {
             let _ = write!(text, " (at {})", places.join(", "));
+        }
+    }
+    let mut excerpts = String::new();
+    for (f, hunks) in shown {
+        let _ = writeln!(excerpts, "diff --git a/{0} b/{0}", f.stat.path);
+        // The whole file covers any of its hunks.
+        if hunks.contains(&None) {
+            excerpts.push_str(&excerpt(f, None));
+        } else {
+            for hunk in hunks {
+                excerpts.push_str(&excerpt(f, hunk));
+            }
         }
     }
     (text, excerpts)
@@ -399,8 +411,8 @@ mod tests {
             refs: vec![at("a.rs", Some(1)), at("gone.rs", None)],
         };
         let second = Note {
-            text: "Same place".to_owned(),
-            refs: vec![at("a.rs", Some(1))],
+            text: "Same file".to_owned(),
+            refs: vec![at("a.rs", Some(1)), at("a.rs", Some(0))],
         };
         let third = Note {
             text: "No code".to_owned(),
@@ -411,10 +423,23 @@ mod tests {
             text,
             "Deal with each of these concerns a reviewer raised about the change:\n\
              \n1. Off by one (at a.rs:9, gone.rs)\
-             \n2. Same place (at a.rs:9)\
+             \n2. Same file (at a.rs:9, a.rs:2)\
              \n3. No code"
         );
-        assert_eq!(excerpt, "diff --git a/a.rs b/a.rs\n@@ -9 +9 @@\n-x\n+y\n");
+        // One header per file, each hunk once.
+        assert_eq!(
+            excerpt,
+            "diff --git a/a.rs b/a.rs\n@@ -9 +9 @@\n-x\n+y\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n"
+        );
+        let whole = Note {
+            text: "Whole".to_owned(),
+            refs: vec![at("a.rs", Some(1)), at("a.rs", None)],
+        };
+        let (_, excerpt_whole) = concerns_request(&[&whole], &files);
+        assert_eq!(
+            excerpt_whole,
+            "diff --git a/a.rs b/a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n@@ -9 +9 @@\n-x\n+y\n"
+        );
         // And the prompt carries both, with no single place.
         let p = prompt(
             &Request {

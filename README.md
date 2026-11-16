@@ -318,7 +318,9 @@ depends on where you press it:
 - in the file list: the whole selected file;
 - in an explanation: the selected code pointer. On *Concerns*, the
   feedback starts as the concern's text, so `f` then `⏎` asks the agent to
-  deal with it. Edit the text first to steer it.
+  deal with it. Edit the text first to steer it. With concerns marked,
+  `f` points at the change as a whole instead and lists them all (see
+  below).
 
 **Fixing concerns.** On *Concerns*, `space` marks the concern under the
 cursor (`[x]`), and a concern that points at no code is a stop of its own.
@@ -330,9 +332,11 @@ fix is going: `⋯ fixing 1:15`, then `✓ committed a1b2c3d to feat-x`,
 the agent's summary.
 
 **After a fix.** When a fix finishes while an explanation is open, the
-footer offers `c` and `r`. `c` opens what the last fix changed: its commit,
-or the uncommitted changes of the checkout it edited. `r` explains the
-change again as it is now (see [Explaining again](#explanations)).
+footer offers `r`, and `c` too when the fix changed something. `c` opens
+what the last fix changed: its commit, or the uncommitted changes of the
+checkout it edited (which then hold your own uncommitted work too). After
+a fix that changed nothing or failed, `c` says so instead. `r` explains
+the change again as it is now (see [Explaining again](#explanations)).
 
 **Where it runs.** In the line of work's own checkout: vert's checkout for
 its uncommitted work and its commits, a linked worktree for that

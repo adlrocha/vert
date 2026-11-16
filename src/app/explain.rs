@@ -174,58 +174,64 @@ pub fn items(e: &Explanation) -> Vec<Item> {
         .collect()
 }
 
-/// The code pointers `item` shows, in display order. The overview offers one
-/// per diagram row that draws a node with code, in [`tree::layout`] order.
+/// The code pointers `item` shows, in display order: those of its
+/// [`stops`]. The overview offers one per diagram row that draws a node
+/// with code, in [`tree::layout`] order.
 #[must_use]
 pub fn targets(e: &Explanation, item: Item) -> Vec<&Ref> {
+    stops(e, item)
+        .into_iter()
+        .filter_map(|s| s.pointer)
+        .collect()
+}
+
+/// Where the cursor can stop in `item`: each of its code pointers, in
+/// display order. On *Concerns*, each pointer also names its concern, and
+/// a concern that points at no code gets a stop of its own, so every
+/// concern can be marked.
+#[must_use]
+pub fn stops(e: &Explanation, item: Item) -> Vec<Stop<'_>> {
     match item {
-        Item::Overview => e.diagram.as_ref().map_or_else(Vec::new, |d| {
+        Item::Overview => at(e.diagram.as_ref().map_or_else(Vec::new, |d| {
             tree::layout(d)
                 .iter()
                 .filter_map(|row| row_pointer(d, row))
                 .collect()
-        }),
-        Item::Step(i) => e
+        })),
+        Item::Step(i) => at(e
             .steps
             .get(i)
-            .map_or_else(Vec::new, |s| s.refs.iter().collect()),
-        Item::Concerns => e.concerns.iter().flat_map(|n| &n.refs).collect(),
-        Item::Unexplained => e.unexplained.iter().collect(),
-        Item::Question(i) => e
+            .map_or_else(Vec::new, |s| s.refs.iter().collect())),
+        Item::Unexplained => at(e.unexplained.iter().collect()),
+        Item::Question(i) => at(e
             .questions
             .get(i)
-            .map_or_else(Vec::new, |q| q.refs.iter().collect()),
+            .map_or_else(Vec::new, |q| q.refs.iter().collect())),
+        Item::Concerns => e
+            .concerns
+            .iter()
+            .enumerate()
+            .flat_map(|(i, n)| {
+                let pointers: Vec<Option<&Ref>> = if n.refs.is_empty() {
+                    vec![None]
+                } else {
+                    n.refs.iter().map(Some).collect()
+                };
+                pointers.into_iter().map(move |pointer| Stop {
+                    pointer,
+                    concern: Some(i),
+                })
+            })
+            .collect(),
     }
 }
 
-/// Where the cursor can stop in `item`: each of its code pointers, in
-/// [`targets`] order. On *Concerns*, each pointer also names its concern,
-/// and a concern that points at no code gets a stop of its own, so every
-/// concern can be marked.
-#[must_use]
-pub fn stops(e: &Explanation, item: Item) -> Vec<Stop<'_>> {
-    if item != Item::Concerns {
-        return targets(e, item)
-            .into_iter()
-            .map(|r| Stop {
-                pointer: Some(r),
-                concern: None,
-            })
-            .collect();
-    }
-    e.concerns
-        .iter()
-        .enumerate()
-        .flat_map(|(i, n)| {
-            let pointers: Vec<Option<&Ref>> = if n.refs.is_empty() {
-                vec![None]
-            } else {
-                n.refs.iter().map(Some).collect()
-            };
-            pointers.into_iter().map(move |pointer| Stop {
-                pointer,
-                concern: Some(i),
-            })
+/// A stop at each of `refs`, belonging to no concern.
+fn at(refs: Vec<&Ref>) -> Vec<Stop<'_>> {
+    refs.into_iter()
+        .map(|r| Stop {
+            pointer: Some(r),
+            concern: None,
         })
         .collect()
 }
@@ -497,7 +503,6 @@ impl App {
             previous,
             awaiting_branches: branch,
         });
-        v.marked.clear();
         if branch {
             // Started, or already loading and queued to load again, so the
             // list that answers was read after this key.
@@ -605,6 +610,11 @@ impl App {
             })
             .unwrap_or_default();
         let key = diff_key(entry, &files);
+        // Marks are by position in the old concerns; they hold while the
+        // change didn't move.
+        if key != old {
+            v.marked.clear();
+        }
         v.key = key;
         v.entry = entry.clone();
         v.files.clone_from(&files);
@@ -1331,11 +1341,7 @@ mod tests {
         };
         assert_eq!(**entry, tip(2), "the branch as it is now");
         assert!(view(&a).reload.is_some());
-        assert_eq!(
-            view(&a).marked,
-            BTreeSet::new(),
-            "marks are about the old concerns"
-        );
+        assert_eq!(view(&a).marked, [0].into(), "kept until the diff is in");
         assert_eq!(press(&mut a, KeyCode::Char('r')), [], "already reloading");
 
         // A refresh of the same change asked before `r` (the diff under
@@ -1356,6 +1362,11 @@ mod tests {
         let new = asked(&effects, true);
         assert_ne!(new, old, "a new diff, under its own key");
         assert_eq!(view(&a).key, new);
+        assert_eq!(
+            view(&a).marked,
+            BTreeSet::new(),
+            "marks are about the old concerns"
+        );
         assert_eq!(view(&a).files.len(), 2);
         assert_eq!(view(&a).entry, tip(2));
         a.update(Msg::Explained {
@@ -1450,7 +1461,7 @@ mod tests {
         a.fix.last = Some(crate::app::Finished {
             root: None,
             checkout: "this checkout".to_owned(),
-            outcome: crate::git::commit::Outcome::Unchanged,
+            outcome: Ok(crate::git::commit::Outcome::Unchanged),
         });
         reload(&mut a, Ok(Vec::new()));
         assert_eq!(
@@ -1465,6 +1476,15 @@ mod tests {
             result: Ok(vec![file("x.rs")]),
         });
         assert_eq!(other, []);
+    }
+
+    #[test]
+    fn marks_survive_explaining_again_an_unchanged_change() {
+        let (mut a, key) = explained();
+        view_mut(&mut a).marked.insert(0);
+        explain_again(&mut a);
+        assert_eq!(view(&a).key, key);
+        assert_eq!(view(&a).marked, [0].into());
     }
 
     #[test]

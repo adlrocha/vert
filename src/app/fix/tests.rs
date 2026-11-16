@@ -880,8 +880,18 @@ fn the_selected_concern_alone_is_tracked_and_failures_are_kept() {
     );
     assert_eq!(
         app.fix.last.as_ref().map(|l| &l.outcome),
-        Some(&Outcome::Kept("pi: ·[31mboom".to_owned())),
-        "its edits, if any, are uncommitted"
+        Some(&Err("pi: ·[31mboom".to_owned())),
+        "a failure of its own, not kept edits"
+    );
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Couldn't fix in this checkout (r explain again): pi: ·[31mboom"),
+        "nothing for `c` to show"
+    );
+    assert_eq!(press(&mut app, KeyCode::Char('c')), []);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("The last fix in this checkout failed: there is nothing of it to show")
     );
 
     // Nothing changed: there is no fix for `c` to show.
@@ -921,7 +931,7 @@ fn c_opens_what_the_last_fix_changed() {
         app.fix.last = Some(Finished {
             root: root.map(PathBuf::from),
             checkout: root.unwrap_or("this checkout").to_owned(),
-            outcome,
+            outcome: Ok(outcome),
         });
         press(app, KeyCode::Char('c'))
     };
@@ -953,8 +963,14 @@ fn c_opens_what_the_last_fix_changed() {
     assert_eq!(bare.target, Target::Commit(id));
     assert_eq!(bare.root, Some(PathBuf::from("/wt/x")));
 
-    // Uncommitted edits open as the checkout's uncommitted changes.
+    // A fix that changed nothing has nothing to show.
     assert_eq!(finish(&mut app, None, Outcome::Unchanged), []);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("The last fix in this checkout changed nothing")
+    );
+    // Uncommitted edits open as the checkout's uncommitted changes.
+    assert_eq!(finish(&mut app, None, Outcome::Kept("why".to_owned())), []);
     assert_eq!(
         app.notice.as_deref(),
         Some("this checkout has no uncommitted changes")
@@ -976,6 +992,15 @@ fn c_opens_what_the_last_fix_changed() {
         branches: vec![linked],
     })));
     assert_eq!(opened(&finish(&mut app, Some("/wt/x"), kept())), wt_dirty);
+    // Before a scan sees its edits, a linked worktree's are read from disk.
+    app.update(Msg::Branches(Ok(Branches {
+        base: None,
+        branches: vec![branch("feat", Some(("x", false)))],
+    })));
+    let fresh = opened(&finish(&mut app, Some("/wt/x"), kept()));
+    assert_eq!(fresh.target, Target::WorkingTree);
+    assert_eq!(fresh.id, "worktree:/wt/x");
+    assert_eq!(fresh.root, Some(PathBuf::from("/wt/x")));
     assert_eq!(finish(&mut app, Some("/wt/gone"), kept()), []);
     assert_eq!(
         app.notice.as_deref(),

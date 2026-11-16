@@ -25,6 +25,7 @@ use crate::git::branches::Branch;
 use crate::git::commit::Outcome;
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
+use crate::git::feed::WORKTREE_ID;
 use crate::git::short_id;
 use crate::highlight::sanitize;
 
@@ -80,8 +81,9 @@ pub struct Finished {
     pub root: Option<PathBuf>,
     /// That checkout, named for the user.
     pub checkout: String,
-    /// Its commit, or why its edits are uncommitted.
-    pub outcome: Outcome,
+    /// What became of its edits, or why the agent failed (it may have
+    /// edited nothing).
+    pub outcome: Result<Outcome, String>,
 }
 
 /// Feedback being written, before it goes to the agent.
@@ -436,16 +438,17 @@ impl App {
             root: run.root.clone(),
             checkout: run.checkout.clone(),
             outcome: match &result {
-                Ok(done) => done.outcome.clone(),
-                Err(why) => Outcome::Kept(sanitize(why)),
+                Ok(done) => Ok(done.outcome.clone()),
+                Err(why) => Err(sanitize(why)),
             },
         });
         // In an explanation, the keys to see the fix and explain again come
         // before the agent's words, which may be too long for the footer.
-        // With nothing changed there is no fix for `c` to show.
-        let unchanged = matches!(&result, Ok(d) if d.outcome == Outcome::Unchanged);
+        // With nothing changed, or a failed agent, there is no fix for `c`
+        // to show.
+        let shown = matches!(&result, Ok(d) if d.outcome != Outcome::Unchanged);
         let hint = match self.views.last() {
-            Some(View::Explain(_)) if unchanged => " (r explain again)",
+            Some(View::Explain(_)) if !shown => " (r explain again)",
             Some(View::Explain(_)) => " (c changes, r explain again)",
             _ => "",
         };
@@ -496,8 +499,20 @@ impl App {
             self.notice = Some("No fix has finished yet".to_owned());
             return Vec::new();
         };
-        let entry = match last.outcome {
-            Outcome::Committed { id, .. } => {
+        let entry = match &last.outcome {
+            Err(_) => {
+                self.notice = Some(format!(
+                    "The last fix in {} failed: there is nothing of it to show",
+                    last.checkout
+                ));
+                return Vec::new();
+            }
+            Ok(Outcome::Unchanged) => {
+                self.notice = Some(format!("The last fix in {} changed nothing", last.checkout));
+                return Vec::new();
+            }
+            Ok(Outcome::Committed { id, .. }) => {
+                let id = *id;
                 let known = self
                     .feed
                     .commits
@@ -510,9 +525,12 @@ impl App {
                     entry
                 })
             }
-            Outcome::Unchanged | Outcome::Kept(_) => {
+            Ok(Outcome::Kept(_)) => {
                 let dirty = match &last.root {
                     None => self.feed.worktree.clone(),
+                    // The last scan may predate the fix's edits, and linked
+                    // worktrees aren't watched: the diff is read from disk
+                    // as it opens either way.
                     Some(root) => self
                         .branches
                         .list
@@ -520,7 +538,15 @@ impl App {
                         .iter()
                         .filter_map(|b| b.worktree.as_ref())
                         .find(|w| &w.path == root)
-                        .and_then(|w| w.dirty.clone()),
+                        .map(|w| {
+                            w.dirty.clone().unwrap_or_else(|| {
+                                let mut e = Entry::blank(Target::WorkingTree);
+                                e.id = format!("{WORKTREE_ID}:{}", root.display());
+                                e.summary = format!("Uncommitted changes in {}", w.name);
+                                e.root = Some(root.clone());
+                                e
+                            })
+                        }),
                 };
                 let Some(entry) = dirty else {
                     self.notice = Some(format!("{} has no uncommitted changes", last.checkout));
