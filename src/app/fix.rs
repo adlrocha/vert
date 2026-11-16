@@ -30,8 +30,9 @@ use crate::git::short_id;
 use crate::highlight::sanitize;
 
 /// The concerns of one explained diff a fix is about: the diff's key and
-/// the concerns' indices.
-pub type Concerns = (u64, Vec<usize>);
+/// the concerns' texts. By text, not position, so a fix's status stays with
+/// its concern when the diff is explained again and the concerns reorder.
+pub type Concerns = (u64, Vec<String>);
 
 /// How the fix asked for a concern went.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,7 +294,12 @@ impl App {
         {
             let marked: Vec<usize> = v.marked.iter().copied().collect();
             let (text, excerpt) = concerns_request(e, &marked, &v.files);
-            let concerns = Some((v.key, marked));
+            let texts = marked
+                .iter()
+                .filter_map(|&i| e.concerns.get(i))
+                .map(|n| n.text.clone())
+                .collect();
+            let concerns = Some((v.key, texts));
             self.start_draft(&entry, None, excerpt, text, concerns);
             return Vec::new();
         }
@@ -304,7 +310,7 @@ impl App {
             _ => None,
         };
         let text = concern.map(|(_, n)| n.text.clone()).unwrap_or_default();
-        let concerns = concern.map(|(i, _)| (v.key, vec![i]));
+        let concerns = concern.map(|(_, n)| (v.key, vec![n.text.clone()]));
         let file = target
             .as_ref()
             .and_then(|r: &Ref| v.files.iter().find(|f| f.stat.path == r.path))
@@ -368,8 +374,8 @@ impl App {
         let id = self.fix.next;
         if let Some((key, concerns)) = &draft.concerns {
             let fixes = self.explain.fixes.entry(*key).or_default();
-            for &i in concerns {
-                fixes.insert(i, ConcernFix::Fixing { since: self.now });
+            for text in concerns {
+                fixes.insert(text.clone(), ConcernFix::Fixing { since: self.now });
             }
             for view in self.explain_views(*key) {
                 view.marked.clear();
@@ -406,10 +412,10 @@ impl App {
             Err(why) => ConcernFix::Failed(sanitize(why)),
         };
         if let Some((key, concerns)) = &run.concerns {
-            let fixes: &mut BTreeMap<usize, ConcernFix> =
+            let fixes: &mut BTreeMap<String, ConcernFix> =
                 self.explain.fixes.entry(*key).or_default();
-            for &i in concerns {
-                fixes.insert(i, concern.clone());
+            for text in concerns {
+                fixes.insert(text.clone(), concern.clone());
             }
         }
         self.fix.last = Some(Finished {

@@ -726,7 +726,10 @@ fn a_concern_without_code_still_becomes_the_feedback() {
     select(&mut app, 2, 1);
     press(&mut app, KeyCode::Char('f'));
     assert_eq!(draft(&app).request.feedback, "And this?");
-    assert_eq!(draft(&app).concerns, Some((1, vec![1])));
+    assert_eq!(
+        draft(&app).concerns,
+        Some((1, vec!["And this?".to_owned()]))
+    );
 }
 
 fn view(app: &App) -> &ExplainView {
@@ -803,14 +806,15 @@ fn marked_concerns_are_fixed_in_one_request_and_tracked() {
          diff --git a/docs/x.md b/docs/x.md\n@@ -1 +1,2 @@\n keep\n+first\n@@ -40 +41 @@\n-old\n+new\n",
         "each hunk once"
     );
-    assert_eq!(draft(&app).concerns, Some((1, vec![0, 1, 2])));
+    let texts = ["Off by one", "Unbounded", "Is this wanted?"].map(str::to_owned);
+    assert_eq!(draft(&app).concerns, Some((1, texts.to_vec())));
 
     app.now = 200;
     let (id, _, _) = fix_of(&press(&mut app, KeyCode::Enter));
     assert_eq!(view(&app).marked, [].into(), "sent, so unmarked");
-    for i in 0..3 {
+    for text in &texts {
         assert_eq!(
-            app.explain.concern_fix(1, i),
+            app.explain.concern_fix(1, text),
             Some(&ConcernFix::Fixing { since: 200 })
         );
     }
@@ -833,7 +837,7 @@ fn marked_concerns_are_fixed_in_one_request_and_tracked() {
         result: Ok(done(committed.clone())),
     });
     assert_eq!(
-        app.explain.concern_fix(1, 2),
+        app.explain.concern_fix(1, "Is this wanted?"),
         Some(&ConcernFix::Done(done(committed)))
     );
     assert_eq!(
@@ -849,17 +853,24 @@ fn the_selected_concern_alone_is_tracked_and_failures_are_kept() {
     select(&mut app, 2, 2);
     press(&mut app, KeyCode::Char('f'));
     assert_eq!(draft(&app).request.feedback, "Unbounded");
-    assert_eq!(draft(&app).concerns, Some((1, vec![1])));
+    assert_eq!(
+        draft(&app).concerns,
+        Some((1, vec!["Unbounded".to_owned()]))
+    );
     let (id, _, _) = fix_of(&press(&mut app, KeyCode::Enter));
     app.update(Msg::Fixed {
         id,
         result: Err("pi: \u{1b}[31mboom".to_owned()),
     });
     assert_eq!(
-        app.explain.concern_fix(1, 1),
+        app.explain.concern_fix(1, "Unbounded"),
         Some(&ConcernFix::Failed("pi: ·[31mboom".to_owned()))
     );
-    assert_eq!(app.explain.concern_fix(1, 0), None, "only the one sent");
+    assert_eq!(
+        app.explain.concern_fix(1, "Off by one"),
+        None,
+        "only the one sent"
+    );
     assert_eq!(
         app.fix.last.as_ref().map(|l| &l.outcome),
         Some(&Outcome::Kept("pi: ·[31mboom".to_owned())),

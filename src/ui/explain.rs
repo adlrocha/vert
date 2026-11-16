@@ -37,8 +37,8 @@ pub const EXPLAIN_HINTS: Hints = &[
 pub struct ConcernMarks<'a> {
     /// Concerns marked with `space`.
     pub marked: &'a BTreeSet<usize>,
-    /// Fixes asked for concerns of this diff, by concern.
-    pub fixes: Option<&'a BTreeMap<usize, ConcernFix>>,
+    /// Fixes asked for concerns of this diff, by concern text.
+    pub fixes: Option<&'a BTreeMap<String, ConcernFix>>,
     /// The time now (Unix seconds), for how long a fix has run.
     pub now: i64,
 }
@@ -51,7 +51,7 @@ pub fn draw(
     frame: &mut Frame<'_>,
     area: Rect,
     v: &mut ExplainView,
-    (asking, fixes): (Option<i64>, Option<&BTreeMap<usize, ConcernFix>>),
+    (asking, fixes): (Option<i64>, Option<&BTreeMap<String, ConcernFix>>),
     now: i64,
     tick: usize,
 ) {
@@ -225,7 +225,7 @@ fn draw_ready(
     frame: &mut Frame<'_>,
     area: Rect,
     v: &mut ExplainView,
-    fixes: Option<&BTreeMap<usize, ConcernFix>>,
+    fixes: Option<&BTreeMap<String, ConcernFix>>,
     now: i64,
 ) {
     // Borrowed by field, so the scroll positions stay writable.
@@ -396,7 +396,7 @@ fn detail_lines(
                 if stop == Some(true) {
                     out.mark_at(first);
                 }
-                if let Some(fix) = marks.fixes.and_then(|f| f.get(&i)) {
+                if let Some(fix) = marks.fixes.and_then(|f| f.get(&note.text)) {
                     let (text, style) = fix_status(fix, marks.now);
                     out.indented(4, &text, style);
                 }

@@ -253,8 +253,8 @@ pub struct ExplainState {
     unshown: HashMap<u64, Vec<Question>>,
     /// The last explain view left, to come back to where it was.
     parked: Option<Box<ExplainView>>,
-    /// Fixes asked for concerns, by [`diff_key`] and concern index.
-    pub(super) fixes: HashMap<u64, BTreeMap<usize, ConcernFix>>,
+    /// Fixes asked for concerns, by [`diff_key`] and concern text.
+    pub(super) fixes: HashMap<u64, BTreeMap<String, ConcernFix>>,
 }
 
 impl ExplainState {
@@ -267,14 +267,15 @@ impl ExplainState {
 
     /// The fixes asked for concerns of the diff `key`, by concern.
     #[must_use]
-    pub fn concern_fixes(&self, key: u64) -> Option<&BTreeMap<usize, ConcernFix>> {
+    pub fn concern_fixes(&self, key: u64) -> Option<&BTreeMap<String, ConcernFix>> {
         self.fixes.get(&key)
     }
 
-    /// The fix asked for concern `concern` of the diff `key`, if any.
+    /// The fix asked for the concern reading `text` of the diff `key`, if
+    /// any.
     #[must_use]
-    pub fn concern_fix(&self, key: u64, concern: usize) -> Option<&ConcernFix> {
-        self.fixes.get(&key)?.get(&concern)
+    pub fn concern_fix(&self, key: u64, text: &str) -> Option<&ConcernFix> {
+        self.fixes.get(&key)?.get(text)
     }
 }
 
@@ -563,8 +564,13 @@ impl App {
             }
             return;
         };
+        let text = v
+            .explanation()
+            .and_then(|e| e.concerns.get(i))
+            .map(|n| n.text.as_str())
+            .unwrap_or_default();
         if matches!(
-            self.explain.concern_fix(v.key, i),
+            self.explain.concern_fix(v.key, text),
             Some(ConcernFix::Fixing { .. })
         ) {
             self.notice = Some("The agent is already fixing that concern".to_owned());
