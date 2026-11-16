@@ -15,8 +15,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::explain::Note;
 use crate::explain::agent::{self, Access, Agent, Groups};
+use crate::explain::{Note, Ref};
 use crate::git::commit::{self, Outcome};
 use crate::git::diff::FileDiff;
 use crate::highlight::sanitize;
@@ -69,6 +69,17 @@ pub fn place(path: &str, line: Option<u32>) -> String {
     line.map_or_else(|| path.to_owned(), |l| format!("{path}:{l}"))
 }
 
+/// Where code pointer `r` lands in the diff `files`: its file, if the diff
+/// has it, and the first changed line of its hunk, if it names one there.
+#[must_use]
+pub fn locate<'a>(r: &Ref, files: &'a [FileDiff]) -> (Option<&'a FileDiff>, Option<u32>) {
+    let file = files.iter().find(|f| f.stat.path == r.path);
+    let line = file
+        .zip(r.hunk)
+        .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
+    (file, line)
+}
+
 /// The feedback and excerpt asking to fix several `concerns` of a change
 /// whose diff is `files`: the concerns as a numbered list, each with the
 /// places it points at, and each hunk there once, under its file's header.
@@ -84,10 +95,7 @@ pub fn concerns_request(concerns: &[&Note], files: &[FileDiff]) -> (String, Stri
             .refs
             .iter()
             .map(|r| {
-                let file = files.iter().find(|f| f.stat.path == r.path);
-                let line = file
-                    .zip(r.hunk)
-                    .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
+                let (file, line) = locate(r, files);
                 if let Some(f) = file {
                     match shown.iter_mut().find(|(s, _)| s.stat.path == r.path) {
                         Some((_, hunks)) if !hunks.contains(&r.hunk) => hunks.push(r.hunk),

@@ -98,6 +98,8 @@ pub struct Reload {
     /// Waiting for a fresh branch list first, to take the branch at the tip
     /// it has now (a fix may just have committed to it).
     pub awaiting_branches: bool,
+    /// Questions answered while it loads: they join the new explanation.
+    pub answered: Vec<Question>,
 }
 
 /// A place the cursor of the detail pane can stop at.
@@ -531,6 +533,7 @@ impl App {
             id,
             previous,
             awaiting_branches: branch,
+            answered: Vec::new(),
         });
         if branch {
             // Started, or already loading and queued to load again, so the
@@ -599,13 +602,15 @@ impl App {
             View::Explain(x) => Some(x.as_mut()),
             _ => None,
         });
-        let Some(v) = open
+        let Some((
+            v,
+            Reload {
+                previous, answered, ..
+            },
+        )) = open
             .chain(self.explain.parked.as_deref_mut())
-            .find(|v| v.reload.as_ref().is_some_and(|r| r.id == reload))
+            .find_map(|v| v.reload.take_if(|r| r.id == reload).map(|r| (v, r)))
         else {
-            return Vec::new();
-        };
-        let Some(Reload { previous, .. }) = v.reload.take() else {
             return Vec::new();
         };
         let files = match result {
@@ -615,6 +620,12 @@ impl App {
                 // meanwhile.
                 if matches!(v.status, Status::Asking(_)) {
                     v.status = previous;
+                }
+                // With what was answered meanwhile.
+                if let Status::Ready(e, _) = &mut v.status {
+                    for q in &answered {
+                        add_question(e, q);
+                    }
                 }
                 // A failed load says so itself.
                 if result.is_ok() {
@@ -661,6 +672,13 @@ impl App {
             .extend(questions);
         if key != old {
             self.explain.moved_to(old, key);
+            // Answered while it loaded: asked of the code the view was
+            // moving to, they join its explanation.
+            self.explain
+                .unshown
+                .entry(key)
+                .or_default()
+                .extend(answered);
         }
         self.ask(key, entry, &files, true)
     }
@@ -779,6 +797,11 @@ impl App {
                 return;
             }
         };
+        for view in self.explain_views(key) {
+            if let Some(reload) = view.reload.as_mut() {
+                reload.answered.push(answered.clone());
+            }
+        }
         let mut kept = false;
         if let Some((e, _)) = self.explain.answers.get_mut(&key) {
             add_question(e, &answered);
@@ -1395,6 +1418,45 @@ mod tests {
         a.update(Msg::Answered {
             key: old,
             result: Ok(reply(Vec::new())),
+        });
+        assert_eq!(view(&a).explanation().map(|e| e.questions.len()), Some(1));
+    }
+
+    #[test]
+    fn an_answer_landing_mid_reload_joins_what_the_view_shows_next() {
+        // The reload lands on a changed diff: the answer joins its
+        // explanation.
+        let (mut a, old) = explained();
+        a.explain.questioning.insert(old, 0);
+        let (reload, entry) = reload_of(&mut a);
+        a.update(Msg::Answered {
+            key: old,
+            result: Ok(reply(Vec::new())),
+        });
+        let effects = a.update(Msg::Reloaded {
+            reload,
+            entry,
+            result: Ok(vec![file("src/a.rs"), file("src/new.rs")]),
+        });
+        let new = asked(&effects, true);
+        a.update(Msg::Explained {
+            key: new,
+            result: Ok(answer(false)),
+        });
+        assert_eq!(view(&a).explanation().map(|e| e.questions.len()), Some(1));
+
+        // The reload fails: the explanation shown again has it.
+        let (mut a, old) = explained();
+        a.explain.questioning.insert(old, 0);
+        let (reload, entry) = reload_of(&mut a);
+        a.update(Msg::Answered {
+            key: old,
+            result: Ok(reply(Vec::new())),
+        });
+        a.update(Msg::Reloaded {
+            reload,
+            entry,
+            result: Err("gone".to_owned()),
         });
         assert_eq!(view(&a).explanation().map(|e| e.questions.len()), Some(1));
     }

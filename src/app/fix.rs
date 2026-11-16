@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Effect, Focus, Item, View, concern_at, delete_word};
-use crate::explain::{Note, Ref};
+use crate::explain::Note;
 use crate::fix::{Done, Fixer, Request, excerpt, place};
 use crate::git::Target;
 use crate::git::branches::Branch;
@@ -344,15 +344,11 @@ impl App {
         };
         let text = concern.map(|(_, n)| n.text.clone()).unwrap_or_default();
         let concerns = concern.map(|(_, n)| (v.key, vec![concern_key(n)]));
-        let file = target
+        let (file, line) = target
             .as_ref()
-            .and_then(|r: &Ref| v.files.iter().find(|f| f.stat.path == r.path))
-            .cloned();
+            .map_or((None, None), |r| crate::fix::locate(r, &v.files));
+        let file = file.cloned();
         let hunk = target.as_ref().and_then(|r| r.hunk);
-        let line = file
-            .as_ref()
-            .zip(hunk)
-            .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
         self.draft_fix(&entry, (file.as_ref(), hunk, line), text, concerns);
         Vec::new()
     }
