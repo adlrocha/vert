@@ -205,7 +205,8 @@ pub struct BranchesState {
     pub pull_status: PullStatus,
     /// Which rows are shown.
     pub filter: RowFilter,
-    /// Narrows rows to those whose name fuzzily contains this.
+    /// Narrows rows to those whose name fuzzily contains this, or whose pull
+    /// request has this number (`12` or `#12`).
     pub name_filter: String,
     /// Whether `name_filter` is being typed into.
     pub filter_editing: bool,

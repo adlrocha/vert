@@ -40,7 +40,7 @@ in, and what deserves a second look.
   its CI checks (✓ passing, ✗ failing, ● running). Pull requests without a local branch get their own rows. `⏎` opens the most
   relevant diff: uncommitted work first, then the branch against the point
   where it left the base, then the pull request. `b` and `p` pick the branch
-  or pull request diff. `f` filters by kind, `/` narrows rows by name, and
+  or pull request diff. `f` filters by kind, `/` narrows rows by name or pull request number, and
   `d` removes a line of work — a linked worktree together with its branch —
   after a confirmation that warns about unmerged commits and open pull
   requests. vert never removes the checkout it runs in, the repository's
