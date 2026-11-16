@@ -152,7 +152,8 @@ and looks for one in this order:
 If no token is found, the Branches tab says so and shows everything else.
 vert only reads from GitHub: it lists open pull requests with their check
 status, and fetches a pull request's diff when you open it. It never fetches
-or writes to your repository. Besides your repository, vert sends one
+or pushes; the only write to your repository is committing a fix's edits
+(see [Fixes](#fixes)), which `--no-fix-commit` turns off. Besides your repository, vert sends one
 unauthenticated request a day to `api.github.com` for its own latest commit —
 no account, token or repository data involved — which is what powers the
 update notice. `--no-network` turns all GitHub access off.
