@@ -557,6 +557,14 @@ impl App {
         }
         if follow_up {
             effects.push(Effect::LoadBranches);
+        } else {
+            // Read after any `r` that waits for it. The diff under the
+            // explanation may be reloading already: once is enough.
+            for reload in self.reload_branch_explanations() {
+                if !effects.contains(&reload) {
+                    effects.push(reload);
+                }
+            }
         }
         effects.extend(self.try_start());
         effects

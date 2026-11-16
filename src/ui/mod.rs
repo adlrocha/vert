@@ -1382,7 +1382,7 @@ mod render_tests {
             rows: 0,
             question: None,
             marked: std::collections::BTreeSet::new(),
-            reloading: false,
+            reload: None,
         };
         view.entry.root = None;
         app.views.push(crate::app::View::Explain(Box::new(view)));
@@ -1431,7 +1431,7 @@ mod render_tests {
                 rows: 0,
                 question: None,
                 marked: BTreeSet::new(),
-                reloading: false,
+                reload: None,
             },
         )));
         press(&mut app, KeyCode::Char(' '));

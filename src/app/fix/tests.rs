@@ -644,7 +644,7 @@ fn explaining(concerns: Vec<Note>) -> App {
         rows: 0,
         question: None,
         marked: std::collections::BTreeSet::new(),
-        reloading: false,
+        reload: None,
     })));
     app
 }
@@ -806,7 +806,13 @@ fn marked_concerns_are_fixed_in_one_request_and_tracked() {
          diff --git a/docs/x.md b/docs/x.md\n@@ -1 +1,2 @@\n keep\n+first\n@@ -40 +41 @@\n-old\n+new\n",
         "each hunk once"
     );
-    let texts = ["Off by one", "Unbounded", "Is this wanted?"].map(str::to_owned);
+    // Kept by text and code, so two concerns worded alike stay apart.
+    let texts = [
+        "Off by one\n@src/a.rs#1\n@docs/x.md",
+        "Unbounded\n@src/a.rs#1",
+        "Is this wanted?",
+    ]
+    .map(str::to_owned);
     assert_eq!(draft(&app).concerns, Some((1, texts.to_vec())));
 
     app.now = 200;
@@ -855,7 +861,7 @@ fn the_selected_concern_alone_is_tracked_and_failures_are_kept() {
     assert_eq!(draft(&app).request.feedback, "Unbounded");
     assert_eq!(
         draft(&app).concerns,
-        Some((1, vec!["Unbounded".to_owned()]))
+        Some((1, vec!["Unbounded\n@src/a.rs#1".to_owned()]))
     );
     let (id, _, _) = fix_of(&press(&mut app, KeyCode::Enter));
     app.update(Msg::Fixed {
@@ -863,11 +869,12 @@ fn the_selected_concern_alone_is_tracked_and_failures_are_kept() {
         result: Err("pi: \u{1b}[31mboom".to_owned()),
     });
     assert_eq!(
-        app.explain.concern_fix(1, "Unbounded"),
+        app.explain.concern_fix(1, "Unbounded\n@src/a.rs#1"),
         Some(&ConcernFix::Failed("pi: ·[31mboom".to_owned()))
     );
     assert_eq!(
-        app.explain.concern_fix(1, "Off by one"),
+        app.explain
+            .concern_fix(1, "Off by one\n@src/a.rs#1\n@docs/x.md"),
         None,
         "only the one sent"
     );

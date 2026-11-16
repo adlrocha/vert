@@ -12,14 +12,13 @@
 //! request. Each concern sent shows how its fix is going, and `c` opens what
 //! the last fix changed.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Effect, Focus, Item, View, concern_at, delete_word};
-use crate::explain::{Explanation, Ref};
+use crate::explain::{Explanation, Note, Ref};
 use crate::fix::{Done, Fixer, Request, excerpt};
 use crate::git::Target;
 use crate::git::branches::Branch;
@@ -30,9 +29,35 @@ use crate::git::short_id;
 use crate::highlight::sanitize;
 
 /// The concerns of one explained diff a fix is about: the diff's key and
-/// the concerns' texts. By text, not position, so a fix's status stays with
-/// its concern when the diff is explained again and the concerns reorder.
+/// each concern's [`concern_key`].
 pub type Concerns = (u64, Vec<String>);
+
+/// What a concern's fix status is kept by: its text and the code it points
+/// at. Not its position, so the status stays with its concern when the
+/// diff is explained again and the concerns reorder; not its text alone, so
+/// two concerns worded alike about different code each keep their own.
+///
+/// ```
+/// use vert::app::concern_key;
+/// use vert::explain::{Note, Ref};
+///
+/// let at = |path: &str| Note {
+///     text: "Unchecked index".into(),
+///     refs: vec![Ref { path: path.into(), hunk: Some(0), label: String::new() }],
+/// };
+/// assert_ne!(concern_key(&at("a.rs")), concern_key(&at("b.rs")));
+/// assert_eq!(concern_key(&at("a.rs")), concern_key(&at("a.rs")));
+/// ```
+#[must_use]
+pub fn concern_key(note: &Note) -> String {
+    note.refs.iter().fold(note.text.clone(), |mut key, r| {
+        let _ = write!(key, "\n@{}", r.path);
+        if let Some(hunk) = r.hunk {
+            let _ = write!(key, "#{hunk}");
+        }
+        key
+    })
+}
 
 /// How the fix asked for a concern went.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,21 +214,21 @@ impl App {
     }
 
     /// Starts writing feedback on `entry`, about `file`'s hunk `hunk` at
-    /// `line` (or the whole file, or the whole change), prefilled with `text`.
+    /// `line` (or the whole file, or the whole change), prefilled with `text`
+    /// and fixing `concerns`, if it comes from some.
     fn draft_fix(
         &mut self,
         entry: &Entry,
-        file: Option<&FileDiff>,
-        hunk: Option<usize>,
-        line: Option<u32>,
+        (file, hunk, line): (Option<&FileDiff>, Option<usize>, Option<u32>),
         text: String,
+        concerns: Option<Concerns>,
     ) {
         let place = file.map(|f| match line {
             Some(line) => format!("{}:{line}", f.stat.path),
             None => f.stat.path.clone(),
         });
         let excerpt = file.map(|f| excerpt(f, hunk)).unwrap_or_default();
-        self.start_draft(entry, place, excerpt, text, None);
+        self.start_draft(entry, place, excerpt, text, concerns);
     }
 
     /// Starts writing feedback on `entry` about `place`, showing `excerpt`,
@@ -277,7 +302,7 @@ impl App {
             }
             _ => (None, None),
         };
-        self.draft_fix(&entry, file.as_ref(), hunk, line, String::new());
+        self.draft_fix(&entry, (file.as_ref(), hunk, line), String::new(), None);
         Vec::new()
     }
 
@@ -297,7 +322,7 @@ impl App {
             let texts = marked
                 .iter()
                 .filter_map(|&i| e.concerns.get(i))
-                .map(|n| n.text.clone())
+                .map(concern_key)
                 .collect();
             let concerns = Some((v.key, texts));
             self.start_draft(&entry, None, excerpt, text, concerns);
@@ -310,7 +335,7 @@ impl App {
             _ => None,
         };
         let text = concern.map(|(_, n)| n.text.clone()).unwrap_or_default();
-        let concerns = concern.map(|(_, n)| (v.key, vec![n.text.clone()]));
+        let concerns = concern.map(|(_, n)| (v.key, vec![concern_key(n)]));
         let file = target
             .as_ref()
             .and_then(|r: &Ref| v.files.iter().find(|f| f.stat.path == r.path))
@@ -320,10 +345,7 @@ impl App {
             .as_ref()
             .zip(hunk)
             .and_then(|(f, h)| f.hunks.get(h)?.first_changed_line());
-        self.draft_fix(&entry, file.as_ref(), hunk, line, text);
-        if let Some(draft) = self.fix.draft.as_mut() {
-            draft.concerns = concerns;
-        }
+        self.draft_fix(&entry, (file.as_ref(), hunk, line), text, concerns);
         Vec::new()
     }
 
@@ -373,10 +395,8 @@ impl App {
         self.fix.next += 1;
         let id = self.fix.next;
         if let Some((key, concerns)) = &draft.concerns {
-            let fixes = self.explain.fixes.entry(*key).or_default();
-            for text in concerns {
-                fixes.insert(text.clone(), ConcernFix::Fixing { since: self.now });
-            }
+            self.explain
+                .set_concern_fixes(*key, concerns, &ConcernFix::Fixing { since: self.now });
             for view in self.explain_views(*key) {
                 view.marked.clear();
             }
@@ -412,11 +432,7 @@ impl App {
             Err(why) => ConcernFix::Failed(sanitize(why)),
         };
         if let Some((key, concerns)) = &run.concerns {
-            let fixes: &mut BTreeMap<String, ConcernFix> =
-                self.explain.fixes.entry(*key).or_default();
-            for text in concerns {
-                fixes.insert(text.clone(), concern.clone());
-            }
+            self.explain.set_concern_fixes(*key, concerns, &concern);
         }
         self.fix.last = Some(Finished {
             root: run.root.clone(),

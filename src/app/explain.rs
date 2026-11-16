@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::fix::ConcernFix;
+use super::fix::{ConcernFix, concern_key};
 use super::{App, Effect, Focus, ListPos, View, half_page, max_scroll};
 use crate::explain::question::{Ask, Question};
 use crate::explain::{Answer, Diagram, Explainer, Explanation, Note, Ref, diff_key, tree};
@@ -80,8 +80,19 @@ pub struct ExplainView {
     pub question: Option<String>,
     /// Concerns marked to fix together, by index.
     pub marked: BTreeSet<usize>,
-    /// Whether `r` is waiting for the change's diff as it is now.
-    pub reloading: bool,
+    /// The explanation being asked again (`r`), while the change as it is
+    /// now loads.
+    pub reload: Option<Reload>,
+}
+
+/// An explanation being asked again (`r`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reload {
+    /// What the view showed before: back if the change can't be reloaded.
+    pub previous: Status,
+    /// Waiting for a fresh branch list first, to take the branch at the tip
+    /// it has now (a fix may just have committed to it).
+    pub awaiting_branches: bool,
 }
 
 /// A place the cursor of the detail pane can stop at.
@@ -253,8 +264,8 @@ pub struct ExplainState {
     unshown: HashMap<u64, Vec<Question>>,
     /// The last explain view left, to come back to where it was.
     parked: Option<Box<ExplainView>>,
-    /// Fixes asked for concerns, by [`diff_key`] and concern text.
-    pub(super) fixes: HashMap<u64, BTreeMap<String, ConcernFix>>,
+    /// Fixes asked for concerns, by [`diff_key`] and [`concern_key`].
+    fixes: HashMap<u64, BTreeMap<String, ConcernFix>>,
 }
 
 impl ExplainState {
@@ -271,11 +282,19 @@ impl ExplainState {
         self.fixes.get(&key)
     }
 
-    /// The fix asked for the concern reading `text` of the diff `key`, if
-    /// any.
+    /// The fix asked for the concern of the diff `key` whose
+    /// [`concern_key`] is `concern`, if any.
     #[must_use]
-    pub fn concern_fix(&self, key: u64, text: &str) -> Option<&ConcernFix> {
-        self.fixes.get(&key)?.get(text)
+    pub fn concern_fix(&self, key: u64, concern: &str) -> Option<&ConcernFix> {
+        self.fixes.get(&key)?.get(concern)
+    }
+
+    /// Records how the fix asked for `concerns` of the diff `key` stands.
+    pub(super) fn set_concern_fixes(&mut self, key: u64, concerns: &[String], fix: &ConcernFix) {
+        let fixes = self.fixes.entry(key).or_default();
+        for concern in concerns {
+            fixes.insert(concern.clone(), fix.clone());
+        }
     }
 }
 
@@ -346,7 +365,7 @@ impl App {
             rows: 0,
             question: None,
             marked: BTreeSet::new(),
-            reloading: false,
+            reload: None,
         })));
         effects
     }
@@ -455,35 +474,29 @@ impl App {
     }
 
     /// `r`: explains the change again as it is now. Its diff is loaded
-    /// afresh first, since a fix may have changed it (see [`App::on_reloaded`]).
+    /// afresh first, since a fix may have changed it (see [`App::on_reloaded`]);
+    /// for a branch, after a fresh branch list says where its tip is now.
     fn explain_again(&mut self) -> Vec<Effect> {
-        let Some(View::Explain(v)) = self.views.last() else {
-            return Vec::new();
-        };
-        if v.reloading {
-            return Vec::new();
-        }
-        let entry = self.current_entry(&v.entry);
         let Some(View::Explain(v)) = self.views.last_mut() else {
             return Vec::new();
         };
-        let old = std::mem::replace(&mut v.status, Status::Asking(self.now));
-        v.reloading = true;
+        if v.reload.is_some() {
+            return Vec::new();
+        }
+        let entry = v.entry.clone();
+        let branch = entry.branch().is_some();
+        let previous = std::mem::replace(&mut v.status, Status::Asking(self.now));
+        v.reload = Some(Reload {
+            previous,
+            awaiting_branches: branch,
+        });
         v.marked.clear();
-        // The questions join the new explanation even when the cache that
-        // would hand them over can't be written.
-        let k = v.key;
-        let questions = self
-            .explain
-            .answers
-            .remove(&k)
-            .map(|(e, _)| e.questions)
-            .or(match old {
-                Status::Ready(e, _) => Some(e.questions),
-                Status::Asking(_) | Status::Failed(_) => None,
-            })
-            .unwrap_or_default();
-        self.explain.unshown.entry(k).or_default().extend(questions);
+        if branch {
+            // Started, or already loading and queued to load again, so the
+            // list that answers was read after this key.
+            return self.request_branches();
+        }
+        let entry = self.current_entry(&entry);
         vec![Effect::LoadDiff {
             entry: Box::new(entry),
             refresh: true,
@@ -491,30 +504,51 @@ impl App {
         }]
     }
 
-    /// `entry` as vert last saw it: a branch at its current tip, uncommitted
-    /// work as it is now. A commit or pull request stays as it is; loading
-    /// its diff again fetches what it holds now.
-    fn current_entry(&self, entry: &Entry) -> Entry {
-        let branch = entry.branch().and_then(|name| {
-            self.branches
-                .list
-                .branches
-                .iter()
-                .find(|b| b.name == name)?
-                .changes
-                .clone()
+    /// A fresh branch list came: explain views waiting for it (`r` on a
+    /// branch) load their branch's diff at its tip now, or as they had it
+    /// if the branch is gone or the list couldn't be read.
+    pub(super) fn reload_branch_explanations(&mut self) -> Vec<Effect> {
+        let list = &self.branches.list.branches;
+        let open = self.views.iter_mut().filter_map(|v| match v {
+            View::Explain(x) => Some(x.as_mut()),
+            _ => None,
         });
-        let own = entry
+        open.chain(self.explain.parked.as_deref_mut())
+            .filter_map(|v| {
+                let reload = v.reload.as_mut().filter(|r| r.awaiting_branches)?;
+                reload.awaiting_branches = false;
+                let name = v.entry.branch()?;
+                let entry = list
+                    .iter()
+                    .find(|b| b.name == name)
+                    .and_then(|b| b.changes.clone())
+                    .unwrap_or_else(|| v.entry.clone());
+                Some(Effect::LoadDiff {
+                    entry: Box::new(entry),
+                    refresh: true,
+                    file: None,
+                })
+            })
+            .collect()
+    }
+
+    /// `entry` as vert last saw it: uncommitted work as it is now. A
+    /// commit or pull request stays as it is; loading its diff again
+    /// fetches what it holds now.
+    fn current_entry(&self, entry: &Entry) -> Entry {
+        entry
             .is_own_worktree()
             .then(|| self.feed.worktree.clone())
-            .flatten();
-        branch.or(own).unwrap_or_else(|| entry.clone())
+            .flatten()
+            .unwrap_or_else(|| entry.clone())
     }
 
     /// The diff of `entry` came: an explain view waiting for it (`r`)
     /// explains it, under the key of the diff as it is now. The questions
     /// asked about it stay with it when it is unchanged; when a fix changed
-    /// it, they stay with the old diff, as they are about that code.
+    /// it, they stay with the old diff, as they are about that code. When
+    /// the change is empty now or can't be read, the view keeps what it
+    /// showed and says why.
     pub(super) fn on_reloaded(
         &mut self,
         entry: &Entry,
@@ -524,24 +558,43 @@ impl App {
             View::Explain(x) => Some(x.as_mut()),
             _ => None,
         });
-        let Some(v) = open
-            .chain(self.explain.parked.as_deref_mut())
-            .find(|v| v.reloading && v.entry.id == entry.id)
-        else {
+        let Some(v) = open.chain(self.explain.parked.as_deref_mut()).find(|v| {
+            v.reload.as_ref().is_some_and(|r| !r.awaiting_branches) && v.entry.id == entry.id
+        }) else {
             return Vec::new();
         };
-        v.reloading = false;
+        let Some(Reload { previous, .. }) = v.reload.take() else {
+            return Vec::new();
+        };
         let files = match result {
-            Ok(files) if files.is_empty() => {
-                v.status = Status::Failed("Nothing to explain: the change is empty now".to_owned());
-                return Vec::new();
-            }
-            Ok(files) => files.clone(),
-            Err(why) => {
-                v.status = Status::Failed(format!("Couldn't load the change as it is now: {why}"));
+            Ok(files) if !files.is_empty() => files.clone(),
+            _ => {
+                v.status = previous;
+                // A failed load says so itself.
+                if result.is_ok() {
+                    self.notice = Some(if self.fix.last.is_some() {
+                        "Nothing to explain again: the change is empty now (c shows the last fix)"
+                            .to_owned()
+                    } else {
+                        "Nothing to explain again: the change is empty now".to_owned()
+                    });
+                }
                 return Vec::new();
             }
         };
+        // The questions join the new explanation even when the cache that
+        // would hand them over can't be written.
+        let old = v.key;
+        let questions = self
+            .explain
+            .answers
+            .remove(&old)
+            .map(|(e, _)| e.questions)
+            .or(match previous {
+                Status::Ready(e, _) => Some(e.questions),
+                Status::Asking(_) | Status::Failed(_) => None,
+            })
+            .unwrap_or_default();
         let key = diff_key(entry, &files);
         v.key = key;
         v.entry = entry.clone();
@@ -549,6 +602,11 @@ impl App {
         v.pos = ListPos::default();
         v.target = 0;
         v.scroll = 0;
+        self.explain
+            .unshown
+            .entry(old)
+            .or_default()
+            .extend(questions);
         self.ask(key, entry, &files, true)
     }
 
@@ -564,13 +622,13 @@ impl App {
             }
             return;
         };
-        let text = v
+        let concern = v
             .explanation()
             .and_then(|e| e.concerns.get(i))
-            .map(|n| n.text.as_str())
+            .map(concern_key)
             .unwrap_or_default();
         if matches!(
-            self.explain.concern_fix(v.key, text),
+            self.explain.concern_fix(v.key, &concern),
             Some(ConcernFix::Fixing { .. })
         ) {
             self.notice = Some("The agent is already fixing that concern".to_owned());
@@ -1088,7 +1146,7 @@ mod tests {
         let again = asked(&explain_again(&mut a), true);
         assert_eq!(again, key);
         assert_eq!(view(&a).status, Status::Asking(100));
-        assert!(!view(&a).reloading);
+        assert!(view(&a).reload.is_none());
         // Asked again while the agent works: the diff reloads, but the
         // agent isn't asked twice.
         assert_eq!(explain_again(&mut a), [], "already asking");
@@ -1220,14 +1278,7 @@ mod tests {
     fn explaining_again_explains_a_branch_at_its_current_tip() {
         let mut a = app();
         a.set_explainer(&Ok(pi_for_tests()));
-        let tip = |n: u8| {
-            let mut e = Entry::blank(Target::Range {
-                base: None,
-                head: git2::Oid::from_bytes(&[n; 20]).expect("oid"),
-            });
-            e.id = Entry::branch_id("feat");
-            e
-        };
+        let tip = feat_at;
         a.update(Msg::Diff {
             entry: Box::new(tip(1)),
             result: Ok(vec![file("src/a.rs")]),
@@ -1245,19 +1296,35 @@ mod tests {
         });
         view_mut(&mut a).marked.insert(0);
 
-        // A fix committed on the branch moved it.
-        a.update(Msg::Branches(Ok(crate::git::branches::Branches {
-            base: None,
-            branches: vec![crate::git::branches::Branch {
-                name: "feat".to_owned(),
-                branch: Some("feat".to_owned()),
-                remote: false,
-                ahead_behind: None,
-                changes: Some(tip(2)),
-                worktree: None,
-            }],
-        })));
-        let effects = press(&mut a, KeyCode::Char('r'));
+        let list = |n: u8| {
+            Msg::Branches(Ok(crate::git::branches::Branches {
+                base: None,
+                branches: vec![crate::git::branches::Branch {
+                    name: "feat".to_owned(),
+                    branch: Some("feat".to_owned()),
+                    remote: false,
+                    ahead_behind: None,
+                    changes: Some(tip(n)),
+                    worktree: None,
+                }],
+            }))
+        };
+        let reloads = |effects: Vec<Effect>| -> Vec<Effect> {
+            effects
+                .into_iter()
+                .filter(|e| matches!(e, Effect::LoadDiff { .. }))
+                .collect()
+        };
+        // A branch list is being read when `r` is pressed, right after a fix
+        // committed to the branch: it may predate the commit, so `r` waits
+        // for the one read after it.
+        assert_eq!(a.request_branches(), [Effect::LoadBranches]);
+        assert_eq!(press(&mut a, KeyCode::Char('r')), [], "queued");
+        assert!(view(&a).reload.is_some());
+        let first = a.update(list(1));
+        assert!(first.contains(&Effect::LoadBranches), "{first:?}");
+        assert_eq!(reloads(first), [], "read before `r`");
+        let effects = reloads(a.update(list(2)));
         let [
             Effect::LoadDiff {
                 entry,
@@ -1269,7 +1336,7 @@ mod tests {
             panic!("expected the diff to reload, got {effects:?}");
         };
         assert_eq!(**entry, tip(2), "the branch as it is now");
-        assert!(view(&a).reloading);
+        assert!(view(&a).reload.is_some());
         assert_eq!(
             view(&a).marked,
             BTreeSet::new(),
@@ -1300,6 +1367,56 @@ mod tests {
         assert_eq!(a.explain.unshown.get(&old).map(Vec::len), Some(1));
     }
 
+    /// An entry for branch `feat` with its tip at `n`.
+    fn feat_at(n: u8) -> Entry {
+        let mut e = Entry::blank(Target::Range {
+            base: None,
+            head: git2::Oid::from_bytes(&[n; 20]).expect("oid"),
+        });
+        e.id = Entry::branch_id("feat");
+        e
+    }
+
+    #[test]
+    fn explaining_a_branch_again_without_a_fresh_tip_reloads_it_as_it_was() {
+        let mut a = app();
+        a.set_explainer(&Ok(pi_for_tests()));
+        a.update(Msg::Diff {
+            entry: Box::new(feat_at(1)),
+            result: Ok(vec![file("src/a.rs")]),
+            refresh: false,
+            file: None,
+        });
+        let key = asked(&press(&mut a, KeyCode::Char('x')), false);
+        a.update(Msg::Explained {
+            key,
+            result: Ok(answer(false)),
+        });
+        // A list that can't be read, or no longer has the branch.
+        for result in [
+            Err("unreadable".to_owned()),
+            Ok(crate::git::branches::Branches::default()),
+        ] {
+            assert_eq!(press(&mut a, KeyCode::Char('r')), [Effect::LoadBranches]);
+            let effects: Vec<Effect> = a
+                .update(Msg::Branches(result))
+                .into_iter()
+                .filter(|e| matches!(e, Effect::LoadDiff { .. }))
+                .collect();
+            assert!(
+                matches!(effects.as_slice(), [Effect::LoadDiff { entry, .. }] if **entry == feat_at(1)),
+                "{effects:?}"
+            );
+            a.update(Msg::Diff {
+                entry: Box::new(feat_at(1)),
+                result: Ok(vec![file("src/a.rs")]),
+                refresh: true,
+                file: None,
+            });
+            assert!(view(&a).reload.is_none());
+        }
+    }
+
     #[test]
     fn explaining_again_says_when_the_change_can_t_be_reloaded() {
         let (mut a, _) = explained();
@@ -1315,18 +1432,29 @@ mod tests {
                 file: None,
             });
             assert_eq!(effects, []);
-            assert!(!view(a).reloading);
+            assert!(view(a).reload.is_none());
         };
+        // What the view showed stays, with why it wasn't explained again.
+        let shown = view(&a).status.clone();
         reload(&mut a, Err("gone".to_owned()));
-        assert_eq!(
-            view(&a).status,
-            Status::Failed("Couldn't load the change as it is now: gone".to_owned())
-        );
+        assert_eq!(view(&a).status, shown);
         assert_eq!(a.notice.as_deref(), Some("Could not load diff: gone"));
         reload(&mut a, Ok(Vec::new()));
+        assert_eq!(view(&a).status, shown);
         assert_eq!(
-            view(&a).status,
-            Status::Failed("Nothing to explain: the change is empty now".to_owned())
+            a.notice.as_deref(),
+            Some("Nothing to explain again: the change is empty now")
+        );
+        // After a fix (one that committed all of it, say), `c` shows it.
+        a.fix.last = Some(crate::app::Finished {
+            root: None,
+            checkout: "this checkout".to_owned(),
+            outcome: crate::git::commit::Outcome::Unchanged,
+        });
+        reload(&mut a, Ok(Vec::new()));
+        assert_eq!(
+            a.notice.as_deref(),
+            Some("Nothing to explain again: the change is empty now (c shows the last fix)")
         );
 
         // A diff that reloads for another view leaves this one alone.
@@ -1356,7 +1484,7 @@ mod tests {
         });
         assert_eq!(asked(&effects, true), key, "the same diff");
         let parked = a.explain.parked.as_ref().expect("parked");
-        assert!(!parked.reloading);
+        assert!(parked.reload.is_none());
     }
 
     #[test]

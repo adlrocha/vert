@@ -19,7 +19,7 @@ use crate::git::diff::FileDiff;
 use crate::highlight::sanitize;
 
 /// Bumped whenever the prompt changes.
-const PROMPT_VERSION: &str = "vert-fix-3";
+const PROMPT_VERSION: &str = "vert-fix-4";
 /// The line an agent starts its one-line summary with.
 const SUMMARY: &str = "SUMMARY:";
 /// Most characters of an agent's summary repeated to the user.
@@ -28,14 +28,15 @@ const SUMMARY_CHARS: usize = 300;
 /// usual width, so logs and pull requests show it whole.
 const SUBJECT_CHARS: usize = 72;
 
-const INSTRUCTIONS: &str = r"A person is reviewing a code change in this repository, in the current directory, and asked you to act on one piece of feedback.
+const INSTRUCTIONS: &str = r"A person is reviewing a code change in this repository, in the current directory, and asked you to act on their feedback: one request, or a numbered list of concerns, each naming the places it is about.
 
 Rules:
 - Do what the feedback asks with the smallest edit that does it. Don't refactor, reformat or touch unrelated code.
+- When the feedback is a numbered list, deal with every concern in it, not just the first.
 - Edit files in the current directory only. Don't run git commands that commit, stage, stash, reset, check out, clean, push or switch branches: the person reviews your edits once you are done, next to any uncommitted work they already have.
 - The files on disk are the source of truth. The excerpt shows where the person was looking when they wrote the feedback; it may be out of date.
-- If the feedback is unclear, wrong, or already addressed, change nothing and say why.
-- End your answer with one line that starts with SUMMARY: and says what you changed, or why you changed nothing.";
+- If the feedback (or one concern in the list) is unclear, wrong, or already addressed, leave it and say why.
+- End your answer with one line that starts with SUMMARY: and says what you changed, or why you changed nothing; for a numbered list, say it for each concern by its number.";
 
 /// One piece of feedback for an agent to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +279,8 @@ mod tests {
     fn the_prompt_carries_the_change_place_excerpt_and_feedback() {
         let p = prompt(&request(), 1 << 10);
         assert!(p.starts_with(PROMPT_VERSION));
+        // Marked concerns go as one numbered list: each must be handled.
+        assert!(p.contains("deal with every concern in it"));
         assert!(p.contains("Don't run git commands that commit, stage, stash, reset"));
         assert!(p.contains("# The change\n\na1b2c3d Add login\n"));
         assert!(p.contains(

@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::{Hints, empty_state, marker, panel, plural, spinner, truncate, width, wrap};
-use crate::app::{ConcernFix, ExplainView, Item, Pane, Status, items};
+use crate::app::{ConcernFix, ExplainView, Item, Pane, Status, concern_key, items};
 use crate::explain::{Change, Diagram, Explanation, Ref, tree};
 use crate::git::commit::Outcome;
 use crate::git::short_id;
@@ -130,7 +130,6 @@ pub fn draw_question(frame: &mut Frame<'_>, area: Rect, v: &ExplainView) {
     });
 }
 
-/// `m:ss` for a number of seconds.
 /// How a concern's fix went, in a line and its colour.
 fn fix_status(fix: &ConcernFix, now: i64) -> (String, Style) {
     match fix {
@@ -385,7 +384,7 @@ fn detail_lines(
                     out.blank();
                 }
                 // A concern without code is a stop of its own: its text.
-                let stop = note.refs.is_empty().then(|| out.target());
+                let selected_stop = note.refs.is_empty() && out.target();
                 let first = out.lines.len();
                 let mark = if marks.marked.contains(&i) {
                     "[x] ⚠ "
@@ -393,10 +392,10 @@ fn detail_lines(
                     "[ ] ⚠ "
                 };
                 out.prefixed(mark, Style::default().fg(theme::WARN), &note.text);
-                if stop == Some(true) {
+                if selected_stop {
                     out.mark_at(first);
                 }
-                if let Some(fix) = marks.fixes.and_then(|f| f.get(&note.text)) {
+                if let Some(fix) = marks.fixes.and_then(|f| f.get(&concern_key(note))) {
                     let (text, style) = fix_status(fix, marks.now);
                     out.indented(4, &text, style);
                 }

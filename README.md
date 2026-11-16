@@ -136,7 +136,7 @@ Press `?` inside vert for all keys. The essentials:
 | Feed      | `n` next new change · `esc` clear filter · `r` reload                   |
 | Hotspots  | `w` time window · `m` files/modules · `⏎` filter feed · `o`/`e` view/edit |
 | Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit · `x` explain · `f` fix |
-| Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `a` ask a question · `r` explain again · `f` fix |
+| Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `a` ask a question · `r` explain again · `space` mark a concern · `f` fix the marked concerns (else the selected one) · `c` last fix |
 | Fix       | type the feedback · `⏎` send · `esc` cancel · `ctrl-w`/`ctrl-u` delete |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
 | Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names or PR number · `c` collisions · `d` remove · `r` refresh |
@@ -244,8 +244,11 @@ stay with the old code they were about.
 
 **Explaining again.** `r` loads the change as it is now and explains that:
 uncommitted work as it is on disk, and a branch at its current tip, so a fix
-committed on it is part of the new explanation. A single commit is
-explained as it is; a fix to it is a new commit, which `c` opens.
+committed on it is part of the new explanation (vert reads the branch list
+again first, so a fix that just landed is in it). A single commit is
+explained as it is; a fix to it is a new commit, which `c` opens. When the
+change is empty now (a fix committed all of your uncommitted work, say),
+the explanation stays as it was and `c` shows the fix.
 
 **Cache and privacy.** Answers are cached in `$XDG_CACHE_HOME/vert/explain`
 (`~/.cache/vert/explain` by default), readable only by you. The cache key
