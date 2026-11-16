@@ -68,7 +68,7 @@ in, and what deserves a second look.
 - **Fixes:** press `f` on a hunk, or on a concern in an explanation, write
   what should change (a concern starts as its own text), and Claude Code
   or Codex makes the edit in that line of work's checkout, confined to
-  it (or pi, unconfined, if you choose it). It never commits, so the fix lands in the checkout's uncommitted
+  it (or pi, unconfined, with a warning). It never commits, so the fix lands in the checkout's uncommitted
   changes. See [Fixes](#fixes).
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter. `e` opens `$VISUAL`/`$EDITOR` at that line
@@ -302,11 +302,12 @@ Codex's sandbox makes `git commit`, `stash` and `reset` fail); pi can.
 
 The agent and model are the ones explanations use (`VERT_EXPLAIN_AGENT`,
 `VERT_EXPLAIN_MODEL`), with the same timeout. `auto` picks the first of
-`claude` and `codex` on `PATH`, never pi.
+`claude` and `codex` on `PATH`, and pi only when neither is installed.
 
-**Fixing with pi.** pi can't be confined to the checkout, so it fixes
-only when you choose it with `VERT_EXPLAIN_AGENT=pi`, and vert labels it
-`pi, unconfined` where you ask for the fix. It gets only its file tools
+**Fixing with pi.** pi can't be confined to the checkout. vert fixes with
+it when you choose it (`VERT_EXPLAIN_AGENT=pi`) or when it is the only agent
+installed, labels it `pi, unconfined`, and warns in the fix prompt that
+its edits can land outside the checkout. It gets only its file tools
 (read, grep, find, ls, edit, write; no bash), and no extensions, MCP
 servers, skills or context files, so it can't run code. Its edits, though,
 can land anywhere your user can write, `.git` included. Use it on code you
@@ -346,7 +347,7 @@ checkout whose agent is idle.
 | `--github-timeout-secs`  | 15      | GitHub request timeout                          |
 | `--no-network`           | off     | Never contact GitHub, and no explanations or fixes |
 | `--no-update-check`      | off     | Never ask GitHub whether a newer vert exists    |
-| `--explain-agent` / `VERT_EXPLAIN_AGENT` | `auto` | Agent for `x` and `f`: `auto`, `claude`, `codex` or `pi` (pi fixes unconfined, only when named) |
+| `--explain-agent` / `VERT_EXPLAIN_AGENT` | `auto` | Agent for `x` and `f`: `auto`, `claude`, `codex` or `pi` (pi fixes unconfined, with a warning) |
 | `--explain-model` / `VERT_EXPLAIN_MODEL` | agent's default | Model the agent uses, in its own naming |
 | `--explain-cmd` / `VERT_EXPLAIN_CMD` | — | Shell command to use instead of a known agent |
 | `--explain-timeout-secs` / `VERT_EXPLAIN_TIMEOUT_SECS` | 600 | How long an agent may take to explain or fix |
