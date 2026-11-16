@@ -1,10 +1,13 @@
 //! Agents' answers on disk, so a change is explained once.
 //!
-//! An answer is stored under a hash of the agent, the model, the full diff
-//! and the prompt (see `Explainer::explain`). The diff is hashed on its own
-//! because the prompt leaves hunk bodies out past `--explain-max-diff-kb`, so
-//! two changes can share a prompt but never an answer. A commit keeps its
-//! answer forever, and a working tree that moved on simply misses.
+//! An explanation is stored under a hash of the agent, the model, the full
+//! diff and the prompt (see `Explainer::explain`). The diff is hashed on its
+//! own because the prompt leaves hunk bodies out past `--explain-max-diff-kb`,
+//! so two changes can share a prompt but never an answer. The follow-up
+//! questions about a change are stored together under a hash of the full
+//! diff alone, whichever agent answered them (see [`super::question`]). A
+//! commit keeps its answers forever, and a working tree that moved on simply
+//! misses.
 //!
 //! Answers describe private code, so the directory and its files are made
 //! readable by their owner only.

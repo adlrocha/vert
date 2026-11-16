@@ -150,7 +150,8 @@ pub struct Config {
 
     /// KiB of diff sent to the agent in full: to explain, later hunks are
     /// listed by header only; to fix, the excerpt stops at a line. Either
-    /// way the agent reads the rest itself.
+    /// way the agent reads the rest itself. A follow-up question also
+    /// replays the explanation and the newest earlier answers up to this.
     #[arg(long, global = true, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..), env = "VERT_EXPLAIN_MAX_DIFF_KB")]
     pub explain_max_diff_kb: u32,
 }

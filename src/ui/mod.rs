@@ -45,7 +45,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Some(View::Explain(v)) => {
             draw_crumbs(frame, tabs, &[app.tab.title(), &v.entry.short, "Explain"]);
-            explain::draw(frame, body, v, app.now, app.tick);
+            let asking = app.explain.question_asked(v.key);
+            explain::draw(frame, body, v, asking, app.now, app.tick);
             explain::EXPLAIN_HINTS
         }
         None => {
@@ -1335,7 +1336,6 @@ mod render_tests {
             height: 0,
             rows: 0,
             question: None,
-            asking: None,
         };
         view.entry.root = None;
         app.views.push(crate::app::View::Explain(Box::new(view)));

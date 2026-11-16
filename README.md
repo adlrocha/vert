@@ -229,9 +229,11 @@ alone.
 
 **Follow-up questions.** Press `a` in an explanation to ask the agent about
 the change, type the question and press `⏎`. Each question is a new
-read-only run of the same agent with the change, its explanation and the
-earlier questions and answers, so it works with every agent and with
-explanations read from the cache. Answers appear in the outline as `Q1`,
+read-only run of the same agent (a `--explain-cmd` runs unconfined, as it
+does to explain) with the change, its explanation and the earlier
+questions and answers, so it works with every agent and with explanations
+read from the cache. The explanation and the newest earlier answers are
+replayed up to `--explain-max-diff-kb`. Answers appear in the outline as `Q1`,
 `Q2`, …, and their code pointers jump to the diff like the steps' do.
 Questions are kept with the change: reopening it, or pressing `r` for a new
 explanation, keeps them.
@@ -361,7 +363,7 @@ checkout whose agent is idle.
 | `--explain-model` / `VERT_EXPLAIN_MODEL` | agent's default | Model the agent uses, in its own naming |
 | `--explain-cmd` / `VERT_EXPLAIN_CMD` | — | Shell command to use instead of a known agent |
 | `--explain-timeout-secs` / `VERT_EXPLAIN_TIMEOUT_SECS` | 600 | How long an agent may take to explain or fix |
-| `--explain-max-diff-kb` / `VERT_EXPLAIN_MAX_DIFF_KB` | 256 | Diff sent in full; to explain, later hunks go by header only; to fix, the excerpt stops at a line |
+| `--explain-max-diff-kb` / `VERT_EXPLAIN_MAX_DIFF_KB` | 256 | Diff sent in full; to explain, later hunks go by header only; to fix, the excerpt stops at a line; to ask, also caps the replayed explanation and answers |
 
 ## Development
 

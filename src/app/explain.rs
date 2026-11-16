@@ -76,8 +76,6 @@ pub struct ExplainView {
     pub rows: usize,
     /// A follow-up question being written.
     pub question: Option<String>,
-    /// The question the agent is answering, and since when (Unix time).
-    pub asking: Option<(String, i64)>,
 }
 
 impl ExplainView {
@@ -195,10 +193,31 @@ pub struct ExplainState {
     answers: HashMap<u64, (Explanation, bool)>,
     /// Diffs an agent is working on.
     asking: HashSet<u64>,
-    /// The question an agent is answering about a diff, and since when.
+    /// The question an agent is answering about a diff, and since when;
+    /// one at a time per diff.
     questioning: HashMap<u64, (String, i64)>,
+    /// Answers that came while their diff had no explanation to join,
+    /// added to the next one.
+    unshown: HashMap<u64, Vec<Question>>,
     /// The last explain view left, to come back to where it was.
     parked: Option<Box<ExplainView>>,
+}
+
+impl ExplainState {
+    /// The question an agent is answering about the diff `key`, and since
+    /// when (Unix time).
+    #[must_use]
+    pub fn question_asked(&self, key: u64) -> Option<&(String, i64)> {
+        self.questioning.get(&key)
+    }
+}
+
+/// Adds `q` to `e`'s questions unless it is there already (a new
+/// explanation may have read it from the cache).
+fn add_question(e: &mut Explanation, q: &Question) {
+    if !e.questions.contains(q) {
+        e.questions.push(q.clone());
+    }
 }
 
 impl App {
@@ -259,7 +278,6 @@ impl App {
             height: 0,
             rows: 0,
             question: None,
-            asking: self.explain.questioning.get(&key).cloned(),
         })));
         effects
     }
@@ -281,6 +299,12 @@ impl App {
     /// An agent answered about the diff `key`.
     pub(super) fn on_explained(&mut self, key: u64, result: Result<Answer, String>) {
         self.explain.asking.remove(&key);
+        let result = result.map(|mut answer| {
+            for q in self.explain.unshown.remove(&key).unwrap_or_default() {
+                add_question(&mut answer.explanation, &q);
+            }
+            answer
+        });
         if let Ok(answer) = &result {
             self.explain
                 .answers
@@ -291,10 +315,6 @@ impl App {
             Err(why) => Status::Failed(why.clone()),
         };
         let mut shown = false;
-        if let Status::Failed(_) = status {
-            // A question about an explanation that is gone can't be shown.
-            self.explain.questioning.remove(&key);
-        }
         let open = self.views.iter_mut().filter_map(|v| match v {
             View::Explain(x) if x.key == key => Some(x.as_mut()),
             _ => None,
@@ -376,7 +396,7 @@ impl App {
         };
         if v.explanation().is_none() {
             self.notice = Some("Wait for the explanation before asking about it".to_owned());
-        } else if v.asking.is_some() {
+        } else if self.explain.questioning.contains_key(&v.key) {
             self.notice = Some(format!("{} is still answering your last question", v.agent));
         } else {
             v.question = Some(String::new());
@@ -431,7 +451,6 @@ impl App {
             question: question.clone(),
         }));
         v.question = None;
-        v.asking = Some((question.clone(), now));
         self.explain.questioning.insert(v.key, (question, now));
         vec![effect]
     }
@@ -444,31 +463,28 @@ impl App {
         let answered = match result {
             Ok(q) => q,
             Err(why) => {
-                for view in self.explain_views(key) {
-                    view.asking = None;
-                }
                 // The agent's own error output: untrusted, like all it prints.
                 self.notice = Some(format!("Couldn't answer: {}", sanitize(&why)));
                 return;
             }
         };
-        let add = |e: &mut Explanation| {
-            // A new explanation may already have read it from the cache.
-            if !e.questions.contains(&answered) {
-                e.questions.push(answered.clone());
-            }
-        };
+        let mut kept = false;
         if let Some((e, _)) = self.explain.answers.get_mut(&key) {
-            add(e);
+            add_question(e, &answered);
+            kept = true;
         }
         let on_top = matches!(self.views.last(), Some(View::Explain(v)) if v.key == key);
         let mut shown = false;
         for view in self.explain_views(key) {
-            view.asking = None;
             if let Status::Ready(e, _) = &mut view.status {
-                add(e);
+                add_question(e, &answered);
                 shown = true;
             }
+        }
+        if !shown && !kept {
+            // Being explained again: the answer joins the new explanation.
+            self.explain.unshown.entry(key).or_default().push(answered);
+            return;
         }
         if on_top && let Some(View::Explain(v)) = self.views.last_mut() {
             let items = v.items();
@@ -478,7 +494,7 @@ impl App {
                 v.target = 0;
                 v.scroll = 0;
             }
-        } else if shown || self.explain.answers.contains_key(&key) {
+        } else {
             self.notice = Some("An answer is ready: open the change and press x".to_owned());
         }
     }
@@ -1035,7 +1051,8 @@ mod tests {
         assert_eq!(asking.explanation, explanation());
         assert_eq!(asking.files.len(), 2);
         assert_eq!(view(&a).question, None);
-        assert_eq!(view(&a).asking, Some(("Why retry?".to_owned(), 100)));
+        let asked_now = |a: &App| a.explain.question_asked(key).cloned();
+        assert_eq!(asked_now(&a), Some(("Why retry?".to_owned(), 100)));
         assert_eq!(press(&mut a, KeyCode::Char('a')), []);
         assert!(
             a.notice
@@ -1048,7 +1065,7 @@ mod tests {
             key,
             result: Ok(reply(vec![r("src/a.rs", Some(1))])),
         });
-        assert_eq!(view(&a).asking, None);
+        assert_eq!(asked_now(&a), None);
         assert_eq!(
             view(&a).item(),
             Some(Item::Question(0)),
@@ -1077,6 +1094,7 @@ mod tests {
     #[test]
     fn answers_elsewhere_and_failures_are_told() {
         let (mut a, key) = explained();
+        let asked_now = |a: &App| a.explain.question_asked(key).cloned();
         press(&mut a, KeyCode::Char('a'));
         type_text(&mut a, "Why?");
         press(&mut a, KeyCode::Enter);
@@ -1084,20 +1102,23 @@ mod tests {
             key,
             result: Err("pi: \u{1b}[31mboom".to_owned()),
         });
-        assert_eq!(view(&a).asking, None);
+        assert_eq!(asked_now(&a), None);
         assert_eq!(a.notice.as_deref(), Some("Couldn't answer: pi: ·[31mboom"));
 
-        // Asked, then left: the parked view keeps the question going.
+        // Asked, then left: the question keeps going, and blocks another
+        // from a view built afresh.
         press(&mut a, KeyCode::Char('a'));
         type_text(&mut a, "Why?");
         press(&mut a, KeyCode::Enter);
         press(&mut a, KeyCode::Esc);
         a.explain.parked = None;
         press(&mut a, KeyCode::Char('x'));
-        assert_eq!(
-            view(&a).asking,
-            Some(("Why?".to_owned(), 100)),
-            "from memory"
+        press(&mut a, KeyCode::Char('a'));
+        assert_eq!(view(&a).question, None);
+        assert!(
+            a.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("still answering"))
         );
         press(&mut a, KeyCode::Esc);
         a.update(Msg::Answered {
@@ -1110,10 +1131,10 @@ mod tests {
                 .is_some_and(|n| n.contains("An answer is ready"))
         );
         let parked = a.explain.parked.as_ref().expect("parked");
-        assert_eq!(parked.asking, None);
         assert!(parked.items().contains(&Item::Question(0)));
 
-        // A failed new explanation drops the question it was answering.
+        // An answer that comes while the change is explained again, even
+        // when that fails, joins the next explanation.
         press(&mut a, KeyCode::Char('x'));
         press(&mut a, KeyCode::Char('a'));
         type_text(&mut a, "More?");
@@ -1123,24 +1144,26 @@ mod tests {
             key,
             result: Err("gone".to_owned()),
         });
-        press(&mut a, KeyCode::Esc);
-        a.explain.parked = None;
-        a.update(Msg::Diff {
-            entry: Box::new(change("c1")),
-            result: Ok(vec![file("src/a.rs"), file("docs/x.md")]),
-            refresh: false,
-            file: None,
-        });
-        press(&mut a, KeyCode::Char('x'));
-        assert_eq!(view(&a).asking, None);
-
-        // An answer for a change nobody is looking at says nothing.
+        assert_eq!(asked_now(&a).map(|(q, _)| q), Some("More?".to_owned()));
+        press(&mut a, KeyCode::Char('a'));
+        assert_eq!(view(&a).question, None, "the explanation is gone");
+        let more = Question {
+            question: "More?".to_owned(),
+            ..reply(Vec::new())
+        };
         a.notice = None;
         a.update(Msg::Answered {
-            key: 999,
-            result: Ok(reply(Vec::new())),
+            key,
+            result: Ok(more.clone()),
         });
-        assert_eq!(a.notice, None);
+        assert_eq!(a.notice, None, "nothing to show it in yet");
+        press(&mut a, KeyCode::Char('r'));
+        a.update(Msg::Explained {
+            key,
+            result: Ok(answer(false)),
+        });
+        let questions = view(&a).explanation().map(|e| e.questions.clone());
+        assert_eq!(questions, Some(vec![more]));
     }
 
     #[test]

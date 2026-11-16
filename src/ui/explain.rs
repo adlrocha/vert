@@ -25,9 +25,18 @@ pub const EXPLAIN_HINTS: Hints = &[
 ];
 
 /// Draws the explain view.
-pub fn draw(frame: &mut Frame<'_>, area: Rect, v: &mut ExplainView, now: i64, tick: usize) {
+///
+/// `asking` is the follow-up question the agent is answering, and since when.
+pub fn draw(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    v: &mut ExplainView,
+    asking: Option<&(String, i64)>,
+    now: i64,
+    tick: usize,
+) {
     let [summary, body] = Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(area);
-    draw_summary(frame, summary, v, now, tick);
+    draw_summary(frame, summary, v, asking, now, tick);
     match &v.status {
         Status::Asking(since) => {
             let block = panel(true);
@@ -107,7 +116,14 @@ fn clock(secs: i64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-fn draw_summary(frame: &mut Frame<'_>, area: Rect, v: &ExplainView, now: i64, tick: usize) {
+fn draw_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    v: &ExplainView,
+    asking: Option<&(String, i64)>,
+    now: i64,
+    tick: usize,
+) {
     let e = &v.entry;
     let title = if e.is_own_worktree() {
         "Uncommitted changes"
@@ -131,7 +147,7 @@ fn draw_summary(frame: &mut Frame<'_>, area: Rect, v: &ExplainView, now: i64, ti
         Status::Ready(_, false) => "just now".to_owned(),
         Status::Failed(_) => "failed".to_owned(),
     };
-    if let Some((_, since)) = &v.asking {
+    if let Some((_, since)) = asking {
         state = format!(
             "{state} · {} answering your question {}",
             spinner(tick),

@@ -576,7 +576,6 @@ fn explaining(concerns: Vec<Note>) -> App {
         height: 0,
         rows: 0,
         question: None,
-        asking: None,
     })));
     app
 }

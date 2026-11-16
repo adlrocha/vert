@@ -24,7 +24,8 @@ use super::{
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
 
-/// Bumped whenever the question prompt changes.
+/// Names the question prompt's format, for whoever reads a prompt. Stored
+/// questions don't depend on it, so it isn't part of their key.
 const PROMPT_VERSION: &str = "vert-question-1";
 
 /// Bumped whenever the way questions are stored changes.
@@ -233,9 +234,28 @@ fn recap(out: &mut String, e: &Explanation) {
     }
 }
 
+/// Appends as much of `text` as `budget` bytes allow to `out`, saying so
+/// when some is left out, and takes what it used from `budget`.
+fn push_within(out: &mut String, text: &str, budget: &mut usize) {
+    if text.len() <= *budget {
+        *budget -= text.len();
+        out.push_str(text);
+        return;
+    }
+    let end = (0..=*budget)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
+    out.push_str(&text[..end]);
+    out.push_str("\n(the rest was left out to save space)\n");
+    *budget = 0;
+}
+
 /// Builds the prompt for `question` about `entry`, whose diff is `files`
 /// and which the agent explained as `explanation` (its questions so far
-/// included). Hunk bodies stop once the diff passes `max_diff_bytes`.
+/// included). Hunk bodies stop once the diff passes `max_diff_bytes`; the
+/// explanation and the earlier answers get the same budget again, the
+/// newest answers first.
 #[must_use]
 pub fn prompt(
     entry: &Entry,
@@ -250,18 +270,42 @@ pub fn prompt(
     out.push_str(INSTRUCTIONS);
     describe_change(&mut out, entry, files, max_diff_bytes);
     out.push_str("\n# Your explanation\n\n");
-    recap(&mut out, explanation);
+    let mut budget = max_diff_bytes;
+    let mut said = String::new();
+    recap(&mut said, explanation);
+    push_within(&mut out, &said, &mut budget);
     if !explanation.questions.is_empty() {
+        let mut replayed: Vec<String> = explanation
+            .questions
+            .iter()
+            .rev()
+            .map(|q| {
+                format!(
+                    "\nQ: {}\nA: {}{}\n",
+                    q.question,
+                    q.answer,
+                    pointers(&q.refs)
+                )
+            })
+            .take_while(|turn| {
+                let fits = turn.len() <= budget;
+                if fits {
+                    budget -= turn.len();
+                }
+                fits
+            })
+            .collect();
+        replayed.reverse();
         out.push_str("\n# Earlier questions\n");
-        for q in &explanation.questions {
-            let _ = write!(
+        let left_out = explanation.questions.len() - replayed.len();
+        if left_out > 0 {
+            let _ = writeln!(
                 out,
-                "\nQ: {}\nA: {}{}\n",
-                q.question,
-                q.answer,
-                pointers(&q.refs)
+                "\n({left_out} earlier question{} left out to save space)",
+                if left_out == 1 { " was" } else { "s were" }
             );
         }
+        out.push_str(&replayed.concat());
     }
     let _ = write!(out, "\n# The question\n\n{}\n", question.trim());
     out
@@ -281,7 +325,7 @@ impl Explainer {
 
     /// Puts `asked` to the agent, running it read-only in `dir` and
     /// tracking it in `groups`. The answer joins the questions kept for the
-    /// change.
+    /// change, merged with any stored since `asked` was made.
     ///
     /// # Errors
     /// Returns a message for the user when the agent fails or answers
@@ -306,8 +350,12 @@ impl Explainer {
         let answered = Question::validate(question, &out, files)
             .map_err(|e| format!("{}: {e}", self.agent.name()))?;
         if let Some(cache) = &self.cache {
-            let mut all = explanation.questions.clone();
-            all.push(answered.clone());
+            let mut all = self.questions(entry, files);
+            for q in explanation.questions.iter().chain([&answered]) {
+                if !all.contains(q) {
+                    all.push(q.clone());
+                }
+            }
             if let Ok(saved) = save(&all) {
                 cache.put(thread_key(entry, files), &saved);
             }
@@ -460,6 +508,46 @@ mod tests {
     }
 
     #[test]
+    fn prompts_keep_the_explanation_and_newest_answers_within_budget() {
+        let mut e = explanation();
+        for (q, a) in [
+            ("First?", "Old."),
+            ("Second?", "Newer."),
+            ("Third?", "Newest."),
+        ] {
+            e.questions.push(Question {
+                question: q.to_owned(),
+                answer: a.to_owned(),
+                refs: Vec::new(),
+            });
+        }
+        let mut said = String::new();
+        recap(&mut said, &e);
+        let turn = |q: &str, a: &str| format!("\nQ: {q}\nA: {a}\n").len();
+        let room = said.len() + turn("Third?", "Newest.") + turn("Second?", "Newer.");
+        let p = prompt(&entry(), &sample(), room, &e, "q");
+        assert!(
+            p.contains("(1 earlier question was left out to save space)"),
+            "{p}"
+        );
+        assert!(!p.contains("First?"));
+        assert!(
+            p.contains("Q: Second?\nA: Newer.\n\nQ: Third?"),
+            "in order: {p}"
+        );
+        let p = prompt(&entry(), &sample(), said.len(), &e, "q");
+        assert!(p.contains("(3 earlier questions were left out"), "{p}");
+        // Too little room for the explanation itself: it is cut, on a
+        // character boundary.
+        e.intent = "é".repeat(40);
+        let p = prompt(&entry(), &sample(), 15, &e, "q");
+        assert!(
+            p.contains("Intent: ééé\n(the rest was left out to save space)"),
+            "{p}"
+        );
+    }
+
+    #[test]
     fn answers_are_asked_kept_and_survive_a_new_explanation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let files = sample();
@@ -486,7 +574,20 @@ mod tests {
             sent.contains("Q: Why?\nA: Because."),
             "the thread is replayed"
         );
-        assert_eq!(ex.questions(&entry(), &files), vec![first, second.clone()]);
+        assert_eq!(
+            ex.questions(&entry(), &files),
+            vec![first.clone(), second.clone()]
+        );
+
+        // An answer to an older snapshot is merged with what was stored since.
+        std::fs::write(dir.path().join("reply"), "Late.").expect("write");
+        let late = ex
+            .ask(&asking(&explanation(), "Late?"), dir.path(), &groups)
+            .expect("answered");
+        assert_eq!(
+            ex.questions(&entry(), &files),
+            vec![first, second.clone(), late]
+        );
 
         // Another diff has its own questions.
         let mut edited = sample();
@@ -501,13 +602,13 @@ mod tests {
         let fresh = explains
             .explain(&entry(), &files, dir.path(), true, &groups)
             .expect("explained");
-        assert_eq!(fresh.explanation.questions.len(), 2);
+        assert_eq!(fresh.explanation.questions.len(), 3);
         assert_eq!(fresh.explanation.questions[1], second);
         let cached = explains
             .explain(&entry(), &files, dir.path(), false, &groups)
             .expect("explained");
         assert!(cached.cached);
-        assert_eq!(cached.explanation.questions.len(), 2);
+        assert_eq!(cached.explanation.questions.len(), 3);
     }
 
     #[test]
