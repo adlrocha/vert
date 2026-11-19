@@ -1515,6 +1515,7 @@ mod render_tests {
             result: Ok(Answer {
                 explanation,
                 cached: true,
+                agent: None,
             }),
         });
         for (w, h) in SIZES {
@@ -1589,6 +1590,7 @@ mod render_tests {
             result: Ok(Answer {
                 explanation,
                 cached: false,
+                agent: None,
             }),
         });
         let press = |app: &mut App, code| {

@@ -223,6 +223,7 @@ fn a_question_about_the_selection_is_written_sent_and_answered() {
         result: Ok(Answer {
             explanation: Explanation::validate(r#"{"intent": "x"}"#, &files()).expect("valid"),
             cached: false,
+            agent: None,
         }),
     });
     assert_eq!(
@@ -489,6 +490,7 @@ fn a_follow_up_from_the_explanation_on_screen_needs_no_footer() {
         result: Ok(Answer {
             explanation: Explanation::validate(r#"{"intent": "x"}"#, &files()).expect("valid"),
             cached: false,
+            agent: None,
         }),
     });
     press(&mut app, KeyCode::Char('a'));

@@ -186,10 +186,11 @@ the agent (`auto`, `claude`, `codex`, `pi`, or your `--explain-cmd` when
 you set one) and type the model, or leave it blank for the agent's
 default. The choice applies to everything you explain, ask or fix from
 then on, until vert exits; work already on its way finishes with the agent
-it went to. A change explained earlier in the session is explained again
-by the new agent when you press `x` (or read from that agent's cache),
-while an explanation still open keeps its answer, headed with the agent
-that gave it. The footer says which agent explains and which fixes. An
+it went to, and its answer is headed with the agent that gave it. A
+change explained earlier in the session is explained again by the new
+agent when you press `x` (or read from that agent's cache); an
+explanation still open, or one that arrives after the switch, keeps the
+old agent's answer until `r`. The footer says which agent explains and which fixes. An
 agent picked with `M` explains even when `--explain-cmd` is set.
 
 To set what vert starts with, set them once per machine in your shell
@@ -356,7 +357,8 @@ and of its pull request once you push. Nothing is pushed. To undo a fix,
   uncommitted.
 
 **What the agent is told.** The change it is looking at, where your
-feedback points, the hunk there, and your words. What `f` points at
+feedback points, the code there (the lines you selected, a file's hunks,
+or the hunks a concern points at), and your words. What `f` points at
 depends on where you press it:
 
 - in the diff pane: the lines selected with `v` (place
@@ -483,7 +485,8 @@ cargo llvm-cov --summary-only                # coverage
 `App::update(msg) -> Vec<Effect>` is a pure state machine. Keys, loads and
 file changes come in as `Msg`s. I/O goes out as `Effect`s, which `jobs::run`
 performs on worker threads. The binary (`main.rs`) is only terminal setup and
-the event loop. This keeps all interaction logic testable without a terminal.
+the event loop, plus the effects that need the terminal or change what
+workers are handed: quitting, the editor, and switching the agent (`M`). This keeps all interaction logic testable without a terminal.
 
 | Module      | Responsibility                                                   |
 | ----------- | ---------------------------------------------------------------- |

@@ -322,6 +322,7 @@ mod tests {
                 explanation: crate::explain::Explanation::validate(r#"{"intent": "x"}"#, &[])
                     .expect("valid"),
                 cached: false,
+                agent: None,
             }),
         });
         assert!(a.explain.explanation(7).is_some());
@@ -351,6 +352,7 @@ mod tests {
                 explanation: crate::explain::Explanation::validate(r#"{"intent": "x"}"#, &[])
                     .expect("valid"),
                 cached: false,
+                agent: None,
             }),
         });
         a.agents_changed(setting.clone(), &explainer, &fixer);
