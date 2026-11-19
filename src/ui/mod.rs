@@ -1,6 +1,8 @@
 //! Rendering. Everything here is a pure function of [`App`] state, except
 //! that list offsets and viewport heights are written back for scrolling.
 
+mod agents;
+mod answer;
 mod branches;
 pub mod detail;
 mod explain;
@@ -51,6 +53,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             explain::draw(frame, body, v, (asking, fixes), app.now, app.tick);
             explain::EXPLAIN_HINTS
         }
+        Some(View::Answer(v)) => {
+            draw_crumbs(frame, tabs, &[app.tab.title(), &v.entry.short, "Ask"]);
+            answer::draw(frame, body, v, app.now, app.tick);
+            answer::ANSWER_HINTS
+        }
         None => {
             draw_tabs(frame, tabs, app);
             match app.tab {
@@ -70,6 +77,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.fix.draft.is_some() {
         fix::draw_draft(frame, frame.area(), app);
+    }
+    if app.ask.draft.is_some() {
+        answer::draw_draft(frame, frame.area(), app);
+    }
+    if app.agents.picker.is_some() {
+        agents::draw_picker(frame, frame.area(), app);
     }
     if let Some(View::Explain(v)) = app.views.last() {
         explain::draw_question(frame, frame.area(), v);
@@ -211,6 +224,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("⏎", "open"),
             ("esc q", "back / quit"),
             ("r", "reload"),
+            ("M", "agent and model"),
         ],
     ),
     ("Feed", &[("n", "next new change"), ("esc", "clear filter")]),
@@ -243,8 +257,11 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n N", "next / prev hunk"),
             ("← →", "scroll sideways"),
             ("⏎ e", "view / edit file"),
+            ("v", "select lines (j k extend)"),
             ("x", "explain the change"),
-            ("f", "have the agent fix the file or hunk"),
+            ("a", "ask about the lines or file"),
+            ("A", "answers asked here"),
+            ("f", "fix the lines or file"),
         ],
     ),
     (
@@ -259,6 +276,25 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("space", "mark a concern to fix"),
             ("f", "fix marked, else selected"),
             ("c", "see the last fix"),
+        ],
+    ),
+    (
+        "Answers",
+        &[
+            ("j k", "move between code pointers"),
+            ("⏎", "go to the code"),
+            ("J K", "scroll"),
+            ("a", "ask more about the same place"),
+            ("esc", "back to the diff (A reopens)"),
+        ],
+    ),
+    (
+        "Agent (M)",
+        &[
+            ("← →", "choose the agent"),
+            ("type", "the model; blank for its default"),
+            ("⏎", "use until vert exits"),
+            ("esc", "cancel"),
         ],
     ),
     (
@@ -282,30 +318,58 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
 ];
 
 fn draw_help(frame: &mut Frame<'_>) {
-    let mut lines = Vec::new();
-    for (section, keys) in HELP {
-        lines.push(Line::from(Span::styled(*section, theme::accent_bold())));
-        for (k, desc) in *keys {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {k:<16}"), theme::bold()),
-                Span::styled(*desc, theme::muted()),
-            ]));
+    let sections: Vec<Vec<Line<'static>>> = HELP
+        .iter()
+        .map(|(section, keys)| {
+            std::iter::once(Line::from(Span::styled(*section, theme::accent_bold())))
+                .chain(keys.iter().map(|(k, desc)| {
+                    Line::from(vec![
+                        Span::styled(format!("  {k:<16}"), theme::bold()),
+                        Span::styled(*desc, theme::muted()),
+                    ])
+                }))
+                .collect()
+        })
+        .collect();
+    // Sections one under another, blank lines between.
+    let stack = |sections: &[Vec<Line<'static>>]| {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for (i, section) in sections.iter().enumerate() {
+            if i > 0 {
+                lines.push(Line::raw(""));
+            }
+            lines.extend(section.iter().cloned());
         }
-        lines.push(Line::raw(""));
+        lines
+    };
+    let one = stack(&sections);
+    let area = frame.area();
+    // Two columns when one doesn't fit, split at the section that best
+    // halves the height.
+    let columns = if one.len() + 4 > usize::from(area.height) {
+        let half = one.len() / 2;
+        let split = (1..sections.len())
+            .min_by_key(|&i| stack(&sections[..i]).len().abs_diff(half))
+            .unwrap_or(1);
+        vec![stack(&sections[..split]), stack(&sections[split..])]
+    } else {
+        vec![one]
+    };
+    let rows = columns.iter().map(Vec::len).max().unwrap_or(0);
+    let height = u16::try_from(rows + 4).unwrap_or(u16::MAX);
+    let width = u16::try_from(48 * columns.len()).unwrap_or(u16::MAX);
+    let rect = centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = panel(true)
+        .title(" Keys ")
+        .title_bottom(Line::from(" any key to close ").alignment(Alignment::Right))
+        .padding(Padding::new(2, 2, 1, 1));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let areas = Layout::horizontal(vec![Constraint::Fill(1); columns.len()]).split(inner);
+    for (lines, column) in columns.into_iter().zip(areas.iter()) {
+        frame.render_widget(Paragraph::new(lines), *column);
     }
-    lines.pop();
-    let height = u16::try_from(lines.len() + 4).unwrap_or(u16::MAX);
-    let area = centered(frame.area(), 48, height);
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            panel(true)
-                .title(" Keys ")
-                .title_bottom(Line::from(" any key to close ").alignment(Alignment::Right))
-                .padding(Padding::new(2, 2, 1, 1)),
-        ),
-        area,
-    );
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -735,6 +799,32 @@ mod render_tests {
     }
 
     #[test]
+    fn help_lists_every_section_in_two_columns_when_one_does_not_fit() {
+        let (_t, mut app) = real_app();
+        press(&mut app, KeyCode::Char('?'));
+        // Tall enough for one column: everything, one under another.
+        let tall = screen(&mut app, 100, 120);
+        for (section, _) in super::HELP {
+            assert!(tall.contains(section), "{section}: {tall}");
+        }
+        let row_of = |s: &str, needle: &str| s.lines().position(|l| l.contains(needle));
+        assert!(row_of(&tall, "Everywhere") < row_of(&tall, "Agent (M)"));
+        // A usual terminal: two columns, every section still shown.
+        let short = screen(&mut app, 120, 45);
+        for (section, _) in super::HELP {
+            assert!(short.contains(section), "{section}: {short}");
+        }
+        assert!(short.contains("A reopens"), "{short}");
+        let column_of = |needle: &str| {
+            short
+                .lines()
+                .find_map(|l| l.find(needle).map(|i| l[..i].chars().count()))
+                .expect("shown")
+        };
+        assert_ne!(column_of("Everywhere"), column_of("Search"), "{short}");
+    }
+
+    #[test]
     fn filtered_feed_and_new_markers_render() {
         let (_t, mut app) = real_app();
         press(&mut app, KeyCode::Char('2'));
@@ -1145,6 +1235,206 @@ mod render_tests {
         assert!(screen(&mut app, 140, 20).contains("Uncommitted changes"));
     }
 
+    #[test]
+    fn selections_answers_and_the_ask_prompt_render() {
+        use crate::explain::question::Question;
+        let (t, mut app) = real_app();
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
+        let entry = app.feed.commits[0].clone();
+        let files = git::diff::load(&t.repo, entry.target).expect("diff");
+        let key = crate::explain::diff_key(&entry, &files);
+        app.update(Msg::Diff {
+            entry: Box::new(entry),
+            result: Ok(files.clone()),
+            refresh: false,
+            file: None,
+        });
+        assert!(screen(&mut app, 140, 30).contains("v select"), "hints");
+        // Down to src/main.rs, whose diff has a few lines.
+        let main = files
+            .iter()
+            .position(|f| f.stat.path == "src/main.rs")
+            .expect("main");
+        for _ in 0..main {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        let s = screen(&mut app, 140, 30);
+        assert!(
+            s.contains("3 rows selected · a ask · f fix · esc clear"),
+            "{s}"
+        );
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+
+        press(&mut app, KeyCode::Char('a'));
+        for c in "why?".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Ask pi about src/main.rs:1-5"), "{s}");
+        assert!(s.contains("It sees the whole diff and these lines"), "{s}");
+        assert!(s.contains("why?▏"), "{s}");
+        press(&mut app, KeyCode::Enter);
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Q why?"), "{s}");
+        assert!(s.contains("about src/main.rs:1-5"), "{s}");
+        assert!(s.contains("pi is answering"), "{s}");
+        assert!(s.contains("ask more"), "hints: {s}");
+        app.update(Msg::Answered {
+            key,
+            result: Ok(Question {
+                question: "why?".to_owned(),
+                answer: "To greet.\n\nPolitely.".to_owned(),
+                refs: vec![crate::explain::Ref {
+                    path: "src/main.rs".to_owned(),
+                    hunk: Some(0),
+                    label: "@@ hunk".to_owned(),
+                }],
+                about: Some("src/main.rs:1-5".to_owned()),
+            }),
+        });
+        let s = screen(&mut app, 140, 30);
+        for needle in ["To greet.", "Politely.", "Code", "› src/main.rs"] {
+            assert!(s.contains(needle), "{needle}: {s}");
+        }
+        assert!(!s.contains("is answering"), "{s}");
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+        // A failed follow-up says why, under the answers.
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Enter);
+        app.update(Msg::Answered {
+            key,
+            result: Err("timed out".to_owned()),
+        });
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Couldn't answer: timed out"), "{s}");
+        assert!(s.contains("To greet."), "{s}");
+
+        // A whole file, with nothing selected, says so.
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('a'));
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("can read the file"), "{s}");
+    }
+
+    #[test]
+    fn the_answer_panel_follows_the_selected_pointer() {
+        use crate::explain::question::Question;
+        let (_t, mut app) = real_app();
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
+        let entry = app.feed.worktree.clone().expect("dirty");
+        app.update(Msg::Diff {
+            entry: Box::new(entry.clone()),
+            result: Ok(Vec::new()),
+            refresh: false,
+            file: None,
+        });
+        // An empty change has nothing to ask about; open the panel by hand.
+        let at = |label: &str| crate::explain::Ref {
+            path: "src/main.rs".to_owned(),
+            hunk: None,
+            label: label.to_owned(),
+        };
+        let long = "word ".repeat(200);
+        let mut view = crate::app::AnswerView::new(
+            1,
+            entry,
+            Vec::new(),
+            crate::explain::question::About {
+                place: "src/main.rs".to_owned(),
+                excerpt: String::new(),
+            },
+        );
+        view.answered = (0..3)
+            .map(|i| crate::app::Answered {
+                question: Question {
+                    question: format!("q{i}"),
+                    answer: long.clone(),
+                    refs: vec![at(&format!("pointer {i}"))],
+                    about: None,
+                },
+                agent: if i == 0 { "claude" } else { "pi" }.to_owned(),
+            })
+            .collect();
+        view.scroll = usize::MAX;
+        app.views.push(crate::app::View::Answer(Box::new(view)));
+        let s = screen(&mut app, 80, 16);
+        assert!(s.contains("Uncommitted changes"), "{s}");
+        assert!(s.contains("pointer 2"), "starts at the end: {s}");
+        press(&mut app, KeyCode::Char('g'));
+        let s = screen(&mut app, 80, 16);
+        assert!(s.contains("pointer 0") && !s.contains("pointer 2"), "{s}");
+        assert!(s.contains("answered by pi"), "{s}");
+        assert!(
+            screen(&mut app, 80, 120).contains("answered by claude"),
+            "each answer names its own agent"
+        );
+        press(&mut app, KeyCode::Char('G'));
+        let s = screen(&mut app, 80, 16);
+        assert!(s.contains("pointer 2"), "{s}");
+    }
+
+    #[test]
+    fn a_long_selection_previews_its_first_lines() {
+        let (t, mut app) = real_app();
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
+        app.ask.draft = Some(crate::app::AskDraft {
+            entry: app.feed.commits[0].clone(),
+            files: Vec::new(),
+            about: crate::explain::question::About {
+                place: "a.rs:1-9".to_owned(),
+                excerpt: "@@ -1 +1 @@\n-a\n+b\n c\n+d\n+e\n+f\n".to_owned(),
+            },
+            text: String::new(),
+        });
+        drop(t);
+        let s = screen(&mut app, 100, 30);
+        assert!(
+            s.contains("-a") && s.contains("+b") && s.contains("+d"),
+            "{s}"
+        );
+        assert!(!s.contains("+e"), "{s}");
+        assert!(s.contains("… 2 more lines"), "{s}");
+    }
+
+    #[test]
+    fn the_agent_picker_renders() {
+        use crate::explain::agent::{Choice, Pick, Setting};
+        let (_t, mut app) = real_app();
+        app.set_agents(
+            Setting {
+                pick: Pick::Agent(Choice::Pi),
+                model: Some("anthropic/x".to_owned()),
+            },
+            true,
+        );
+        press(&mut app, KeyCode::Char('M'));
+        let s = screen(&mut app, 100, 30);
+        for needle in [
+            "Agent",
+            "--explain-cmd",
+            "[pi]",
+            " claude ",
+            "Model (blank for the agent's default)",
+            "provider/model",
+            "anthropic/x▏",
+            "←→ agent",
+        ] {
+            assert!(s.contains(needle), "{needle}: {s}");
+        }
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+    }
+
     /// The real app with the newest commit's diff open and an explanation
     /// asked for: the app, the diff, and the request's key.
     fn explaining() -> (TestRepo, App, Vec<git::diff::FileDiff>, u64) {
@@ -1224,6 +1514,7 @@ mod render_tests {
             result: Ok(Answer {
                 explanation,
                 cached: true,
+                agent: None,
             }),
         });
         for (w, h) in SIZES {
@@ -1298,6 +1589,7 @@ mod render_tests {
             result: Ok(Answer {
                 explanation,
                 cached: false,
+                agent: None,
             }),
         });
         let press = |app: &mut App, code| {
@@ -1336,6 +1628,7 @@ mod render_tests {
                     hunk: Some(0),
                     label: "@@ hunk".to_owned(),
                 }],
+                about: None,
             }),
         });
         let s = screen(&mut app, 140, 30);
@@ -1362,6 +1655,7 @@ mod render_tests {
                 question: "and?".to_owned(),
                 answer: "Nothing else.".to_owned(),
                 refs: Vec::new(),
+                about: None,
             }),
         });
         let s = screen(&mut app, 140, 30);

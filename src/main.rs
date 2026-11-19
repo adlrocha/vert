@@ -85,6 +85,7 @@ fn run() -> Result<()> {
     app.set_refresh(config.refresh());
     let explainer = config.explainer(std::env::var_os("PATH").as_deref());
     app.set_explainer(&explainer);
+    app.set_agents(config.setting(), config.has_command());
     if let Some(start) = start {
         effects.extend(app.update(Msg::Start(start)));
     }
@@ -106,7 +107,7 @@ fn run() -> Result<()> {
         }
     };
 
-    let rt = Runtime {
+    let mut rt = Runtime {
         jobs: jobs::Context {
             workdir,
             labeler,
@@ -135,7 +136,7 @@ fn run() -> Result<()> {
     spawn_input(tx, Arc::clone(&rt.gate));
 
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &rt, &rx, effects);
+    let result = event_loop(&mut terminal, &mut app, &mut rt, &config, &rx, effects);
     ratatui::restore();
     // Agents still explaining or fixing would work on unwatched.
     rt.jobs.agents.stop_all();
@@ -170,7 +171,8 @@ fn spawn_input(tx: Sender<Msg>, gate: Arc<InputGate>) {
 fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    rt: &Runtime,
+    rt: &mut Runtime,
+    config: &Config,
     rx: &Receiver<Msg>,
     initial: Vec<Effect>,
 ) -> Result<()> {
@@ -184,6 +186,15 @@ fn event_loop(
                     if let Err(e) = edit(terminal, rt, &dir, &path, line) {
                         app.update(Msg::Notice(format!("{e:#}")));
                     }
+                }
+                Effect::SetAgent(setting) => {
+                    // Work already sent keeps the agent it went to.
+                    let path = std::env::var_os("PATH");
+                    let explainer = config.explainer_for(&setting, path.as_deref());
+                    let fixer = config.fixer_for(&setting, path.as_deref());
+                    app.agents_changed(setting, &explainer, &fixer);
+                    rt.jobs.explain = explainer.ok();
+                    rt.jobs.fix = fixer.ok();
                 }
                 background => rt.spawn(background),
             }

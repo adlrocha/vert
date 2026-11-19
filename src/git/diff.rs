@@ -28,6 +28,18 @@ pub struct DiffLine {
     pub content: String,
 }
 
+impl DiffLine {
+    /// The line's prefix in diff form: `+`, `-` or a space.
+    #[must_use]
+    pub const fn sign(&self) -> char {
+        match self.kind {
+            LineKind::Added => '+',
+            LineKind::Removed => '-',
+            LineKind::Context => ' ',
+        }
+    }
+}
+
 /// A contiguous block of changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hunk {
@@ -65,12 +77,7 @@ impl Hunk {
     #[must_use]
     pub fn body(&self) -> String {
         self.lines.iter().fold(String::new(), |mut body, l| {
-            let sign = match l.kind {
-                LineKind::Added => '+',
-                LineKind::Removed => '-',
-                LineKind::Context => ' ',
-            };
-            body.push(sign);
+            body.push(l.sign());
             body.push_str(&l.content);
             body.push('\n');
             body

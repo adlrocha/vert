@@ -48,6 +48,43 @@ pub enum Choice {
     Pi,
 }
 
+impl Choice {
+    /// Every choice, in the order the agent picker (`M`) offers them.
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Claude, Self::Codex, Self::Pi];
+
+    /// The choice as the user names it: `auto`, `claude`, `codex` or `pi`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Pi => "pi",
+        }
+    }
+}
+
+/// Where the agent comes from: a shell command (`--explain-cmd`), or an
+/// agent vert knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// The `--explain-cmd` command to explain and answer; fixes use the
+    /// `--explain-agent` choice, as a command can't edit.
+    Command,
+    /// One of the agents vert knows, or `auto`.
+    Agent(Choice),
+}
+
+/// The agent and model vert asks, as set when it started (flags and
+/// environment variables) or chosen since in vert (`M`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setting {
+    /// Which agent.
+    pub pick: Pick,
+    /// The model, in the agent's own naming, or `None` for its default.
+    pub model: Option<String>,
+}
+
 /// What an agent may do in the checkout it runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {

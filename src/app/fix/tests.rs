@@ -221,12 +221,18 @@ fn feedback_on_a_hunk_is_written_sent_and_reported() {
         "esc only closed the prompt"
     );
 
-    // From the diff, scrolled to the second hunk.
+    // From the diff with nothing selected: the whole file too.
     let Some(View::Detail(d)) = app.views.last_mut() else {
         panic!("diff");
     };
     d.focus = Focus::Diff;
     d.scroll = d.rendered.hunk_starts[1];
+    press(&mut app, KeyCode::Char('f'));
+    assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs"));
+    press(&mut app, KeyCode::Esc);
+
+    // The second hunk's header selected: that hunk.
+    press(&mut app, KeyCode::Char('v'));
     press(&mut app, KeyCode::Char('f'));
     let d = draft(&app);
     assert_eq!(d.root, None);
@@ -463,29 +469,37 @@ fn fixes_go_to_the_checkout_of_the_line_of_work() {
 }
 
 #[test]
-fn the_place_and_the_excerpt_name_the_same_hunk() {
+fn a_selection_names_its_lines_and_sends_only_them() {
     let mut app = showing(commit());
     let Some(View::Detail(d)) = app.views.last_mut() else {
         panic!("diff");
     };
     d.focus = Focus::Diff;
-    // The last row before the second hunk starts: no line of its own in the
-    // first hunk, and the next new line is the second hunk's.
-    d.scroll = d.rendered.hunk_starts[1] - 1;
+    // From the added line of the first hunk down to the blank row before
+    // the second: the blank holds nothing of the diff.
+    let first_added = d.rendered.hunk_starts[0] + 2;
+    d.scroll = first_added;
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Char('f'));
-    assert_eq!(
-        draft(&app).request.excerpt,
-        "@@ -1 +1,2 @@\n keep\n+first\n"
-    );
+    assert_eq!(draft(&app).request.excerpt, "@@ -1 +1,2 @@\n+first\n");
     assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs:2"));
     press(&mut app, KeyCode::Esc);
-    // Above the first hunk: the first hunk.
+    assert!(
+        matches!(app.views.last(), Some(View::Detail(d)) if d.selection.is_some()),
+        "closing the prompt keeps the selection"
+    );
+    // Only the blank row: nothing of the diff, so the whole file.
+    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Esc);
     let Some(View::Detail(d)) = app.views.last_mut() else {
         panic!("diff");
     };
-    d.scroll = 0;
+    assert_eq!(d.selection, None, "esc clears it");
+    d.scroll = d.rendered.hunk_starts[1] - 1;
+    press(&mut app, KeyCode::Char('v'));
     press(&mut app, KeyCode::Char('f'));
-    assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs:1"));
+    assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs"));
 }
 
 #[test]

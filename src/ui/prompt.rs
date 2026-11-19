@@ -13,15 +13,17 @@ use crate::theme;
 const MAX_WIDTH: u16 = 76;
 /// Most lines of typed text shown; earlier ones scroll out of view.
 const MAX_TEXT_LINES: usize = 6;
-const HINT: &str = "⏎ send · esc cancel";
+/// The usual keys, for text sent to an agent.
+pub(super) const SEND: &str = "⏎ send · esc cancel";
 
 /// Draws a box over everything else, centred on `area`, where text is
 /// typed for an agent: the lines `head` makes for the inner width, a blank
-/// line, then `typed` with a cursor, its last lines when it is long.
+/// line, then `typed` with a cursor, its last lines when it is long, and
+/// `hint` (the keys) on the bottom border.
 pub(super) fn draw_prompt(
     frame: &mut Frame<'_>,
     area: Rect,
-    title: &str,
+    (title, hint): (&str, &str),
     typed: &str,
     head: impl FnOnce(usize) -> Vec<Line<'static>>,
 ) {
@@ -45,7 +47,7 @@ pub(super) fn draw_prompt(
         Paragraph::new(lines).block(
             panel(true)
                 .title(title.to_owned())
-                .title_bottom(Line::from(format!(" {HINT} ")).alignment(Alignment::Right))
+                .title_bottom(Line::from(format!(" {hint} ")).alignment(Alignment::Right))
                 .padding(ratatui::widgets::Padding::horizontal(1)),
         ),
         rect,

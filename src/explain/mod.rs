@@ -554,6 +554,9 @@ pub struct Answer {
     pub explanation: Explanation,
     /// Whether it was read from the cache rather than asked for.
     pub cached: bool,
+    /// The agent that gave it, as shown to the user ([`Explainer::label`]),
+    /// so it stays credited to that agent after another is picked (`M`).
+    pub agent: Option<String>,
 }
 
 impl Explainer {
@@ -608,6 +611,7 @@ impl Explainer {
             return Ok(Answer {
                 explanation,
                 cached: true,
+                agent: Some(self.label()),
             });
         }
         let how = agent::Run {
@@ -628,6 +632,7 @@ impl Explainer {
         Ok(Answer {
             explanation,
             cached: false,
+            agent: Some(self.label()),
         })
     }
 }

@@ -260,13 +260,17 @@ pub fn row_pointer<'a>(d: &'a Diagram, row: &tree::Row) -> Option<&'a Ref> {
     d.nodes[row.node].refs.first()
 }
 
+/// An explanation kept while vert runs: the answer, whether it came from
+/// the cache, and the agent that gave it, when known.
+type Kept = (Explanation, bool, Option<String>);
+
 /// Explanations: which agent answers, and the answers so far.
 #[derive(Debug, Default)]
 pub struct ExplainState {
     /// The agent's name, or why explanations are unavailable.
     pub agent: Option<Result<String, String>>,
     /// Answers by [`diff_key`], kept while vert runs.
-    answers: HashMap<u64, (Explanation, bool)>,
+    answers: HashMap<u64, Kept>,
     /// Diffs an agent is working on.
     asking: HashSet<u64>,
     /// Since when an agent has been answering a question about a diff; one
@@ -292,6 +296,30 @@ impl ExplainState {
     #[must_use]
     pub fn question_asked(&self, key: u64) -> Option<i64> {
         self.questioning.get(&key).copied()
+    }
+
+    /// The explanation of the diff `key`, if one has arrived while vert
+    /// runs, with every question answered about it since.
+    #[must_use]
+    pub fn explanation(&self, key: u64) -> Option<Explanation> {
+        self.answers.get(&key).map(|(e, ..)| e.clone())
+    }
+
+    /// Forgets the explanations kept while vert runs, so the next `x`
+    /// asks the agent in use now (or reads its own cached answer) instead
+    /// of showing another agent's. Their questions stay in the answer
+    /// cache, and an explain view still open keeps what it shows, under
+    /// the name of the agent that explained it.
+    pub(super) fn forget_answers(&mut self) {
+        self.answers.clear();
+        // A view left with `esc` would be reopened by `x` as it was.
+        self.parked = None;
+    }
+
+    /// Records that the agent is answering a question about the diff
+    /// `key`, since `now`.
+    pub(super) fn start_question(&mut self, key: u64, now: i64) {
+        self.questioning.insert(key, now);
     }
 
     /// The fixes asked for concerns of the diff `key`, by concern.
@@ -383,9 +411,12 @@ impl App {
             self.views.push(View::Explain(view));
             return Vec::new();
         }
-        let status = match self.explain.answers.get(&key) {
-            Some((e, cached)) => Status::Ready(Box::new(e.clone()), *cached),
-            None => Status::Asking(self.now),
+        let (status, agent) = match self.explain.answers.get(&key) {
+            Some((e, cached, by)) => (
+                Status::Ready(Box::new(e.clone()), *cached),
+                by.clone().unwrap_or(agent),
+            ),
+            None => (Status::Asking(self.now), agent),
         };
         let effects = match status {
             Status::Asking(_) => self.ask(key, &entry, &files, false),
@@ -434,9 +465,14 @@ impl App {
             answer
         });
         if let Ok(answer) = &result {
-            self.explain
-                .answers
-                .insert(key, (answer.explanation.clone(), answer.cached));
+            self.explain.answers.insert(
+                key,
+                (
+                    answer.explanation.clone(),
+                    answer.cached,
+                    answer.agent.clone(),
+                ),
+            );
         }
         let status = match &result {
             Ok(a) => Status::Ready(Box::new(a.explanation.clone()), a.cached),
@@ -447,8 +483,14 @@ impl App {
             View::Explain(x) if x.key == key => Some(x.as_mut()),
             _ => None,
         });
+        let by = result.as_ref().ok().and_then(|a| a.agent.clone());
         for view in open.chain(self.explain.parked.as_deref_mut().filter(|v| v.key == key)) {
             view.status = status.clone();
+            // Credited to the agent that gave it, which may no longer be
+            // the one in use.
+            if let Some(by) = &by {
+                view.agent.clone_from(by);
+            }
             view.pos = ListPos::default();
             view.target = 0;
             view.scroll = 0;
@@ -649,7 +691,7 @@ impl App {
             .explain
             .answers
             .remove(&old)
-            .map(|(e, _)| e.questions)
+            .map(|(e, ..)| e.questions)
             .or(match previous {
                 Status::Ready(e, _) => Some(e.questions),
                 Status::Asking(_) | Status::Failed(_) => None,
@@ -769,7 +811,9 @@ impl App {
             key: v.key,
             entry: v.entry.clone(),
             files: v.files.clone(),
-            explanation: explanation.clone(),
+            explanation: Some(explanation.clone()),
+            earlier: explanation.questions.clone(),
+            about: None,
             question: question.clone(),
         }));
         v.question = None;
@@ -782,6 +826,8 @@ impl App {
     /// is on top.
     pub(super) fn on_answered(&mut self, key: u64, result: Result<Question, String>) {
         self.explain.questioning.remove(&key);
+        // Asked from the diff: its answer panel shows it, on screen or not.
+        let panel = self.on_panel_answer(key, &result);
         // Asked before its explanation was asked again about the change as
         // it is now: the answer joins the view there.
         let moved = self.explain.moved.get(&key).copied();
@@ -793,17 +839,25 @@ impl App {
             Ok(q) => q,
             Err(why) => {
                 // The agent's own error output: untrusted, like all it prints.
-                self.notice = Some(format!("Couldn't answer: {}", sanitize(&why)));
+                if panel != Some(true) {
+                    self.notice = Some(format!("Couldn't answer: {}", sanitize(&why)));
+                }
                 return;
             }
         };
+        // Unless its explanation on screen shows it (below).
+        let explained_on_top = matches!(self.views.last(), Some(View::Explain(v)) if v.key == key);
+        if panel == Some(false) && !explained_on_top {
+            self.notice =
+                Some("An answer is ready: open the change and press A to read it".to_owned());
+        }
         for view in self.explain_views(key) {
             if let Some(reload) = view.reload.as_mut() {
                 reload.answered.push(answered.clone());
             }
         }
         let mut kept = false;
-        if let Some((e, _)) = self.explain.answers.get_mut(&key) {
+        if let Some((e, ..)) = self.explain.answers.get_mut(&key) {
             add_question(e, &answered);
             kept = true;
         }
@@ -828,7 +882,7 @@ impl App {
                 v.target = 0;
                 v.scroll = 0;
             }
-        } else {
+        } else if panel.is_none() {
             self.notice = Some("An answer is ready: open the change and press x".to_owned());
         }
     }
@@ -857,6 +911,11 @@ impl App {
     /// Leaves the explain view and shows the code `r` points at in the diff.
     fn jump(&mut self, r: &Ref) {
         self.close_explain();
+        self.show_in_diff(r);
+    }
+
+    /// Shows the code `r` points at in the diff on top.
+    pub(super) fn show_in_diff(&mut self, r: &Ref) {
         let max = self.max_highlight;
         let Some(View::Detail(d)) = self.views.last_mut() else {
             return;
@@ -865,6 +924,9 @@ impl App {
             self.notice = Some(format!("{} is no longer part of this change", r.path));
             return;
         };
+        if d.pos.selected != index {
+            d.selection = None;
+        }
         d.pos.selected = index;
         d.rendered = build_diff(&d.files[index], max);
         d.hscroll = 0;
@@ -1099,6 +1161,7 @@ mod tests {
         Answer {
             explanation: explanation(),
             cached,
+            agent: None,
         }
     }
 
@@ -1203,6 +1266,42 @@ mod tests {
             (1, 0),
             "a whole file opens at the top"
         );
+    }
+
+    #[test]
+    fn an_answer_stays_credited_to_the_agent_that_gave_it() {
+        let mut a = app();
+        a.set_explainer(&Ok(pi_for_tests()));
+        let key = asked(&press(&mut a, KeyCode::Char('x')), false);
+        press(&mut a, KeyCode::Esc);
+        // Another agent is picked while pi is still explaining.
+        a.explain.agent = Some(Ok("claude · opus".to_owned()));
+        a.update(Msg::Explained {
+            key,
+            result: Ok(Answer {
+                agent: Some("pi".to_owned()),
+                ..answer(false)
+            }),
+        });
+        press(&mut a, KeyCode::Char('x'));
+        assert_eq!(view(&a).agent, "pi", "the view that waited for it");
+        press(&mut a, KeyCode::Esc);
+        // Opened afresh from what is kept in memory: still pi's.
+        a.explain.parked = None;
+        press(&mut a, KeyCode::Char('x'));
+        assert_eq!(view(&a).agent, "pi");
+        // Switching agents drops a view left with `esc`, so `x` asks anew.
+        press(&mut a, KeyCode::Esc);
+        assert!(a.explain.parked.is_some());
+        a.explain.forget_answers();
+        assert!(a.explain.parked.is_none());
+        // An answer that doesn't say keeps the name the view has.
+        let key = asked(&press(&mut a, KeyCode::Char('x')), false);
+        a.update(Msg::Explained {
+            key,
+            result: Ok(answer(false)),
+        });
+        assert_eq!(view(&a).agent, "claude · opus");
     }
 
     #[test]
@@ -1336,6 +1435,7 @@ mod tests {
             question: "Why retry?".to_owned(),
             answer: "GitHub flakes.".to_owned(),
             refs,
+            about: None,
         }
     }
 
@@ -1802,7 +1902,9 @@ mod tests {
         };
         assert_eq!(asking.key, key);
         assert_eq!(asking.question, "Why retry?");
-        assert_eq!(asking.explanation, explanation());
+        assert_eq!(asking.explanation, Some(explanation()));
+        assert_eq!(asking.earlier, explanation().questions);
+        assert_eq!(asking.about, None, "about the change as a whole");
         assert_eq!(asking.files.len(), 2);
         assert_eq!(view(&a).question, None);
         let asked_now = |a: &App| a.explain.question_asked(key);
@@ -1876,6 +1978,7 @@ mod tests {
                     ..explanation()
                 },
                 cached: false,
+                agent: None,
             }),
         });
         assert_eq!(count(&a), Some(1));
