@@ -509,6 +509,13 @@ fn a_follow_up_from_the_explanation_on_screen_needs_no_footer() {
         panic!("explanation");
     };
     assert_eq!(v.explanation().map(|e| e.questions.len()), Some(2));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('A'));
+    assert_eq!(
+        panel(&app).answered.len(),
+        1,
+        "the explain view's follow-up isn't the panel's"
+    );
 }
 
 #[test]

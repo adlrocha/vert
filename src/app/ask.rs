@@ -340,28 +340,33 @@ impl App {
     }
 
     /// The agent answered a question about the diff `key`: the answer
-    /// panel of that diff, if there is one, shows it. Returns whether there
+    /// panel waiting for it, if there is one, shows it. Returns whether there
     /// is one, and whether it is on screen.
     pub(super) fn on_panel_answer(
         &mut self,
         key: u64,
         result: &Result<Question, String>,
     ) -> Option<bool> {
-        let on_top = matches!(self.views.last(), Some(View::Answer(v)) if v.key == key);
+        // Only a panel waiting for this answer: one asked from the
+        // explain view about the same diff isn't its.
+        let waiting = |v: &AnswerView| v.key == key && v.pending.is_some();
+        let on_top = matches!(self.views.last(), Some(View::Answer(v)) if waiting(v));
         let open = self.views.iter_mut().filter_map(|v| match v {
-            View::Answer(a) if a.key == key => Some(a.as_mut()),
+            View::Answer(a) if waiting(a) => Some(a.as_mut()),
             _ => None,
         });
         let mut found = false;
-        let parked = self.ask.parked.iter_mut().filter(|v| v.key == key);
+        let parked = self.ask.parked.iter_mut().filter(|v| waiting(v));
         for view in open.chain(parked) {
+            let Some(pending) = view.pending.take() else {
+                continue;
+            };
             found = true;
-            let pending = view.pending.take();
             match result {
                 Ok(q) => {
                     view.answered.push(Answered {
                         question: q.clone(),
-                        agent: pending.map_or_else(|| "the agent".to_owned(), |p| p.agent),
+                        agent: pending.agent,
                     });
                     view.failed = None;
                     view.show_newest();
