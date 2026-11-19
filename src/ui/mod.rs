@@ -232,7 +232,9 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         "File",
         &[
             ("n N", "next / prev change"),
-            ("v a f", "as in a diff (opened from one)"),
+            ("v a f A", "as in a diff (opened from one)"),
+            ("e", "edit at cursor"),
+            ("← →", "scroll sideways"),
         ],
     ),
     (

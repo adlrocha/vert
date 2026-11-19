@@ -676,9 +676,33 @@ fn slash_in_a_diff_finds_files_by_name() {
     app.update(ch('/'));
     assert_eq!(app.update(ctrl('x')), []);
     app.update(key(KeyCode::Enter));
+    // A refresh that leaves the selected file hidden clears the filter.
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("detail")
+    };
+    "a.rs".clone_into(&mut d.filter);
+    app.update(Msg::Diff {
+        entry: Box::new(entry("c3", 9_000, &["docs/x.md", "src/b.rs"])),
+        result: Ok(vec![file_diff("docs/x.md"), file_diff("src/b.rs")]),
+        refresh: true,
+        file: None,
+    });
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("detail")
+    };
+    assert_eq!(d.filter, "", "docs/x.md, selected, isn't a.rs");
+    // So does leaving the filter with nothing matched.
+    app.update(ch('/'));
+    app.update(ch('z'));
+    app.update(key(KeyCode::Esc));
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("detail")
+    };
+    assert_eq!((d.filter.as_str(), d.shown().len()), ("", 2));
+    "b".clone_into(&mut d.filter);
     // esc clears the filter before it leaves the diff.
     app.update(key(KeyCode::Esc));
-    assert_eq!(detail(&app).1, vec![0, 1, 2]);
+    assert_eq!(detail(&app).1, vec![0, 1]);
     app.update(key(KeyCode::Esc));
     assert!(app.views.is_empty());
 }
@@ -909,6 +933,7 @@ fn file_view_ignores_unbound_keys() {
         path: String::new(),
         language: String::new(),
         lines: Vec::new(),
+        text: Vec::new(),
         target: 1,
         marks: BTreeSet::new(),
         scroll: 0,

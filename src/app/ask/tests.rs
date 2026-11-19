@@ -740,6 +740,52 @@ fn the_file_viewer_without_a_diff_under_it_says_why_it_cannot_ask() {
         );
     }
     assert!(app.ask.draft.is_none() && app.fix.draft.is_none());
+    app.notice = None;
     press(&mut app, KeyCode::Char('A'));
     assert!(matches!(app.views.as_slice(), [View::File(_)]));
+    assert!(app.notice.is_some(), "A says why too");
+}
+
+#[test]
+fn the_file_viewer_sends_lines_as_they_are_on_disk() {
+    let (mut app, _) = showing();
+    app.update(Msg::File {
+        path: "src/a.rs".to_owned(),
+        content: Ok("fn a() {\n\tlet x = 1;\n}\n".to_owned()),
+        line: 2,
+        marks: std::collections::BTreeSet::new(),
+        root: None,
+    });
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('a'));
+    assert_eq!(
+        app.ask.draft.as_ref().map(|d| d.about.excerpt.clone()),
+        Some("@@ src/a.rs:2, as on disk @@\n \tlet x = 1;\n".to_owned()),
+        "the tab, not the spaces it is drawn as"
+    );
+}
+
+#[test]
+fn going_to_the_code_moves_an_open_selection_with_the_cursor() {
+    let (mut app, key) = showing();
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('a'));
+    typed(&mut app, "why?");
+    press(&mut app, KeyCode::Enter);
+    app.update(Msg::Answered {
+        key,
+        result: Ok(answer("Here.", vec![at(1)], "src/a.rs:1")),
+    });
+    press(&mut app, KeyCode::Enter);
+    let d = diff_mut(&mut app);
+    let start = d.rendered.hunk_starts[1];
+    assert_eq!(d.cursor, start);
+    assert_eq!(
+        d.selection,
+        Some(Selection {
+            anchor: 0,
+            end: start,
+            open: true
+        })
+    );
 }

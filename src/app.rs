@@ -475,6 +475,14 @@ impl DetailView {
         true
     }
 
+    /// Clears the filter when it hides the selected file, so the list
+    /// always shows the file whose diff is open.
+    fn reveal(&mut self) {
+        if !self.shown().contains(&self.pos.selected) {
+            self.filter.clear();
+        }
+    }
+
     /// The file shown after (`forward`) or before the selected one.
     fn next_shown(&self, forward: bool) -> Option<usize> {
         let shown = self.shown();
@@ -508,8 +516,11 @@ pub struct FileView {
     pub path: String,
     /// Detected language name.
     pub language: String,
-    /// Highlighted lines.
+    /// Highlighted lines, for drawing.
     pub lines: Vec<Vec<Fragment>>,
+    /// The lines as they are in the file, for the agent (`a`, `f`): the
+    /// highlighted ones are made safe to draw, with tabs expanded.
+    pub text: Vec<String>,
     /// Line (1-based) to emphasise.
     pub target: u32,
     /// Lines (1-based) added by the change the file was opened from.
@@ -1175,6 +1186,7 @@ impl App {
             d.scroll = d.scroll.min(max_scroll(d.rendered.len(), d.height));
             d.cursor = d.cursor.min(d.rendered.len().saturating_sub(1));
             d.entry = entry;
+            d.reveal();
         }
     }
 
@@ -1187,13 +1199,15 @@ impl App {
         root: Option<PathBuf>,
     ) {
         let h = Highlighter::global();
-        let (lines, notice, language) = match content {
-            Ok(text) => {
-                let raw: Vec<&str> = text.lines().collect();
+        let (lines, text, notice, language) = match content {
+            Ok(content) => {
+                let raw: Vec<&str> = content.lines().collect();
                 let language = h.language(&path, raw.first().copied()).to_owned();
-                (h.highlight(&path, &raw, self.max_highlight), None, language)
+                let lines = h.highlight(&path, &raw, self.max_highlight);
+                let text = raw.into_iter().map(str::to_owned).collect();
+                (lines, text, None, language)
             }
-            Err(notice) => (Vec::new(), Some(notice), String::new()),
+            Err(notice) => (Vec::new(), Vec::new(), Some(notice), String::new()),
         };
         let target = line.max(1);
         let scroll = usize::try_from(target).unwrap_or(0).saturating_sub(4);
@@ -1205,6 +1219,7 @@ impl App {
             path,
             language,
             lines,
+            text,
             target,
             marks,
             scroll,
@@ -1587,8 +1602,14 @@ impl App {
             Some(View::Detail(_)) if key.code == KeyCode::Char('x') => self.open_explain(),
             Some(View::Detail(_)) if key.code == KeyCode::Char('f') => self.draft_fix_from_detail(),
             Some(View::Detail(_)) if key.code == KeyCode::Char('a') => self.draft_ask_from_detail(),
-            Some(View::Detail(_) | View::File(_)) if key.code == KeyCode::Char('A') => {
-                self.reopen_answers()
+            Some(View::Detail(_)) if key.code == KeyCode::Char('A') => self.reopen_answers(),
+            Some(View::File(_)) if key.code == KeyCode::Char('A') => {
+                // Only a file opened from a diff has answers to bring back.
+                if self.file_pick().is_some() {
+                    self.reopen_answers()
+                } else {
+                    Vec::new()
+                }
             }
             Some(View::File(_)) if key.code == KeyCode::Char('a') => self.draft_ask_from_file(),
             Some(View::File(_)) if key.code == KeyCode::Char('f') => self.draft_fix_from_file(),
@@ -1846,12 +1867,17 @@ fn detail_filter_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -
         d.navigate_files(key);
     } else {
         match key.code {
-            KeyCode::Esc => d.filter_editing = false,
+            // Leaving with nothing matched clears the filter (`reveal`).
+            KeyCode::Esc => {
+                d.filter_editing = false;
+                d.reveal();
+            }
             KeyCode::Enter => {
                 d.filter_editing = false;
                 if !d.shown().is_empty() {
                     d.focus = Focus::Diff;
                 }
+                d.reveal();
             }
             KeyCode::Backspace => {
                 d.filter.pop();
@@ -1972,12 +1998,10 @@ fn file_key(f: &mut FileView, key: &KeyEvent) -> Vec<Effect> {
 /// `None` when nothing is selected, for the whole file.
 pub(super) fn selected_file_lines(f: &FileView) -> Option<(String, String)> {
     let (first, last) = f.selection?.rows();
-    let picked: Vec<String> = f
-        .lines
-        .get(first..=last.min(f.lines.len().checked_sub(1)?))?
-        .iter()
-        .map(|frags| frags.iter().map(|(_, text)| text.as_str()).collect())
-        .collect();
+    let picked = f
+        .text
+        .get(first..=last.min(f.text.len().checked_sub(1)?))?
+        .to_vec();
     let first = u32::try_from(first + 1).ok()?;
     Some(crate::fix::file_lines(&f.path, first, &picked))
 }
