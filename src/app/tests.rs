@@ -516,7 +516,7 @@ fn detail_view_navigation() {
     let mut app = loaded();
     open_detail(&mut app);
     let detail = |app: &App| match app.views.last() {
-        Some(View::Detail(d)) => (d.pos.selected, d.focus, d.scroll, d.hscroll),
+        Some(View::Detail(d)) => (d.pos.selected, d.focus, d.cursor, d.hscroll),
         _ => panic!("not in detail"),
     };
     assert_eq!(detail(&app), (0, Focus::Files, 0, 0));
@@ -533,11 +533,7 @@ fn detail_view_navigation() {
     app.update(ch('N'));
     assert_eq!(detail(&app).2, 0);
     app.update(ch('G'));
-    assert_eq!(
-        detail(&app).2,
-        6,
-        "last row; viewport height unknown before first draw"
-    );
+    assert_eq!(detail(&app).2, 6, "last row");
     app.update(ch('g'));
     app.update(ch('J'));
     app.update(ch('K'));
@@ -567,6 +563,18 @@ fn detail_view_navigation() {
         [Effect::OpenFile {
             path: "src/a.rs".to_owned(),
             line: 1,
+            marks,
+            root: None,
+        }]
+    );
+    // The file opens at the cursor's line.
+    app.update(ch('n'));
+    let marks = BTreeSet::from([2, 20]);
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        [Effect::OpenFile {
+            path: "src/a.rs".to_owned(),
+            line: 20,
             marks,
             root: None,
         }]
@@ -619,41 +627,47 @@ fn file_view_navigation() {
         marks: BTreeSet::from([10, 11, 50, 80]),
         root: None,
     });
+    // (first visible line, cursor line, sideways scroll), 0-based.
     let file = |app: &App| match app.views.last() {
-        Some(View::File(f)) => (f.scroll, f.hscroll, f.lines.len()),
+        Some(View::File(f)) => (f.scroll, f.cursor, f.hscroll),
         _ => panic!("not in file view"),
     };
-    assert_eq!(file(&app), (26, 0, 100));
+    assert_eq!(file(&app), (26, 29, 0), "the cursor starts on line 30");
     if let Some(View::File(f)) = app.views.last_mut() {
         f.height = 20;
         assert_eq!(f.language, "Rust");
+        assert_eq!(f.lines.len(), 100);
     }
     app.update(ch('j'));
-    assert_eq!(file(&app).0, 27);
+    assert_eq!(file(&app), (26, 30, 0), "the cursor moves, the view stays");
     app.update(ch('k'));
     app.update(ch('n'));
-    assert_eq!(file(&app).0, 45, "next change block starts at 50");
+    assert_eq!(file(&app), (45, 49, 0), "next change block starts at 50");
     app.update(ch('n'));
-    assert_eq!(file(&app).0, 75);
+    assert_eq!(file(&app).0..=file(&app).1, 75..=79);
     app.update(ch('N'));
-    assert_eq!(file(&app).0, 45);
+    assert_eq!(file(&app).0..=file(&app).1, 45..=49);
     app.update(ch('N'));
-    assert_eq!(file(&app).0, 5);
+    assert_eq!(file(&app).0..=file(&app).1, 5..=9);
     app.update(ch('G'));
     assert_eq!(
-        file(&app).0,
-        80,
+        file(&app).0..=file(&app).1,
+        80..=99,
         "last line at the bottom of a 20-row viewport"
     );
     app.update(ch('g'));
+    assert_eq!(file(&app), (0, 0, 0));
     app.update(ctrl('d'));
-    assert_eq!(file(&app).0, 10);
+    assert_eq!(file(&app), (10, 10, 0), "half a page: view and cursor");
     app.update(ctrl('u'));
     app.update(key(KeyCode::PageDown));
-    assert_eq!(file(&app).0, 20);
+    assert_eq!(file(&app), (20, 20, 0));
+    app.update(key(KeyCode::PageUp));
+    app.update(ch(' '));
+    assert_eq!(file(&app), (20, 20, 0), "space pages down");
     app.update(key(KeyCode::PageUp));
     app.update(ch('l'));
-    assert_eq!(file(&app).1, H_SCROLL_STEP);
+    assert_eq!(file(&app).2, H_SCROLL_STEP);
     app.update(ch('h'));
     assert_eq!(
         app.update(ch('e')),
@@ -663,11 +677,10 @@ fn file_view_navigation() {
             root: None,
         }]
     );
-    app.update(ch('G'));
-    app.update(ch('g'));
-    for _ in 0..25 {
+    for _ in 0..29 {
         app.update(ch('j'));
     }
+    assert_eq!(file(&app), (10, 29, 0), "the view follows the cursor down");
     assert_eq!(
         app.update(ch('e')),
         [Effect::Edit {
@@ -675,8 +688,24 @@ fn file_view_navigation() {
             line: 30,
             root: None,
         }],
-        "target line is visible"
+        "edits at the cursor's line"
     );
+    // v selects from the cursor; esc clears it before it leaves.
+    app.update(ch('v'));
+    app.update(ch('j'));
+    let Some(View::File(f)) = app.views.last() else {
+        panic!("file view")
+    };
+    assert_eq!(
+        f.selection,
+        Some(Selection {
+            anchor: 29,
+            end: 30,
+            open: true
+        })
+    );
+    app.update(key(KeyCode::Esc));
+    assert!(matches!(app.views.last(), Some(View::File(f)) if f.selection.is_none()));
     app.update(ch('q'));
     assert!(app.views.is_empty());
 }
@@ -795,12 +824,18 @@ fn file_view_ignores_unbound_keys() {
         target: 1,
         marks: BTreeSet::new(),
         scroll: 0,
+        cursor: 0,
+        selection: None,
         hscroll: 0,
         height: 0,
         notice: None,
         root: None,
     })));
     assert_eq!(app.views.len(), 2);
+    // An empty file has no lines for the cursor.
+    assert_eq!(app.update(ch('j')), []);
+    assert_eq!(app.update(ch('v')), []);
+    assert!(matches!(app.views.last(), Some(View::File(f)) if f.selection.is_none()));
 }
 
 #[test]

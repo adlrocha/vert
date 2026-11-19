@@ -229,6 +229,16 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
     ),
     ("Feed", &[("n", "next new change"), ("esc", "clear filter")]),
     (
+        "File",
+        &[
+            ("j k", "move the cursor"),
+            ("n N", "next / prev change"),
+            ("v", "select from cursor, v ends"),
+            ("a f", "ask / fix (opened from a diff)"),
+            ("e", "edit at cursor"),
+        ],
+    ),
+    (
         "Hotspots",
         &[
             ("w", "time window"),
@@ -253,11 +263,12 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         "Change",
         &[
             ("tab h l", "files / diff pane"),
+            ("j k", "move the cursor"),
             ("J K", "scroll diff"),
             ("n N", "next / prev hunk"),
             ("← →", "scroll sideways"),
-            ("⏎ e", "view / edit file"),
-            ("v", "select lines (j k extend)"),
+            ("⏎ e", "view / edit file at cursor"),
+            ("v", "select from cursor, v ends"),
             ("x", "explain the change"),
             ("a", "ask about the lines or file"),
             ("A", "answers asked here"),
@@ -1101,6 +1112,16 @@ mod render_tests {
         assert!(s.contains("Rust"), "{s}");
         assert!(s.contains("1 changed lines"), "{s}");
         assert!(s.contains("›"), "{s}");
+        assert!(s.contains("2/2"), "the cursor's line: {s}");
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char('j'));
+        let s = screen(&mut app, 100, 20);
+        assert!(
+            s.contains("2 lines selected · v end · a ask · f fix · esc clear"),
+            "{s}"
+        );
+        press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Esc);
 
         app.update(Msg::File {
@@ -1263,8 +1284,14 @@ mod render_tests {
         press(&mut app, KeyCode::Char('j'));
         let s = screen(&mut app, 140, 30);
         assert!(
-            s.contains("3 rows selected · a ask · f fix · esc clear"),
+            s.contains("3 rows selected · v end · a ask · f fix · esc clear"),
             "{s}"
+        );
+        press(&mut app, KeyCode::Char('v'));
+        let s = screen(&mut app, 140, 30);
+        assert!(
+            s.contains("3 rows selected · a ask · f fix · esc clear"),
+            "v again ends it: {s}"
         );
         for (w, h) in SIZES {
             screen(&mut app, w, h);

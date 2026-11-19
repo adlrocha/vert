@@ -937,6 +937,7 @@ impl App {
             .copied()
             .unwrap_or(0);
         d.scroll = start.min(max_scroll(d.rendered.len(), d.height));
+        d.cursor = start;
     }
 }
 

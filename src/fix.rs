@@ -196,6 +196,37 @@ pub fn picked(file: &FileDiff, picks: &[(usize, Option<usize>)]) -> Option<(Stri
     Some((place, excerpt))
 }
 
+/// The place and excerpt for `lines` of the file `path` as it is on disk,
+/// the first of them numbered `first`, as selected in the file viewer: the
+/// lines in diff form as unchanged lines, under a header that says where
+/// they come from, so the prompts that show a diff excerpt show them too.
+///
+/// ```
+/// let lines = ["fn a() {".to_owned(), "}".to_owned()];
+/// let (place, excerpt) = vert::fix::file_lines("src/a.rs", 3, &lines);
+/// assert_eq!(place, "src/a.rs:3-4");
+/// assert_eq!(excerpt, "@@ src/a.rs:3-4, as on disk @@\n fn a() {\n }\n");
+/// ```
+#[must_use]
+pub fn file_lines(path: &str, first: u32, lines: &[String]) -> (String, String) {
+    let count = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    let last = first.saturating_add(count.saturating_sub(1));
+    let place = if last > first {
+        format!("{path}:{first}-{last}")
+    } else {
+        format!("{path}:{first}")
+    };
+    let excerpt = lines
+        .iter()
+        .fold(format!("@@ {place}, as on disk @@\n"), |mut out, line| {
+            out.push(' ');
+            out.push_str(line);
+            out.push('\n');
+            out
+        });
+    (place, excerpt)
+}
+
 /// The hunk `hunk` of `file` in diff form (`+`, `-` and ` ` prefixes), or
 /// every hunk of the file when `hunk` is `None`.
 ///
@@ -446,6 +477,13 @@ mod tests {
         );
         assert!(whole.contains("# Where\n\nThe change as a whole\n\n# Feedback"));
         assert!(!whole.contains("```"));
+    }
+
+    #[test]
+    fn one_file_line_is_one_place() {
+        let (place, excerpt) = file_lines("a.rs", 7, &["x".to_owned()]);
+        assert_eq!(place, "a.rs:7");
+        assert_eq!(excerpt, "@@ a.rs:7, as on disk @@\n x\n");
     }
 
     #[test]
