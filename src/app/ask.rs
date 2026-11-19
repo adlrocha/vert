@@ -21,8 +21,6 @@ use crate::highlight::sanitize;
 /// A question being written, before it goes to the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskDraft {
-    /// Identifies the exact diff (see [`diff_key`]).
-    pub key: u64,
     /// The change.
     pub entry: Entry,
     /// Its diff.
@@ -42,6 +40,18 @@ pub struct Pending {
     pub place: String,
     /// When it was sent (Unix time).
     pub since: i64,
+    /// The agent asked, as shown to the user.
+    pub agent: String,
+}
+
+/// A question answered in the panel, and the agent that answered it: the
+/// agent can change between questions (`M`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answered {
+    /// The question and its answer.
+    pub question: Question,
+    /// The agent that answered, as shown to the user.
+    pub agent: String,
 }
 
 /// The answer panel: the questions asked from one diff and their answers.
@@ -53,12 +63,10 @@ pub struct AnswerView {
     pub entry: Entry,
     /// Its diff.
     pub files: Vec<FileDiff>,
-    /// The agent's name.
-    pub agent: String,
     /// Where a follow-up (`a`) points: where the last question did.
     pub about: About,
     /// Questions answered here, oldest first.
-    pub answered: Vec<Question>,
+    pub answered: Vec<Answered>,
     /// The question the agent is working on, if any.
     pub pending: Option<Pending>,
     /// Why the last question got no answer (sanitized), if it didn't.
@@ -77,10 +85,32 @@ pub struct AnswerView {
 }
 
 impl AnswerView {
+    /// An empty panel for the diff `key` of `entry`, asking about `about`.
+    #[must_use]
+    pub const fn new(key: u64, entry: Entry, files: Vec<FileDiff>, about: About) -> Self {
+        Self {
+            key,
+            entry,
+            files,
+            about,
+            answered: Vec::new(),
+            pending: None,
+            failed: None,
+            target: 0,
+            scroll: 0,
+            follow: false,
+            height: 0,
+            rows: 0,
+        }
+    }
+
     /// Every answer's code pointers, oldest answer first.
     #[must_use]
     pub fn targets(&self) -> Vec<&Ref> {
-        self.answered.iter().flat_map(|q| &q.refs).collect()
+        self.answered
+            .iter()
+            .flat_map(|a| &a.question.refs)
+            .collect()
     }
 
     fn select(&mut self, delta: isize) {
@@ -101,7 +131,7 @@ impl AnswerView {
             .iter()
             .rev()
             .skip(1)
-            .map(|q| q.refs.len())
+            .map(|a| a.question.refs.len())
             .sum();
         self.target = earlier.min(self.targets().len().saturating_sub(1));
         self.scroll = usize::MAX;
@@ -109,13 +139,21 @@ impl AnswerView {
     }
 }
 
-/// Questions asked from diffs: the one being written, and the answer panel
-/// left last, to come back to.
+/// Questions asked from diffs: the one being written, and the answer
+/// panels left, one per change, to come back to.
 #[derive(Debug, Default)]
 pub struct AskState {
     /// A question being written.
     pub draft: Option<AskDraft>,
-    parked: Option<Box<AnswerView>>,
+    parked: Vec<AnswerView>,
+}
+
+impl AskState {
+    /// Takes the parked answer panel of the change `id`, if there is one.
+    fn unpark(&mut self, id: &str) -> Option<Box<AnswerView>> {
+        let i = self.parked.iter().position(|v| v.entry.id == id)?;
+        Some(Box::new(self.parked.remove(i)))
+    }
 }
 
 impl App {
@@ -137,14 +175,14 @@ impl App {
             |(place, excerpt)| About { place, excerpt },
         );
         let (entry, files) = (d.entry.clone(), d.files.clone());
-        let key = diff_key(&entry, &files);
-        self.start_ask(key, entry, files, about);
+        self.start_ask(entry, files, about);
         Vec::new()
     }
 
-    /// Starts writing a question about `about` in the diff `key`, unless
-    /// there is no agent to ask or it is still answering about that diff.
-    fn start_ask(&mut self, key: u64, entry: Entry, files: Vec<FileDiff>, about: About) {
+    /// Starts writing a question about `about` in `entry`, whose diff is
+    /// `files`, unless there is no agent to ask or it is still answering
+    /// about that change.
+    fn start_ask(&mut self, entry: Entry, files: Vec<FileDiff>, about: About) {
         let agent = match &self.explain.agent {
             Some(Ok(agent)) => agent.clone(),
             Some(Err(why)) => {
@@ -159,14 +197,18 @@ impl App {
         let pending = self
             .answer_view(&entry.id)
             .is_some_and(|v| v.pending.is_some());
-        if pending || self.explain.question_asked(key).is_some() {
+        if pending
+            || self
+                .explain
+                .question_asked(diff_key(&entry, &files))
+                .is_some()
+        {
             self.notice = Some(format!(
                 "{agent} is still answering your last question about this change"
             ));
             return;
         }
         self.ask.draft = Some(AskDraft {
-            key,
             entry,
             files,
             about,
@@ -233,7 +275,7 @@ impl App {
         let earlier = explanation.as_ref().map_or_else(
             || {
                 self.answer_view(&entry.id)
-                    .map(|v| v.answered.clone())
+                    .map(|v| v.answered.iter().map(|a| a.question.clone()).collect())
                     .unwrap_or_default()
             },
             |e| e.questions.clone(),
@@ -256,29 +298,17 @@ impl App {
             question,
             place: about.place.clone(),
             since: self.now,
+            agent,
         };
         if !matches!(self.views.last(), Some(View::Answer(v)) if v.entry.id == entry.id) {
-            let view = self
-                .ask
-                .parked
-                .take_if(|v| v.entry.id == entry.id)
-                .unwrap_or_else(|| {
-                    Box::new(AnswerView {
-                        key,
-                        entry: entry.clone(),
-                        files: files.clone(),
-                        agent: agent.clone(),
-                        about: about.clone(),
-                        answered: Vec::new(),
-                        pending: None,
-                        failed: None,
-                        target: 0,
-                        scroll: 0,
-                        follow: false,
-                        height: 0,
-                        rows: 0,
-                    })
-                });
+            let view = self.ask.unpark(&entry.id).unwrap_or_else(|| {
+                Box::new(AnswerView::new(
+                    key,
+                    entry.clone(),
+                    files.clone(),
+                    about.clone(),
+                ))
+            });
             self.views.push(View::Answer(view));
         }
         if let Some(View::Answer(v)) = self.views.last_mut() {
@@ -286,7 +316,6 @@ impl App {
             v.key = key;
             v.entry = entry;
             v.files = files;
-            v.agent = agent;
             v.about = about;
             v.pending = Some(pending);
             v.failed = None;
@@ -306,7 +335,7 @@ impl App {
                 View::Answer(a) if a.entry.id == id => Some(a.as_ref()),
                 _ => None,
             })
-            .chain(self.ask.parked.as_deref().filter(|v| v.entry.id == id))
+            .chain(self.ask.parked.iter().filter(|v| v.entry.id == id))
             .next()
     }
 
@@ -324,12 +353,16 @@ impl App {
             _ => None,
         });
         let mut found = false;
-        for view in open.chain(self.ask.parked.as_deref_mut().filter(|v| v.key == key)) {
+        let parked = self.ask.parked.iter_mut().filter(|v| v.key == key);
+        for view in open.chain(parked) {
             found = true;
-            view.pending = None;
+            let pending = view.pending.take();
             match result {
                 Ok(q) => {
-                    view.answered.push(q.clone());
+                    view.answered.push(Answered {
+                        question: q.clone(),
+                        agent: pending.map_or_else(|| "the agent".to_owned(), |p| p.agent),
+                    });
                     view.failed = None;
                     view.show_newest();
                 }
@@ -346,7 +379,7 @@ impl App {
             return Vec::new();
         };
         let id = d.entry.id.clone();
-        match self.ask.parked.take_if(|v| v.entry.id == id) {
+        match self.ask.unpark(&id) {
             Some(view) => self.views.push(View::Answer(view)),
             None => {
                 self.notice =
@@ -359,7 +392,9 @@ impl App {
     /// Leaves the answer panel on top, keeping it to come back to.
     pub(super) fn close_answers(&mut self) {
         if let Some(View::Answer(v)) = self.views.pop() {
-            self.ask.parked = Some(v);
+            // One per change, so an answer on its way always has its panel.
+            self.ask.parked.retain(|p| p.entry.id != v.entry.id);
+            self.ask.parked.push(*v);
         }
     }
 
@@ -381,9 +416,8 @@ impl App {
         };
         match key.code {
             KeyCode::Char('a') => {
-                let (key, entry, files, about) =
-                    (v.key, v.entry.clone(), v.files.clone(), v.about.clone());
-                self.start_ask(key, entry, files, about);
+                let (entry, files, about) = (v.entry.clone(), v.files.clone(), v.about.clone());
+                self.start_ask(entry, files, about);
             }
             KeyCode::Char('j') | KeyCode::Down => v.select(1),
             KeyCode::Char('k') | KeyCode::Up => v.select(-1),

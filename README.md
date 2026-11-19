@@ -69,8 +69,8 @@ in, and what deserves a second look.
 - **Questions:** select lines in a diff with `v` (`j`/`k` extend the
   selection) and press `a` to ask the agent about them, or press `a` with
   nothing selected to ask about the whole file. It sees the whole diff and
-  the lines you picked, changes nothing, and answers in a panel over the
-  diff, with code pointers `⏎` jumps to. No explanation is needed first. See
+  the lines you picked, gets read-only tools (a `--explain-cmd` runs with
+  your own permissions), and answers in a panel over the diff, with code pointers `⏎` jumps to. No explanation is needed first. See
   [Questions from the diff](#questions-from-the-diff).
 - **Fixes:** press `f` on lines selected with `v` (or with nothing selected,
   on the whole file), or on a concern in an explanation (mark
@@ -184,7 +184,8 @@ agent and model in use are shown at the top of each explanation.
 **Choosing the agent and model.** Press `M` anywhere in vert to switch
 the agent (`auto`, `claude`, `codex`, `pi`, or your `--explain-cmd` when
 you set one) and type the model, or leave it blank for the agent's
-default. The choice applies to everything you explain, ask or fix from
+default (moving to another agent clears the model, since each agent
+names models its own way). The choice applies to everything you explain, ask or fix from
 then on, until vert exits; work already on its way finishes with the agent
 it went to, and its answer is headed with the agent that gave it. A
 change explained earlier in the session is explained again by the new
@@ -264,30 +265,6 @@ explanation, keeps them. When a fix has changed the code since, answered
 questions stay with the old code they were about; a question the agent is
 still answering when you press `r` joins the new explanation instead.
 
-### Questions from the diff
-
-In any diff, press `v` to start selecting lines at the top of the diff
-pane, move with `j` and `k` (or `ctrl-d`, `ctrl-u`, `g`, `G`) to extend
-the selection, and press `a` to ask about those lines. `v` again or `esc`
-clears the selection. Selecting a hunk's `⋯ @@` header picks the whole
-hunk. With nothing selected, or from the file list, `a` asks about the
-whole file.
-
-The question goes to the agent that explains (see
-[Explanations](#explanations)), read-only, like a follow-up question: it
-gets the change and its whole diff, the place (`src/auth.rs:40-52`) and the
-lines you selected, its explanation of the change if there is one, and
-the questions asked so far. The agent can read the file for the code
-around it. You don't have to explain the change first.
-
-Sending opens an answer panel over the diff. It shows the agent working,
-then its answer; `j` and `k` move between the code it points at and `⏎`
-jumps there in the diff. `a` asks a follow-up about the same place. `esc`
-goes back to the diff and keeps the panel, and `A` in the diff brings it
-back, also when an answer came in while you were reading elsewhere. The
-questions are kept with the change, like follow-up questions, so its
-explanation (`x`) lists them too.
-
 **Explaining again.** `r` loads the change as it is now and explains that:
 uncommitted work as it is on disk, and a branch at its current tip, so a fix
 committed on it is part of the new explanation (vert reads the branch list
@@ -317,6 +294,33 @@ When the agent runs but fails, for example because it is logged out, the
 model is unknown or it timed out, the explanation reads *Couldn't explain
 this change* followed by the agent's own error output, and `r` tries again.
 For the full output, run the command from the table above in a terminal.
+
+### Questions from the diff
+
+In any diff, press `v` to start selecting lines at the top of the diff
+pane, move with `j` and `k` (or `ctrl-d`, `ctrl-u`, `g`, `G`) to extend
+the selection, and press `a` to ask about those lines. `v` again or `esc`
+clears the selection. Selecting a hunk's `⋯ @@` header picks the whole
+hunk. With nothing selected, or from the file list, `a` asks about the
+whole file.
+
+The question goes to the agent that explains (see
+[Explanations](#explanations)) like a follow-up question: read-only for
+Claude Code, Codex and pi, while a `--explain-cmd` runs unconfined, with
+your own permissions, as it does to explain. It
+gets the change and its whole diff, the place (`src/auth.rs:40-52`) and the
+lines you selected, its explanation of the change if there is one, and
+the questions asked so far. The agent can read the file for the code
+around it. You don't have to explain the change first.
+
+Sending opens an answer panel over the diff. It shows the agent working,
+then its answer, with the agent that gave it (you may switch agents with
+`M` between questions); `j` and `k` move between the code it points at and `⏎`
+jumps there in the diff. `a` asks a follow-up about the same place. `esc`
+goes back to the diff and keeps the panel, and `A` in the diff brings it
+back, also when an answer came in while you were reading elsewhere. The
+questions are kept with the change, like follow-up questions, so its
+explanation (`x`) lists them too.
 
 ### Fixes
 

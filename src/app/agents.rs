@@ -20,6 +20,23 @@ pub struct Picker {
     pub selected: usize,
     /// The model as typed so far; blank for the agent's default.
     pub model: String,
+    /// The agent and model in use when it opened: an agent's model names
+    /// mean nothing to another, so moving to another agent clears the
+    /// model, and moving back brings this one back.
+    opened: (usize, String),
+}
+
+impl Picker {
+    /// Highlights pick `selected`, with the model it opened with if it is
+    /// the agent in use, else none (the agent's default).
+    fn choose(&mut self, selected: usize) {
+        self.selected = selected;
+        self.model = if selected == self.opened.0 {
+            self.opened.1.clone()
+        } else {
+            String::new()
+        };
+    }
 }
 
 /// Which agent and model vert asks, and the picker that changes them.
@@ -114,7 +131,11 @@ impl App {
                     c.model.clone().unwrap_or_default(),
                 )
             });
-        self.agents.picker = Some(Picker { selected, model });
+        self.agents.picker = Some(Picker {
+            selected,
+            model: model.clone(),
+            opened: (selected, model),
+        });
         Vec::new()
     }
 
@@ -130,10 +151,10 @@ impl App {
             KeyCode::Esc => self.agents.picker = None,
             KeyCode::Enter => return self.apply_picker(),
             KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
-                picker.selected = (picker.selected + 1) % count;
+                picker.choose((picker.selected + 1) % count);
             }
             KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
-                picker.selected = (picker.selected + count - 1) % count;
+                picker.choose((picker.selected + count - 1) % count);
             }
             KeyCode::Backspace => {
                 picker.model.pop();
@@ -209,38 +230,37 @@ mod tests {
             "no command to offer"
         );
         press(&mut a, KeyCode::Char('M'));
-        assert_eq!(
-            a.agents.picker,
-            Some(Picker {
-                selected: 2,
-                model: "gpt-5".to_owned()
-            })
-        );
+        let picked = |a: &App| {
+            a.agents
+                .picker
+                .as_ref()
+                .map(|p| (p.selected, p.model.clone()))
+        };
+        assert_eq!(picked(&a), Some((2, "gpt-5".to_owned())));
         // Keys go to the picker, not the feed underneath.
         assert_eq!(press(&mut a, KeyCode::Char('q')), []);
-        press(&mut a, KeyCode::Backspace);
-        a.update(Msg::Key(KeyEvent::new(
-            KeyCode::Char('u'),
-            KeyModifiers::CONTROL,
-        )));
-        typed(&mut a, " opus  extra");
-        a.update(Msg::Key(KeyEvent::new(
-            KeyCode::Char('w'),
-            KeyModifiers::CONTROL,
-        )));
+        assert_eq!(picked(&a), Some((2, "gpt-5q".to_owned())));
+        // Another agent's model names mean nothing to this one.
         press(&mut a, KeyCode::Left);
+        assert_eq!(picked(&a), Some((1, String::new())), "claude starts blank");
+        press(&mut a, KeyCode::Right);
+        assert_eq!(picked(&a), Some((2, "gpt-5".to_owned())), "codex's is back");
         press(&mut a, KeyCode::Up);
         press(&mut a, KeyCode::Up);
-        assert_eq!(
-            a.agents.picker.as_ref().map(|p| p.selected),
-            Some(3),
-            "wraps"
-        );
+        press(&mut a, KeyCode::Up);
+        assert_eq!(picked(&a).map(|p| p.0), Some(3), "wraps");
         press(&mut a, KeyCode::Right);
         press(&mut a, KeyCode::Down);
         press(&mut a, KeyCode::Tab);
         press(&mut a, KeyCode::BackTab);
-        assert_eq!(a.agents.picker.as_ref().map(|p| p.selected), Some(1));
+        assert_eq!(picked(&a).map(|p| p.0), Some(1));
+        typed(&mut a, "opux");
+        press(&mut a, KeyCode::Backspace);
+        typed(&mut a, "s  extra");
+        a.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+        )));
         assert_eq!(
             press(&mut a, KeyCode::Enter),
             [Effect::SetAgent(Setting {
@@ -289,11 +309,12 @@ mod tests {
         let mut fresh = app();
         press(&mut fresh, KeyCode::Char('M'));
         assert_eq!(
-            fresh.agents.picker,
-            Some(Picker {
-                selected: 0,
-                model: String::new()
-            })
+            fresh
+                .agents
+                .picker
+                .as_ref()
+                .map(|p| (p.selected, p.model.as_str())),
+            Some((0, ""))
         );
         assert_eq!(pick_name(Pick::Command), "--explain-cmd");
         assert!(model_hint(Pick::Agent(Choice::Pi)).contains("provider/model"));

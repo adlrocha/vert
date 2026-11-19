@@ -1344,39 +1344,39 @@ mod render_tests {
             label: label.to_owned(),
         };
         let long = "word ".repeat(200);
-        let answered = (0..3)
-            .map(|i| Question {
-                question: format!("q{i}"),
-                answer: long.clone(),
-                refs: vec![at(&format!("pointer {i}"))],
-                about: None,
+        let mut view = crate::app::AnswerView::new(
+            1,
+            entry,
+            Vec::new(),
+            crate::explain::question::About {
+                place: "src/main.rs".to_owned(),
+                excerpt: String::new(),
+            },
+        );
+        view.answered = (0..3)
+            .map(|i| crate::app::Answered {
+                question: Question {
+                    question: format!("q{i}"),
+                    answer: long.clone(),
+                    refs: vec![at(&format!("pointer {i}"))],
+                    about: None,
+                },
+                agent: if i == 0 { "claude" } else { "pi" }.to_owned(),
             })
             .collect();
-        app.views
-            .push(crate::app::View::Answer(Box::new(crate::app::AnswerView {
-                key: 1,
-                entry,
-                files: Vec::new(),
-                agent: "pi".to_owned(),
-                about: crate::explain::question::About {
-                    place: "src/main.rs".to_owned(),
-                    excerpt: String::new(),
-                },
-                answered,
-                pending: None,
-                failed: None,
-                target: 0,
-                scroll: usize::MAX,
-                follow: false,
-                height: 0,
-                rows: 0,
-            })));
+        view.scroll = usize::MAX;
+        app.views.push(crate::app::View::Answer(Box::new(view)));
         let s = screen(&mut app, 80, 16);
         assert!(s.contains("Uncommitted changes"), "{s}");
         assert!(s.contains("pointer 2"), "starts at the end: {s}");
         press(&mut app, KeyCode::Char('g'));
         let s = screen(&mut app, 80, 16);
         assert!(s.contains("pointer 0") && !s.contains("pointer 2"), "{s}");
+        assert!(s.contains("answered by pi"), "{s}");
+        assert!(
+            screen(&mut app, 80, 120).contains("answered by claude"),
+            "each answer names its own agent"
+        );
         press(&mut app, KeyCode::Char('G'));
         let s = screen(&mut app, 80, 16);
         assert!(s.contains("pointer 2"), "{s}");
@@ -1387,7 +1387,6 @@ mod render_tests {
         let (t, mut app) = real_app();
         app.set_explainer(&Ok(crate::app::pi_for_tests()));
         app.ask.draft = Some(crate::app::AskDraft {
-            key: 1,
             entry: app.feed.commits[0].clone(),
             files: Vec::new(),
             about: crate::explain::question::About {

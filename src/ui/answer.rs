@@ -50,7 +50,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, v: &mut AnswerView, now: i64, tic
         Line::from(vec![
             Span::raw(" "),
             Span::styled(e.short.clone(), Style::default().fg(theme::WARN)),
-            Span::styled(format!(" · asked {}{state}", v.agent), theme::muted()),
+            Span::styled(format!(" · asked from the diff{state}"), theme::muted()),
         ]),
         l2,
     );
@@ -59,11 +59,15 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, v: &mut AnswerView, now: i64, tic
     let inner = block.inner(body);
     frame.render_widget(block, body);
     let mut out = Detail::new(usize::from(inner.width), Some(v.target));
-    for (i, q) in v.answered.iter().enumerate() {
+    for (i, a) in v.answered.iter().enumerate() {
         if i > 0 {
             out.blank();
         }
-        out.question(q);
+        // Each answer names its agent: it may have changed between them.
+        let q = &a.question;
+        out.asked(&q.question, q.about.as_deref());
+        out.indented(2, &format!("answered by {}", a.agent), theme::muted());
+        out.answer(q);
     }
     if let Some(p) = &v.pending {
         if !v.answered.is_empty() {
@@ -75,7 +79,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, v: &mut AnswerView, now: i64, tic
             &format!(
                 "{} {} is answering… {} · esc goes back to the diff; A brings this back",
                 spinner(tick),
-                v.agent,
+                p.agent,
                 clock(now - p.since)
             ),
             theme::muted(),

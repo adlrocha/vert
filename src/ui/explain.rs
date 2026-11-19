@@ -517,6 +517,11 @@ impl Detail {
     /// A question, its answer and the code the answer points at.
     pub(super) fn question(&mut self, q: &Question) {
         self.asked(&q.question, q.about.as_deref());
+        self.answer(q);
+    }
+
+    /// An answer and the code it points at, under its question.
+    pub(super) fn answer(&mut self, q: &Question) {
         self.blank();
         for (n, paragraph) in q.answer.split("\n\n").enumerate() {
             if n > 0 {

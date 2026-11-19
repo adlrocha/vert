@@ -308,10 +308,12 @@ impl ExplainState {
     /// Forgets the explanations kept while vert runs, so the next `x`
     /// asks the agent in use now (or reads its own cached answer) instead
     /// of showing another agent's. Their questions stay in the answer
-    /// cache, and an explain view left open keeps what it shows, under the
-    /// name of the agent that explained it.
+    /// cache, and an explain view still open keeps what it shows, under
+    /// the name of the agent that explained it.
     pub(super) fn forget_answers(&mut self) {
         self.answers.clear();
+        // A view left with `esc` would be reopened by `x` as it was.
+        self.parked = None;
     }
 
     /// Records that the agent is answering a question about the diff
@@ -1288,10 +1290,12 @@ mod tests {
         a.explain.parked = None;
         press(&mut a, KeyCode::Char('x'));
         assert_eq!(view(&a).agent, "pi");
-        // An answer that doesn't say keeps the name the view has.
-        a.views.pop();
-        a.explain.parked = None;
+        // Switching agents drops a view left with `esc`, so `x` asks anew.
+        press(&mut a, KeyCode::Esc);
+        assert!(a.explain.parked.is_some());
         a.explain.forget_answers();
+        assert!(a.explain.parked.is_none());
+        // An answer that doesn't say keeps the name the view has.
         let key = asked(&press(&mut a, KeyCode::Char('x')), false);
         a.update(Msg::Explained {
             key,

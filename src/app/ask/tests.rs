@@ -564,3 +564,51 @@ fn hunk_jumps_drop_the_selection() {
     press(&mut app, KeyCode::Char('N'));
     assert_eq!(diff_mut(&mut app).selection, None);
 }
+
+#[test]
+fn each_change_keeps_its_own_panel_until_its_answer_lands() {
+    let (mut app, key_a) = showing();
+    press(&mut app, KeyCode::Char('a'));
+    typed(&mut app, "about a?");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    // Another change, asked about and left before the first answers.
+    let mut other = commit();
+    other.id = "other".to_owned();
+    app.update(Msg::Diff {
+        entry: Box::new(other.clone()),
+        result: Ok(files()),
+        refresh: false,
+        file: None,
+    });
+    press(&mut app, KeyCode::Char('a'));
+    typed(&mut app, "about b?");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+    app.update(Msg::Answered {
+        key: key_a,
+        result: Ok(answer("For a.", Vec::new(), "src/a.rs")),
+    });
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("An answer is ready: open the change and press A to read it")
+    );
+    // Back on the first change: its panel has its answer.
+    press(&mut app, KeyCode::Esc);
+    app.update(Msg::Diff {
+        entry: Box::new(commit()),
+        result: Ok(files()),
+        refresh: false,
+        file: None,
+    });
+    press(&mut app, KeyCode::Char('A'));
+    let v = panel(&app);
+    assert_eq!(v.answered.len(), 1);
+    assert_eq!(v.answered[0].agent, "pi", "credited to the agent asked");
+    assert_eq!(v.answered[0].question.answer, "For a.");
+    // Leaving it again keeps one panel per change.
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('A'));
+    assert_eq!(panel(&app).answered.len(), 1);
+}

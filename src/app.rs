@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 pub use agents::{AgentsState, Picker, model_hint, pick_name};
-pub use ask::{AnswerView, AskDraft, AskState, Pending};
+pub use ask::{AnswerView, Answered, AskDraft, AskState, Pending};
 pub use branches::{
     BranchRemoval, BranchesState, CollisionList, CollisionRow, PullStatus, Refresh, Removal, Row,
     RowFilter, Start, pull_entry,
