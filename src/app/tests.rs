@@ -624,7 +624,7 @@ fn slash_in_a_diff_finds_files_by_name() {
     }
     assert_eq!(detail(&app).1, Vec::<usize>::new(), "nothing matches xq");
     app.update(key(KeyCode::Backspace));
-    assert_eq!(detail(&app).0..=detail(&app).0, 1..=1, "docs/x.md");
+    assert_eq!(detail(&app).0, 1, "docs/x.md");
     app.update(ctrl('u'));
     for c in "rs".chars() {
         app.update(ch(c));
@@ -837,6 +837,37 @@ fn unreadable_files_show_a_notice() {
     };
     assert_eq!(f.notice.as_deref(), Some("binary"));
     assert_eq!(f.target, 1);
+}
+
+#[test]
+fn a_file_shown_as_a_notice_edits_at_the_line_it_was_opened_at() {
+    let mut app = loaded();
+    app.update(Msg::File {
+        path: "big.rs".to_owned(),
+        content: Err("too large".to_owned()),
+        line: 42,
+        marks: BTreeSet::new(),
+        root: None,
+    });
+    assert_eq!(
+        app.update(ch('e')),
+        [Effect::Edit {
+            path: "big.rs".to_owned(),
+            line: 42,
+            root: None,
+        }]
+    );
+}
+
+#[test]
+fn page_keys_in_the_file_list_move_the_list() {
+    let mut app = loaded();
+    open_detail(&mut app);
+    app.update(key(KeyCode::PageDown));
+    let Some(View::Detail(d)) = app.views.last() else {
+        panic!("detail")
+    };
+    assert_eq!((d.pos.selected, d.scroll), (1, 0));
 }
 
 #[test]

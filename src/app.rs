@@ -495,6 +495,9 @@ impl DetailView {
     }
 }
 
+/// Why `a`, `f` and `A` in a file opened from search or hotspots do nothing.
+const NO_CHANGE: &str = "Open the file from a change's diff (⏎) to ask or fix about it";
+
 /// What `a` and `f` in the file viewer act on (see [`App::file_pick`]).
 struct FilePick {
     /// The change the file was opened from.
@@ -1549,8 +1552,7 @@ impl App {
             _ => None,
         };
         if pick.is_none() {
-            self.notice =
-                Some("Open the file from a change's diff (⏎) to ask or fix about it".to_owned());
+            self.notice = Some(NO_CHANGE.to_owned());
         }
         pick
     }
@@ -1605,9 +1607,10 @@ impl App {
             Some(View::Detail(_)) if key.code == KeyCode::Char('A') => self.reopen_answers(),
             Some(View::File(_)) if key.code == KeyCode::Char('A') => {
                 // Only a file opened from a diff has answers to bring back.
-                if self.file_pick().is_some() {
+                if matches!(self.views.as_slice(), [.., View::Detail(_), View::File(_)]) {
                     self.reopen_answers()
                 } else {
+                    self.notice = Some(NO_CHANGE.to_owned());
                     Vec::new()
                 }
             }
@@ -1745,9 +1748,7 @@ impl FileView {
 }
 
 fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<Effect> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let max_scroll = max_scroll(d.rendered.len(), d.height);
-    let half = isize::try_from(half_page(d.height)).unwrap_or(1);
     let previous = d.pos.selected;
     if key.code == KeyCode::Char('v') && !d.rendered.is_empty() {
         // `v` from the file list selects in the diff.
@@ -1756,14 +1757,11 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
     if d.focus == Focus::Diff && d.pane().on_key(key) {
         return Vec::new();
     }
-    // Scrolling the view (from either pane) takes the cursor along.
+    // `J`/`K` scroll the diff from either pane and take the cursor along;
+    // page keys move the cursor (above) or the file list (below).
     let scrolled = match key.code {
         KeyCode::Char('J') => Some(1),
         KeyCode::Char('K') => Some(-1),
-        KeyCode::Char('d') if ctrl => Some(half),
-        KeyCode::Char('u') if ctrl => Some(-half),
-        KeyCode::PageDown => Some(half * 2),
-        KeyCode::PageUp => Some(-half * 2),
         _ => None,
     };
     if let Some(delta) = scrolled {
@@ -1982,9 +1980,16 @@ fn file_key(f: &mut FileView, key: &KeyEvent) -> Vec<Effect> {
             }
         }
         KeyCode::Char('e') => {
+            // A file shown only as a notice has no lines for the cursor:
+            // the line it was opened at.
+            let line = if f.lines.is_empty() {
+                f.target
+            } else {
+                cursor_line
+            };
             return vec![Effect::Edit {
                 path: f.path.clone(),
-                line: cursor_line,
+                line,
                 root: f.root.clone(),
             }];
         }

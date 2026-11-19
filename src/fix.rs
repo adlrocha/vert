@@ -51,7 +51,9 @@ pub struct Request {
     pub place: Option<String>,
     /// The hunk around that place, in diff form, or for several concerns
     /// (see [`concerns_request`]) each hunk they point at under its file's
-    /// `diff --git` header; empty when there is none.
+    /// `diff --git` header, or lines picked in the file viewer as they are
+    /// on disk, under a `@@ path:N-M, as on disk @@` header (see
+    /// [`file_lines`]); empty when there is none.
     pub excerpt: String,
     /// The feedback, in the person's words.
     pub feedback: String,
@@ -169,11 +171,7 @@ pub fn picked(file: &FileDiff, picks: &[(usize, Option<usize>)]) -> Option<(Stri
     let span = |numbers: Vec<u32>| {
         let first = numbers.iter().min()?;
         let last = numbers.iter().max()?;
-        Some(if first == last {
-            format!("{}:{first}", file.stat.path)
-        } else {
-            format!("{}:{first}-{last}", file.stat.path)
-        })
+        Some(lines_place(&file.stat.path, *first, *last))
     };
     let place = span(picked.iter().filter_map(|(_, l)| l.new_no).collect())
         .or_else(|| {
@@ -211,11 +209,7 @@ pub fn picked(file: &FileDiff, picks: &[(usize, Option<usize>)]) -> Option<(Stri
 pub fn file_lines(path: &str, first: u32, lines: &[String]) -> (String, String) {
     let count = u32::try_from(lines.len()).unwrap_or(u32::MAX);
     let last = first.saturating_add(count.saturating_sub(1));
-    let place = if last > first {
-        format!("{path}:{first}-{last}")
-    } else {
-        format!("{path}:{first}")
-    };
+    let place = lines_place(path, first, last);
     let excerpt = lines
         .iter()
         .fold(format!("@@ {place}, as on disk @@\n"), |mut out, line| {
@@ -225,6 +219,16 @@ pub fn file_lines(path: &str, first: u32, lines: &[String]) -> (String, String) 
             out
         });
     (place, excerpt)
+}
+
+/// Lines `first` to `last` of `path` as the agent is told them:
+/// `path:first-last`, or `path:first` for one line.
+fn lines_place(path: &str, first: u32, last: u32) -> String {
+    if last > first {
+        format!("{path}:{first}-{last}")
+    } else {
+        format!("{path}:{first}")
+    }
 }
 
 /// The hunk `hunk` of `file` in diff form (`+`, `-` and ` ` prefixes), or

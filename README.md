@@ -145,7 +145,7 @@ Press `?` inside vert for all keys. The essentials:
 | Anywhere  | `1` `2` `3` `4` / `tab` switch tab · `j` `k` move · `⏎` open · `esc` back · `q` quit · `M` agent and model |
 | Feed      | `n` next new change · `esc` clear filter · `r` reload                   |
 | Hotspots  | `w` time window · `m` files/modules · `⏎` filter feed · `o`/`e` view/edit |
-| Change    | `tab` switch pane · `/` find a file by name (`⏎` opens it, `esc` stops typing, `esc` again clears) · `j` `k` move the cursor · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `⏎`/`e` view/edit the file at the cursor · `v` select from the cursor, `v` again ends (`esc` clears) · `x` explain · `a` ask · `A` answers again · `f` fix |
+| Change    | `tab` switch pane · `/` find a file by name (`⏎` opens it, `esc` stops typing, `esc` again clears; leaving with nothing matched clears it) · `j` `k` move the cursor · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `⏎`/`e` view/edit the file at the cursor · `v` select from the cursor, `v` again ends (`esc` clears) · `x` explain · `a` ask · `A` answers again · `f` fix |
 | File      | `j` `k` move the cursor · `n` `N` changes · `←` `→` sideways · `e` edit at the cursor · `v` select from the cursor, `v` again ends (`esc` clears) · `a` ask · `A` answers again · `f` fix (`a` `A` `f` when opened from a diff) |
 | Answers   | `j` `k` move between code pointers · `⏎` go to the code · `J` `K` scroll · `a` ask more · `esc` back |
 | Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `a` ask a question · `r` explain again · `space` mark a concern · `f` fix the marked concerns (else the selected one) · `c` last fix |
