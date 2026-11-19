@@ -85,7 +85,11 @@ impl App {
         fixer: &Result<Fixer, String>,
     ) {
         self.agents.current = Some(setting);
+        let before = self.explain.agent.clone();
         self.set_explainer(explainer);
+        if self.explain.agent != before {
+            self.explain.forget_answers();
+        }
         self.set_fixer(fixer);
         let explains = match explainer {
             Ok(e) => format!("Explaining and asking with {}", e.label()),
@@ -311,7 +315,18 @@ mod tests {
             ..crate::app::pi_for_tests()
         });
         let fixer = Err("no claude, codex or pi on PATH".to_owned());
+        a.explain.agent = Some(Ok("claude".to_owned()));
+        a.update(Msg::Explained {
+            key: 7,
+            result: Ok(crate::explain::Answer {
+                explanation: crate::explain::Explanation::validate(r#"{"intent": "x"}"#, &[])
+                    .expect("valid"),
+                cached: false,
+            }),
+        });
+        assert!(a.explain.explanation(7).is_some());
         a.agents_changed(setting.clone(), &explainer, &fixer);
+        assert_eq!(a.explain.explanation(7), None, "claude's answer isn't pi's");
         assert_eq!(a.agents.current, Some(setting.clone()));
         assert_eq!(a.explain.agent, Some(Ok("pi · m".to_owned())));
         assert_eq!(
@@ -329,6 +344,20 @@ mod tests {
             max_excerpt_bytes: 1,
             commit: false,
         });
+        a.agents_changed(setting.clone(), &explainer, &fixer);
+        a.update(Msg::Explained {
+            key: 8,
+            result: Ok(crate::explain::Answer {
+                explanation: crate::explain::Explanation::validate(r#"{"intent": "x"}"#, &[])
+                    .expect("valid"),
+                cached: false,
+            }),
+        });
+        a.agents_changed(setting.clone(), &explainer, &fixer);
+        assert!(
+            a.explain.explanation(8).is_some(),
+            "the same agent keeps them"
+        );
         a.agents_changed(setting, &Err("pi is not on PATH".to_owned()), &fixer);
         assert_eq!(
             a.notice.as_deref(),

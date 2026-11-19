@@ -11,6 +11,7 @@ use ratatui::widgets::Paragraph;
 
 use super::{Hints, clock, empty_state, marker, panel, plural, spinner, truncate, width, wrap};
 use crate::app::{ConcernFix, ExplainView, Item, Pane, Status, concern_key, items};
+use crate::explain::question::Question;
 use crate::explain::{Change, Diagram, Explanation, Ref, tree};
 use crate::git::commit::Outcome;
 use crate::git::short_id;
@@ -412,21 +413,7 @@ fn detail_lines(
         }
         Item::Question(i) => {
             if let Some(q) = e.questions.get(i) {
-                out.prefixed("Q ", Style::default().fg(theme::INFO), &q.question);
-                out.blank();
-                for (n, paragraph) in q.answer.split("\n\n").enumerate() {
-                    if n > 0 {
-                        out.blank();
-                    }
-                    out.text(paragraph, theme::text());
-                }
-                if !q.refs.is_empty() {
-                    out.blank();
-                    out.heading("Code");
-                }
-                for r in &q.refs {
-                    out.reference(r);
-                }
+                out.question(q);
             }
         }
     }
@@ -516,6 +503,33 @@ impl Detail {
             && let Some(first) = line.spans.first_mut()
         {
             *first = marker(true);
+        }
+    }
+
+    /// What was asked, and where in the change, when asked from the diff.
+    pub(super) fn asked(&mut self, question: &str, place: Option<&str>) {
+        self.prefixed("Q ", Style::default().fg(theme::INFO), question);
+        if let Some(place) = place {
+            self.indented(2, &format!("about {place}"), theme::muted());
+        }
+    }
+
+    /// A question, its answer and the code the answer points at.
+    pub(super) fn question(&mut self, q: &Question) {
+        self.asked(&q.question, q.about.as_deref());
+        self.blank();
+        for (n, paragraph) in q.answer.split("\n\n").enumerate() {
+            if n > 0 {
+                self.blank();
+            }
+            self.text(paragraph, theme::text());
+        }
+        if !q.refs.is_empty() {
+            self.blank();
+            self.heading("Code");
+        }
+        for r in &q.refs {
+            self.reference(r);
         }
     }
 

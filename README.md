@@ -186,7 +186,10 @@ the agent (`auto`, `claude`, `codex`, `pi`, or your `--explain-cmd` when
 you set one) and type the model, or leave it blank for the agent's
 default. The choice applies to everything you explain, ask or fix from
 then on, until vert exits; work already on its way finishes with the agent
-it went to. The footer says which agent explains and which fixes. An
+it went to. A change explained earlier in the session is explained again
+by the new agent when you press `x` (or read from that agent's cache),
+while an explanation still open keeps its answer, headed with the agent
+that gave it. The footer says which agent explains and which fixes. An
 agent picked with `M` explains even when `--explain-cmd` is set.
 
 To set what vert starts with, set them once per machine in your shell

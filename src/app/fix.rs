@@ -287,7 +287,7 @@ impl App {
             return Vec::new();
         };
         let entry = d.entry.clone();
-        if let Some((place, excerpt)) = super::ask::selected(d) {
+        if let Some((place, excerpt)) = super::selected_lines(d) {
             self.start_draft(&entry, Some(place), excerpt, String::new(), None);
             return Vec::new();
         }

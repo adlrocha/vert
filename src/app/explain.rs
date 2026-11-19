@@ -301,6 +301,15 @@ impl ExplainState {
         self.answers.get(&key).map(|(e, _)| e.clone())
     }
 
+    /// Forgets the explanations kept while vert runs, so the next `x`
+    /// asks the agent in use now (or reads its own cached answer) instead
+    /// of showing another agent's. Their questions stay in the answer
+    /// cache, and an explain view left open keeps what it shows, under the
+    /// name of the agent that explained it.
+    pub(super) fn forget_answers(&mut self) {
+        self.answers.clear();
+    }
+
     /// Records that the agent is answering a question about the diff
     /// `key`, since `now`.
     pub(super) fn start_question(&mut self, key: u64, now: i64) {

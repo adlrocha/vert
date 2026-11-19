@@ -279,6 +279,25 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Answers",
+        &[
+            ("j k", "move between code pointers"),
+            ("⏎", "go to the code"),
+            ("J K", "scroll"),
+            ("a", "ask more about the same place"),
+            ("esc", "back to the diff (A reopens)"),
+        ],
+    ),
+    (
+        "Agent (M)",
+        &[
+            ("← →", "choose the agent"),
+            ("type", "the model; blank for its default"),
+            ("⏎", "use until vert exits"),
+            ("esc", "cancel"),
+        ],
+    ),
+    (
         "Fix",
         &[
             ("type", "what should change"),
@@ -299,30 +318,58 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
 ];
 
 fn draw_help(frame: &mut Frame<'_>) {
-    let mut lines = Vec::new();
-    for (section, keys) in HELP {
-        lines.push(Line::from(Span::styled(*section, theme::accent_bold())));
-        for (k, desc) in *keys {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {k:<16}"), theme::bold()),
-                Span::styled(*desc, theme::muted()),
-            ]));
+    let sections: Vec<Vec<Line<'static>>> = HELP
+        .iter()
+        .map(|(section, keys)| {
+            std::iter::once(Line::from(Span::styled(*section, theme::accent_bold())))
+                .chain(keys.iter().map(|(k, desc)| {
+                    Line::from(vec![
+                        Span::styled(format!("  {k:<16}"), theme::bold()),
+                        Span::styled(*desc, theme::muted()),
+                    ])
+                }))
+                .collect()
+        })
+        .collect();
+    // Sections one under another, blank lines between.
+    let stack = |sections: &[Vec<Line<'static>>]| {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for (i, section) in sections.iter().enumerate() {
+            if i > 0 {
+                lines.push(Line::raw(""));
+            }
+            lines.extend(section.iter().cloned());
         }
-        lines.push(Line::raw(""));
+        lines
+    };
+    let one = stack(&sections);
+    let area = frame.area();
+    // Two columns when one doesn't fit, split at the section that best
+    // halves the height.
+    let columns = if one.len() + 4 > usize::from(area.height) {
+        let half = one.len() / 2;
+        let split = (1..sections.len())
+            .min_by_key(|&i| stack(&sections[..i]).len().abs_diff(half))
+            .unwrap_or(1);
+        vec![stack(&sections[..split]), stack(&sections[split..])]
+    } else {
+        vec![one]
+    };
+    let rows = columns.iter().map(Vec::len).max().unwrap_or(0);
+    let height = u16::try_from(rows + 4).unwrap_or(u16::MAX);
+    let width = u16::try_from(48 * columns.len()).unwrap_or(u16::MAX);
+    let rect = centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = panel(true)
+        .title(" Keys ")
+        .title_bottom(Line::from(" any key to close ").alignment(Alignment::Right))
+        .padding(Padding::new(2, 2, 1, 1));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let areas = Layout::horizontal(vec![Constraint::Fill(1); columns.len()]).split(inner);
+    for (lines, column) in columns.into_iter().zip(areas.iter()) {
+        frame.render_widget(Paragraph::new(lines), *column);
     }
-    lines.pop();
-    let height = u16::try_from(lines.len() + 4).unwrap_or(u16::MAX);
-    let area = centered(frame.area(), 48, height);
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            panel(true)
-                .title(" Keys ")
-                .title_bottom(Line::from(" any key to close ").alignment(Alignment::Right))
-                .padding(Padding::new(2, 2, 1, 1)),
-        ),
-        area,
-    );
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -749,6 +796,32 @@ mod render_tests {
         assert!(screen(&mut app, 100, 20).contains("heads up"));
         press(&mut app, KeyCode::Char('?'));
         assert!(screen(&mut app, 100, 40).contains("any key to close"));
+    }
+
+    #[test]
+    fn help_lists_every_section_in_two_columns_when_one_does_not_fit() {
+        let (_t, mut app) = real_app();
+        press(&mut app, KeyCode::Char('?'));
+        // Tall enough for one column: everything, one under another.
+        let tall = screen(&mut app, 100, 120);
+        for (section, _) in super::HELP {
+            assert!(tall.contains(section), "{section}: {tall}");
+        }
+        let row_of = |s: &str, needle: &str| s.lines().position(|l| l.contains(needle));
+        assert!(row_of(&tall, "Everywhere") < row_of(&tall, "Agent (M)"));
+        // A usual terminal: two columns, every section still shown.
+        let short = screen(&mut app, 120, 45);
+        for (section, _) in super::HELP {
+            assert!(short.contains(section), "{section}: {short}");
+        }
+        assert!(short.contains("A reopens"), "{short}");
+        let column_of = |needle: &str| {
+            short
+                .lines()
+                .find_map(|l| l.find(needle).map(|i| l[..i].chars().count()))
+                .expect("shown")
+        };
+        assert_ne!(column_of("Everywhere"), column_of("Search"), "{short}");
     }
 
     #[test]

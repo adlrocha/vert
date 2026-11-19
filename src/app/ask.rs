@@ -10,15 +10,13 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, DetailView, Effect, Focus, View, delete_word, half_page, max_scroll};
+use super::{App, Effect, View, delete_word, half_page, max_scroll};
 use crate::explain::Ref;
 use crate::explain::diff_key;
 use crate::explain::question::{About, Ask, Question};
-use crate::fix::picked;
 use crate::git::diff::FileDiff;
 use crate::git::feed::Entry;
 use crate::highlight::sanitize;
-use crate::ui::detail::Source;
 
 /// A question being written, before it goes to the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,27 +118,6 @@ pub struct AskState {
     parked: Option<Box<AnswerView>>,
 }
 
-/// What `a` and `f` in a diff are about: the rows selected with `v`, as a
-/// place and those lines in diff form, or `None` when nothing is selected
-/// (or the selection holds nothing of the diff), for the whole file.
-pub(super) fn selected(d: &DetailView) -> Option<(String, String)> {
-    let selection = d.selection.filter(|_| d.focus == Focus::Diff)?;
-    let file = d.files.get(d.pos.selected)?;
-    let (first, last) = selection.rows();
-    let picks: Vec<(usize, Option<usize>)> = d
-        .rendered
-        .sources
-        .get(first..=last.min(d.rendered.sources.len().saturating_sub(1)))?
-        .iter()
-        .filter_map(|s| match *s {
-            Source::Header(h) => Some((h, None)),
-            Source::Line(h, i) => Some((h, Some(i))),
-            Source::None => None,
-        })
-        .collect();
-    picked(file, &picks)
-}
-
 impl App {
     /// `a` in a diff: starts writing a question about the lines selected,
     /// else about the whole selected file.
@@ -152,7 +129,7 @@ impl App {
             self.notice = Some("Nothing to ask about: the change is empty".to_owned());
             return Vec::new();
         };
-        let about = selected(d).map_or_else(
+        let about = super::selected_lines(d).map_or_else(
             || About {
                 place: file.stat.path.clone(),
                 excerpt: String::new(),
@@ -179,7 +156,10 @@ impl App {
                 return;
             }
         };
-        if self.explain.question_asked(key).is_some() {
+        let pending = self
+            .answer_view(&entry.id)
+            .is_some_and(|v| v.pending.is_some());
+        if pending || self.explain.question_asked(key).is_some() {
             self.notice = Some(format!(
                 "{agent} is still answering your last question about this change"
             ));
@@ -227,7 +207,6 @@ impl App {
             return Vec::new();
         }
         let Some(AskDraft {
-            key,
             entry,
             files,
             about,
@@ -236,12 +215,24 @@ impl App {
         else {
             return Vec::new();
         };
+        // The diff as it is now: a live one (uncommitted work) may have
+        // refreshed under the prompt. The place and lines stay as the
+        // person saw them.
+        let (entry, files) = self
+            .views
+            .iter()
+            .rev()
+            .find_map(View::as_detail)
+            .filter(|d| d.entry.id == entry.id && !d.files.is_empty())
+            .map_or((entry, files), |d| (d.entry.clone(), d.files.clone()));
+        let key = diff_key(&entry, &files);
         let explanation = self.explain.explanation(key);
         // The questions so far: the explanation holds every one answered
-        // while vert runs; without one, those of this panel.
+        // while vert runs; without one, those of this panel (the agent's
+        // run adds those kept from earlier runs).
         let earlier = explanation.as_ref().map_or_else(
             || {
-                self.answer_view(key)
+                self.answer_view(&entry.id)
                     .map(|v| v.answered.clone())
                     .unwrap_or_default()
             },
@@ -266,16 +257,16 @@ impl App {
             place: about.place.clone(),
             since: self.now,
         };
-        if !matches!(self.views.last(), Some(View::Answer(v)) if v.key == key) {
+        if !matches!(self.views.last(), Some(View::Answer(v)) if v.entry.id == entry.id) {
             let view = self
                 .ask
                 .parked
-                .take_if(|v| v.key == key)
+                .take_if(|v| v.entry.id == entry.id)
                 .unwrap_or_else(|| {
                     Box::new(AnswerView {
                         key,
-                        entry,
-                        files,
+                        entry: entry.clone(),
+                        files: files.clone(),
                         agent: agent.clone(),
                         about: about.clone(),
                         answered: Vec::new(),
@@ -291,6 +282,10 @@ impl App {
             self.views.push(View::Answer(view));
         }
         if let Some(View::Answer(v)) = self.views.last_mut() {
+            // Its answer comes back under this key.
+            v.key = key;
+            v.entry = entry;
+            v.files = files;
             v.agent = agent;
             v.about = about;
             v.pending = Some(pending);
@@ -301,15 +296,17 @@ impl App {
         vec![effect]
     }
 
-    /// The answer panel of the diff `key`, open or parked.
-    fn answer_view(&self, key: u64) -> Option<&AnswerView> {
+    /// The answer panel of the change `id`, open or parked. It belongs to
+    /// the change, not to one version of its diff, so a live diff that
+    /// moved on keeps it.
+    fn answer_view(&self, id: &str) -> Option<&AnswerView> {
         self.views
             .iter()
             .filter_map(|v| match v {
-                View::Answer(a) if a.key == key => Some(a.as_ref()),
+                View::Answer(a) if a.entry.id == id => Some(a.as_ref()),
                 _ => None,
             })
-            .chain(self.ask.parked.as_deref().filter(|v| v.key == key))
+            .chain(self.ask.parked.as_deref().filter(|v| v.entry.id == id))
             .next()
     }
 
@@ -343,17 +340,17 @@ impl App {
         found.then_some(on_top)
     }
 
-    /// `A` in a diff: opens the answer panel of this diff again.
+    /// `A` in a diff: opens the answer panel of this change again.
     pub(super) fn reopen_answers(&mut self) -> Vec<Effect> {
         let Some(View::Detail(d)) = self.views.last() else {
             return Vec::new();
         };
-        let key = diff_key(&d.entry, &d.files);
-        match self.ask.parked.take_if(|v| v.key == key) {
+        let id = d.entry.id.clone();
+        match self.ask.parked.take_if(|v| v.entry.id == id) {
             Some(view) => self.views.push(View::Answer(view)),
             None => {
                 self.notice =
-                    Some("No questions asked about this diff yet: press a to ask one".to_owned());
+                    Some("No questions asked about this change yet: press a to ask one".to_owned());
             }
         }
         Vec::new()

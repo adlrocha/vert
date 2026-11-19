@@ -11,7 +11,6 @@ use super::explain::Detail;
 use super::prompt::{SEND, draw_prompt};
 use super::{Hints, clock, panel, spinner, truncate};
 use crate::app::{AnswerView, App};
-use crate::explain::question::Question;
 use crate::theme;
 
 /// Footer hints for the answer panel.
@@ -64,13 +63,13 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, v: &mut AnswerView, now: i64, tic
         if i > 0 {
             out.blank();
         }
-        answered(&mut out, q);
+        out.question(q);
     }
     if let Some(p) = &v.pending {
         if !v.answered.is_empty() {
             out.blank();
         }
-        asked(&mut out, &p.question, Some(&p.place));
+        out.asked(&p.question, Some(&p.place));
         out.blank();
         out.text(
             &format!(
@@ -106,33 +105,6 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, v: &mut AnswerView, now: i64, tic
     }
     let visible: Vec<Line<'static>> = out.lines.into_iter().skip(v.scroll).take(h).collect();
     frame.render_widget(Paragraph::new(visible), inner);
-}
-
-/// A question and where it pointed.
-fn asked(out: &mut Detail, question: &str, place: Option<&str>) {
-    out.prefixed("Q ", Style::default().fg(theme::INFO), question);
-    if let Some(place) = place {
-        out.indented(2, &format!("about {place}"), theme::muted());
-    }
-}
-
-/// A question, its answer and the code the answer points at.
-fn answered(out: &mut Detail, q: &Question) {
-    asked(out, &q.question, q.about.as_deref());
-    out.blank();
-    for (n, paragraph) in q.answer.split("\n\n").enumerate() {
-        if n > 0 {
-            out.blank();
-        }
-        out.text(paragraph, theme::text());
-    }
-    if !q.refs.is_empty() {
-        out.blank();
-        out.heading("Code");
-    }
-    for r in &q.refs {
-        out.reference(r);
-    }
 }
 
 /// Draws the question being written from a diff over everything else.

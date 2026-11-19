@@ -1538,6 +1538,8 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
         (KeyCode::Char('g') | KeyCode::Home, Focus::Diff) => d.scroll = 0,
         (KeyCode::Char('G') | KeyCode::End, Focus::Diff) => d.scroll = max_scroll,
         (KeyCode::Char('n' | ']'), _) => {
+            // The jump leaves the selection's rows behind.
+            d.selection = None;
             if let Some(&next) = d.rendered.hunk_starts.iter().find(|&&s| s > d.scroll) {
                 d.scroll = next;
             } else if d.pos.selected + 1 < d.files.len() {
@@ -1545,6 +1547,7 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
             }
         }
         (KeyCode::Char('N' | '['), _) => {
+            d.selection = None;
             if let Some(&prev) = d.rendered.hunk_starts.iter().rev().find(|&&s| s < d.scroll) {
                 d.scroll = prev;
             } else if d.scroll == 0 && d.pos.selected > 0 {
@@ -1591,6 +1594,27 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
             .unwrap_or_default();
     }
     Vec::new()
+}
+
+/// What `a` and `f` in a diff are about: the rows selected with `v`, as a
+/// place and those lines in diff form, or `None` when nothing is selected
+/// (or the selection holds nothing of the diff), for the whole file.
+pub(super) fn selected_lines(d: &DetailView) -> Option<(String, String)> {
+    let selection = d.selection.filter(|_| d.focus == Focus::Diff)?;
+    let file = d.files.get(d.pos.selected)?;
+    let (first, last) = selection.rows();
+    let picks: Vec<(usize, Option<usize>)> = d
+        .rendered
+        .sources
+        .get(first..=last.min(d.rendered.sources.len().saturating_sub(1)))?
+        .iter()
+        .filter_map(|s| match *s {
+            crate::ui::detail::Source::Header(h) => Some((h, None)),
+            crate::ui::detail::Source::Line(h, i) => Some((h, Some(i))),
+            crate::ui::detail::Source::None => None,
+        })
+        .collect();
+    crate::fix::picked(file, &picks)
 }
 
 /// Path, line and added-line marks for opening the selected file of a detail view.

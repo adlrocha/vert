@@ -266,7 +266,7 @@ fn a_left_panel_comes_back_and_says_when_an_answer_is_ready() {
     assert_eq!(press(&mut app, KeyCode::Char('A')), []);
     assert_eq!(
         app.notice.as_deref(),
-        Some("No questions asked about this diff yet: press a to ask one")
+        Some("No questions asked about this change yet: press a to ask one")
     );
     press(&mut app, KeyCode::Char('a'));
     typed(&mut app, "why?");
@@ -507,4 +507,58 @@ fn a_follow_up_from_the_explanation_on_screen_needs_no_footer() {
         panic!("explanation");
     };
     assert_eq!(v.explanation().map(|e| e.questions.len()), Some(2));
+}
+
+#[test]
+fn a_diff_that_moves_under_the_prompt_is_asked_as_it_is_now() {
+    let (mut app, old) = showing();
+    press(&mut app, KeyCode::Char('a'));
+    typed(&mut app, "why?");
+    // The live diff refreshes while the question is written.
+    let mut now = files();
+    now[0].hunks[1].lines[1].content = "newer".to_owned();
+    app.update(Msg::Diff {
+        entry: Box::new(commit()),
+        result: Ok(now.clone()),
+        refresh: true,
+        file: None,
+    });
+    let effects = press(&mut app, KeyCode::Enter);
+    let asked = ask_of(&effects);
+    let key = diff_key(&commit(), &now);
+    assert_ne!(key, old);
+    assert_eq!((asked.key, &asked.files), (key, &now));
+    assert_eq!(panel(&app).key, key);
+    // It moves again while the agent works: no second question meanwhile.
+    press(&mut app, KeyCode::Esc);
+    app.update(Msg::Diff {
+        entry: Box::new(commit()),
+        result: Ok(files()),
+        refresh: true,
+        file: None,
+    });
+    press(&mut app, KeyCode::Char('a'));
+    assert!(app.ask.draft.is_none());
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("pi is still answering your last question about this change")
+    );
+    app.update(Msg::Answered {
+        key,
+        result: Ok(answer("Because.", Vec::new(), "src/a.rs")),
+    });
+    // The panel belongs to the change, whichever version is open now.
+    press(&mut app, KeyCode::Char('A'));
+    assert_eq!(panel(&app).answered.len(), 1);
+}
+
+#[test]
+fn hunk_jumps_drop_the_selection() {
+    let (mut app, _) = showing();
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('n'));
+    assert_eq!(diff_mut(&mut app).selection, None);
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('N'));
+    assert_eq!(diff_mut(&mut app).selection, None);
 }

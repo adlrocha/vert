@@ -374,8 +374,9 @@ impl Explainer {
     }
 
     /// Puts `asked` to the agent, running it read-only in `dir` and
-    /// tracking it in `groups`. The answer joins the questions kept for the
-    /// change, merged with any stored since `asked` was made.
+    /// tracking it in `groups`. The questions kept for the change are
+    /// replayed with those `asked` carries, so a question asked before vert
+    /// last started counts too, and the answer joins them.
     ///
     /// # Errors
     /// Returns a message for the user when the agent fails or answers
@@ -389,7 +390,21 @@ impl Explainer {
             question,
             ..
         } = asked;
-        let prompt = prompt(asked, self.max_diff_bytes);
+        // Kept first, then those `asked` holds that weren't kept (the cache
+        // may be off, or the answer still being written).
+        let mut thread = self.questions(entry, files);
+        for q in earlier {
+            if !thread.contains(q) {
+                thread.push(q.clone());
+            }
+        }
+        let prompt = prompt(
+            &Ask {
+                earlier: thread.clone(),
+                ..asked.clone()
+            },
+            self.max_diff_bytes,
+        );
         let how = agent::Run {
             access: agent::Access::ReadOnly,
             model: self.model.as_deref(),
@@ -404,8 +419,9 @@ impl Explainer {
                 .map_err(|e| format!("{}: {e}", self.agent.name()))?
         };
         if let Some(cache) = &self.cache {
+            // Merged again with what was stored while the agent worked.
             let mut all = self.questions(entry, files);
-            for q in earlier.iter().chain([&answered]) {
+            for q in thread.iter().chain([&answered]) {
                 if !all.contains(q) {
                     all.push(q.clone());
                 }
@@ -765,6 +781,28 @@ mod tests {
         let kept = ex.questions(&entry(), &files);
         assert_eq!(kept.len(), 2);
         assert!(kept.iter().all(|q| q.about.is_none()), "blank is none");
+    }
+
+    #[test]
+    fn questions_kept_from_an_earlier_run_are_replayed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ex = explainer(dir.path(), r#"cat > prompt; echo '{"answer": "Again."}'"#);
+        let store = cache::Cache::new(dir.path().join("cache"));
+        store.put(
+            thread_key(&entry(), &sample()),
+            r#"[{"question": "Kept?", "answer": "From before."}]"#,
+        );
+        // Nothing in memory: a diff opened after vert restarted.
+        let asked = Ask {
+            explanation: None,
+            earlier: Vec::new(),
+            ..asking(&explanation(), "Now?")
+        };
+        ex.ask(&asked, dir.path(), &agent::Groups::default())
+            .expect("answered");
+        let sent = std::fs::read_to_string(dir.path().join("prompt")).expect("prompt");
+        assert!(sent.contains("Q: Kept?\nA: From before."), "{sent}");
+        assert_eq!(ex.questions(&entry(), &sample()).len(), 2);
     }
 
     #[test]
