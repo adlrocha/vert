@@ -231,11 +231,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "File",
         &[
-            ("j k", "move the cursor"),
             ("n N", "next / prev change"),
-            ("v", "select from cursor, v ends"),
-            ("a f", "ask / fix (opened from a diff)"),
-            ("e", "edit at cursor"),
+            ("v a f", "as in a diff (opened from one)"),
         ],
     ),
     (
@@ -263,7 +260,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         "Change",
         &[
             ("tab h l", "files / diff pane"),
-            ("j k", "move the cursor"),
+            ("/", "find a file by name"),
             ("J K", "scroll diff"),
             ("n N", "next / prev hunk"),
             ("← →", "scroll sideways"),
@@ -1093,6 +1090,19 @@ mod render_tests {
         let s = screen(&mut app, 140, 30);
         assert!(s.contains("Files 3"), "{s}");
         assert!(s.contains("a wide change"), "{s}");
+        press(&mut app, KeyCode::Char('/'));
+        for c in "zzzz".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Files 0/3"), "{s}");
+        assert!(s.contains("/ zzzz_"), "{s}");
+        assert!(s.contains("No files match"), "{s}");
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Char('G'));
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Char('J'));

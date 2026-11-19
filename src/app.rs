@@ -429,6 +429,62 @@ pub struct DetailView {
     pub rendered: RenderedDiff,
     /// Lines selected in the diff pane (`v`), if any.
     pub selection: Option<Selection>,
+    /// Narrows the file list to the paths that fuzzily match it (`/`).
+    pub filter: String,
+    /// Whether the filter is being typed.
+    pub filter_editing: bool,
+}
+
+impl DetailView {
+    /// Indices of the files the filter shows, in order: every file when it
+    /// is empty.
+    #[must_use]
+    pub fn shown(&self) -> Vec<usize> {
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| crate::search::fuzzy_match(&f.stat.path, &self.filter))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Where the selected file sits among those [`DetailView::shown`]:
+    /// the list position to draw and move from.
+    #[must_use]
+    pub fn shown_pos(&self, shown: &[usize]) -> ListPos {
+        ListPos {
+            selected: shown
+                .iter()
+                .position(|&i| i == self.pos.selected)
+                .unwrap_or(0),
+            ..self.pos
+        }
+    }
+
+    /// Moves the file selection among the files shown for `key`; returns
+    /// whether `key` was a move.
+    fn navigate_files(&mut self, key: &KeyEvent) -> bool {
+        let shown = self.shown();
+        let mut pos = self.shown_pos(&shown);
+        if !pos.navigate(key, shown.len()) {
+            return false;
+        }
+        if let Some(&i) = shown.get(pos.selected) {
+            self.pos.selected = i;
+        }
+        true
+    }
+
+    /// The file shown after (`forward`) or before the selected one.
+    fn next_shown(&self, forward: bool) -> Option<usize> {
+        let shown = self.shown();
+        let selected = self.pos.selected;
+        if forward {
+            shown.into_iter().find(|&i| i > selected)
+        } else {
+            shown.into_iter().rev().find(|&i| i < selected)
+        }
+    }
 }
 
 /// What `a` and `f` in the file viewer act on (see [`App::file_pick`]).
@@ -1089,6 +1145,8 @@ impl App {
             height: 0,
             rendered,
             selection: None,
+            filter: String::new(),
+            filter_editing: false,
         })));
     }
 
@@ -1190,10 +1248,15 @@ impl App {
         if self.agents.picker.is_some() {
             return self.on_picker_key(&key);
         }
-        // Everywhere but where text is typed (search, the name filter).
-        let typing = self.views.is_empty()
-            && (self.tab == Tab::Search
-                || (self.tab == Tab::Branches && self.branches.filter_editing));
+        // Everywhere but where text is typed (search, the name filters).
+        let typing = match self.views.last() {
+            Some(View::Detail(d)) => d.filter_editing,
+            Some(_) => false,
+            None => {
+                self.tab == Tab::Search
+                    || (self.tab == Tab::Branches && self.branches.filter_editing)
+            }
+        };
         if key.code == KeyCode::Char('M') && !typing {
             return self.open_picker();
         }
@@ -1478,6 +1541,21 @@ impl App {
     }
 
     fn on_view_key(&mut self, key: &KeyEvent) -> Vec<Effect> {
+        let max = self.max_highlight;
+        if let Some(View::Detail(d)) = self.views.last_mut()
+            && d.filter_editing
+        {
+            return detail_filter_key(d, key, max);
+        }
+        if key.code == KeyCode::Esc
+            && let Some(View::Detail(d)) = self.views.last_mut()
+            && d.selection.is_none()
+            && !d.filter.is_empty()
+        {
+            // Back to every file before leaving the diff.
+            d.filter.clear();
+            return Vec::new();
+        }
         if key.code == KeyCode::Esc {
             let selection = match self.views.last_mut() {
                 Some(View::Detail(d)) => Some(&mut d.selection),
@@ -1505,7 +1583,6 @@ impl App {
             self.help = true;
             return Vec::new();
         }
-        let max = self.max_highlight;
         match self.views.last_mut() {
             Some(View::Detail(_)) if key.code == KeyCode::Char('x') => self.open_explain(),
             Some(View::Detail(_)) if key.code == KeyCode::Char('f') => self.draft_fix_from_detail(),
@@ -1690,16 +1767,16 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
             if let Some(&next) = d.rendered.hunk_starts.iter().find(|&&s| s > d.cursor) {
                 d.scroll = next.min(max_scroll);
                 d.pane().move_to(next);
-            } else if d.pos.selected + 1 < d.files.len() {
-                d.pos.selected += 1;
+            } else if let Some(next) = d.next_shown(true) {
+                d.pos.selected = next;
             }
         }
         (KeyCode::Char('N' | '['), _) => {
             if let Some(&prev) = d.rendered.hunk_starts.iter().rev().find(|&&s| s < d.cursor) {
                 d.scroll = prev.min(max_scroll);
                 d.pane().move_to(prev);
-            } else if d.cursor == 0 && d.pos.selected > 0 {
-                d.pos.selected -= 1;
+            } else if let Some(prev) = d.next_shown(false).filter(|_| d.cursor == 0) {
+                d.pos.selected = prev;
             } else {
                 d.scroll = 0;
                 d.pane().move_to(0);
@@ -1722,8 +1799,12 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
                 vec![Effect::Edit { path, line, root }]
             });
         }
+        (KeyCode::Char('/'), _) => {
+            d.filter_editing = true;
+            d.focus = Focus::Files;
+        }
         (_, Focus::Files) => {
-            d.pos.navigate(key, d.files.len());
+            d.navigate_files(key);
         }
         _ => {}
     }
@@ -1732,6 +1813,12 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
         // `f` are about the whole file.
         d.selection = None;
     }
+    file_changed(d, previous, max_highlight);
+    Vec::new()
+}
+
+/// Shows the selected file's diff from its top if it isn't file `previous`.
+fn file_changed(d: &mut DetailView, previous: usize, max_highlight: usize) {
     if d.pos.selected != previous {
         d.scroll = 0;
         d.cursor = 0;
@@ -1743,6 +1830,47 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
             .map(|f| build_diff(f, max_highlight))
             .unwrap_or_default();
     }
+}
+
+/// Keys while the file filter (`/`) is typed: characters narrow the file
+/// list and select its first match, list moves still act, `⏎` goes to the
+/// selected file's diff and `esc` stops typing, keeping the filter.
+fn detail_filter_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<Effect> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let previous = d.pos.selected;
+    let nav = matches!(
+        key.code,
+        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+    ) || (ctrl && matches!(key.code, KeyCode::Char('n' | 'p' | 'j' | 'k' | 'd')));
+    if nav {
+        d.navigate_files(key);
+    } else {
+        match key.code {
+            KeyCode::Esc => d.filter_editing = false,
+            KeyCode::Enter => {
+                d.filter_editing = false;
+                if !d.shown().is_empty() {
+                    d.focus = Focus::Diff;
+                }
+            }
+            KeyCode::Backspace => {
+                d.filter.pop();
+            }
+            KeyCode::Char('u') if ctrl => d.filter.clear(),
+            KeyCode::Char('w') if ctrl => {
+                delete_word(&mut d.filter, |c| c == '/' || c.is_whitespace());
+            }
+            KeyCode::Char(c) if !ctrl => d.filter.push(c),
+            _ => return Vec::new(),
+        }
+        if !matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            d.pos.offset = 0;
+            if let Some(&first) = d.shown().first() {
+                d.pos.selected = first;
+            }
+        }
+    }
+    file_changed(d, previous, max_highlight);
     Vec::new()
 }
 

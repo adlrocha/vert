@@ -18,6 +18,7 @@ use crate::theme;
 /// Footer hints for the detail view.
 pub const DETAIL_HINTS: Hints = &[
     ("tab", "pane"),
+    ("/", "find file"),
     ("v", "select"),
     ("n/N", "hunk"),
     ("⏎", "view file"),
@@ -265,34 +266,7 @@ pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i
     let [files_area, diff_area] =
         Layout::horizontal([Constraint::Length(files_w), Constraint::Min(10)]).areas(panes);
 
-    let block = panel(d.focus == Focus::Files).title(Line::from(vec![
-        Span::raw(" Files "),
-        Span::styled(format!("{} ", d.files.len()), theme::muted()),
-    ]));
-    let inner = block.inner(files_area);
-    frame.render_widget(block, files_area);
-    let height = usize::from(inner.height);
-    let offset = d.pos.scrolled(height, d.files.len());
-    let rows: Vec<Line<'_>> = d
-        .files
-        .iter()
-        .enumerate()
-        .skip(offset)
-        .take(height)
-        .map(|(i, f)| {
-            let s = &f.stat;
-            file_row(
-                &s.path,
-                s.status,
-                s.added,
-                s.removed,
-                s.binary,
-                usize::from(inner.width),
-                i == d.pos.selected,
-            )
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(rows), inner);
+    draw_file_list(frame, files_area, d);
 
     let Some(file) = d.files.get(d.pos.selected) else {
         let block = panel(false);
@@ -345,6 +319,60 @@ pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i
         0,
         d.hscroll,
     );
+}
+
+/// Draws the change's file list, narrowed by the filter (`/`).
+fn draw_file_list(frame: &mut Frame<'_>, files_area: Rect, d: &mut DetailView) {
+    let shown = d.shown();
+    let count = if shown.len() == d.files.len() {
+        format!("{} ", d.files.len())
+    } else {
+        format!("{}/{} ", shown.len(), d.files.len())
+    };
+    let mut block = panel(d.focus == Focus::Files).title(Line::from(vec![
+        Span::raw(" Files "),
+        Span::styled(count, theme::muted()),
+    ]));
+    if d.filter_editing || !d.filter.is_empty() {
+        let cursor = if d.filter_editing { "_" } else { "" };
+        block = block.title_bottom(Line::from(Span::styled(
+            format!(" / {}{cursor} ", sanitize(&d.filter)),
+            theme::accent_bold(),
+        )));
+    }
+    let inner = block.inner(files_area);
+    frame.render_widget(block, files_area);
+    let height = usize::from(inner.height);
+    let mut pos = d.shown_pos(&shown);
+    let offset = pos.scrolled(height, shown.len());
+    d.pos.offset = pos.offset;
+    d.pos.height = pos.height;
+    if shown.is_empty() && !d.files.is_empty() {
+        empty_state(
+            frame,
+            inner,
+            "No files match",
+            "esc stops typing, ctrl-u clears",
+        );
+    }
+    let rows: Vec<Line<'_>> = shown
+        .iter()
+        .skip(offset)
+        .take(height)
+        .map(|&i| {
+            let s = &d.files[i].stat;
+            file_row(
+                &s.path,
+                s.status,
+                s.added,
+                s.removed,
+                s.binary,
+                usize::from(inner.width),
+                i == d.pos.selected,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
 }
 
 /// What the selection holds and the keys for it, for a pane's bottom

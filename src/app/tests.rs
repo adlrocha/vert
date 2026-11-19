@@ -596,6 +596,94 @@ fn detail_view_navigation() {
 }
 
 #[test]
+fn slash_in_a_diff_finds_files_by_name() {
+    let mut app = loaded();
+    app.update(Msg::Diff {
+        entry: Box::new(entry("c3", 9_000, &["src/a.rs", "docs/x.md", "src/b.rs"])),
+        result: Ok(vec![
+            file_diff("src/a.rs"),
+            file_diff("docs/x.md"),
+            file_diff("src/b.rs"),
+        ]),
+        refresh: false,
+        file: None,
+    });
+    let detail = |app: &App| match app.views.last() {
+        Some(View::Detail(d)) => (d.pos.selected, d.shown(), d.focus, d.filter_editing),
+        _ => panic!("not in detail"),
+    };
+    app.update(key(KeyCode::Tab));
+    app.update(ch('/'));
+    assert_eq!(detail(&app), (0, vec![0, 1, 2], Focus::Files, true));
+    // Keys type, even those bound elsewhere; the first match is selected.
+    app.update(ch('M'));
+    assert!(app.agents.picker.is_none(), "M types");
+    app.update(key(KeyCode::Backspace));
+    for c in "xq".chars() {
+        app.update(ch(c));
+    }
+    assert_eq!(detail(&app).1, Vec::<usize>::new(), "nothing matches xq");
+    app.update(key(KeyCode::Backspace));
+    assert_eq!(detail(&app).0..=detail(&app).0, 1..=1, "docs/x.md");
+    app.update(ctrl('u'));
+    for c in "rs".chars() {
+        app.update(ch(c));
+    }
+    assert_eq!(detail(&app).1, vec![0, 2]);
+    assert_eq!(detail(&app).0, 0);
+    // Moves go among the matches.
+    app.update(key(KeyCode::Down));
+    assert_eq!(detail(&app).0, 2, "skips docs/x.md");
+    app.update(key(KeyCode::Up));
+    app.update(ctrl('w'));
+    assert_eq!(detail(&app).1, vec![0, 1, 2], "ctrl-w deleted the word");
+    for c in "src/b".chars() {
+        app.update(ch(c));
+    }
+    app.update(ctrl('w'));
+    let Some(View::Detail(d)) = app.views.last() else {
+        panic!("detail")
+    };
+    assert_eq!(d.filter, "src/", "back to the slash");
+    app.update(ch('a'));
+    // ⏎ goes to the file's diff, keeping the filter.
+    app.update(key(KeyCode::Enter));
+    assert_eq!(detail(&app), (0, vec![0], Focus::Diff, false));
+    // n and N go only to files shown.
+    app.update(key(KeyCode::Tab));
+    app.update(ch('/'));
+    app.update(key(KeyCode::Backspace));
+    app.update(ch('b'));
+    app.update(key(KeyCode::Esc));
+    assert_eq!(detail(&app), (2, vec![2], Focus::Files, false));
+    app.update(key(KeyCode::Tab));
+    app.update(ch('N'));
+    assert_eq!(detail(&app).0, 2, "no shown file before it");
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("detail")
+    };
+    "rs".clone_into(&mut d.filter);
+    app.update(ch('N'));
+    assert_eq!(detail(&app).0, 0, "N skips docs/x.md");
+    app.update(ch('G'));
+    app.update(ch('n'));
+    assert_eq!(detail(&app).0, 2, "n skips docs/x.md");
+    // In the file list, j and k go among the matches too.
+    app.update(key(KeyCode::Tab));
+    app.update(ch('k'));
+    assert_eq!(detail(&app).0, 0);
+    // An unbound key while typing does nothing.
+    app.update(ch('/'));
+    assert_eq!(app.update(ctrl('x')), []);
+    app.update(key(KeyCode::Enter));
+    // esc clears the filter before it leaves the diff.
+    app.update(key(KeyCode::Esc));
+    assert_eq!(detail(&app).1, vec![0, 1, 2]);
+    app.update(key(KeyCode::Esc));
+    assert!(app.views.is_empty());
+}
+
+#[test]
 fn diff_errors_become_notices() {
     let mut app = loaded();
     app.update(Msg::Diff {
