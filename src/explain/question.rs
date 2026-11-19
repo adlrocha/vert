@@ -55,7 +55,9 @@ pub struct About {
     /// selected (`src/a.rs:10-14`), or a whole file.
     pub place: String,
     /// The lines selected, in diff form under their hunks' headers (see
-    /// [`crate::fix::picked`]); empty for a whole file.
+    /// [`crate::fix::picked`]), or picked in the file viewer as they are on
+    /// disk, under a `@@ path:N-M, as on disk @@` header (see
+    /// [`crate::fix::file_lines`]); empty for a whole file.
     pub excerpt: String,
 }
 

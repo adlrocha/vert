@@ -296,6 +296,19 @@ impl App {
         Vec::new()
     }
 
+    /// `f` in the file viewer opened from a diff: feedback on the lines
+    /// selected with `v`, else on the whole file.
+    pub(super) fn draft_fix_from_file(&mut self) -> Vec<Effect> {
+        if let Some(pick) = self.file_pick() {
+            let (place, excerpt) = pick.lines.unwrap_or_else(|| {
+                let excerpt = pick.file.map(|f| excerpt(&f, None)).unwrap_or_default();
+                (pick.path, excerpt)
+            });
+            self.start_draft(&pick.entry, Some(place), excerpt, String::new(), None);
+        }
+        Vec::new()
+    }
+
     /// `f` in an explanation: feedback on the concerns marked with `space`,
     /// all in one request; else on the selected code pointer, prefilled with
     /// the selected concern.

@@ -9,7 +9,7 @@ use ratatui::widgets::Paragraph;
 use super::feed::{chips, file_row};
 use super::{Hints, empty_state, module_list, panel, plural, spans_width, stat_spans, truncate};
 use crate::age::ago;
-use crate::app::{DetailView, FileView, Focus};
+use crate::app::{DetailView, FileView, Focus, Selection};
 use crate::git::Target;
 use crate::git::diff::{FileDiff, LineKind};
 use crate::highlight::{Highlighter, sanitize};
@@ -18,6 +18,7 @@ use crate::theme;
 /// Footer hints for the detail view.
 pub const DETAIL_HINTS: Hints = &[
     ("tab", "pane"),
+    ("/", "find file"),
     ("v", "select"),
     ("n/N", "hunk"),
     ("⏎", "view file"),
@@ -30,9 +31,11 @@ pub const DETAIL_HINTS: Hints = &[
 
 /// Footer hints for the file viewer.
 pub const FILE_HINTS: Hints = &[
-    ("j/k", "scroll"),
-    ("ctrl-d/u", "page"),
+    ("j/k", "move"),
+    ("v", "select"),
     ("n/N", "next change"),
+    ("a", "ask"),
+    ("f", "fix"),
     ("e", "edit"),
     ("esc", "back"),
 ];
@@ -263,34 +266,7 @@ pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i
     let [files_area, diff_area] =
         Layout::horizontal([Constraint::Length(files_w), Constraint::Min(10)]).areas(panes);
 
-    let block = panel(d.focus == Focus::Files).title(Line::from(vec![
-        Span::raw(" Files "),
-        Span::styled(format!("{} ", d.files.len()), theme::muted()),
-    ]));
-    let inner = block.inner(files_area);
-    frame.render_widget(block, files_area);
-    let height = usize::from(inner.height);
-    let offset = d.pos.scrolled(height, d.files.len());
-    let rows: Vec<Line<'_>> = d
-        .files
-        .iter()
-        .enumerate()
-        .skip(offset)
-        .take(height)
-        .map(|(i, f)| {
-            let s = &f.stat;
-            file_row(
-                &s.path,
-                s.status,
-                s.added,
-                s.removed,
-                s.binary,
-                usize::from(inner.width),
-                i == d.pos.selected,
-            )
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(rows), inner);
+    draw_file_list(frame, files_area, d);
 
     let Some(file) = d.files.get(d.pos.selected) else {
         let block = panel(false);
@@ -305,7 +281,7 @@ pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i
     }
     let position = format!(
         " {}/{} ",
-        (d.scroll + 1).min(d.rendered.len()),
+        (d.cursor + 1).min(d.rendered.len()),
         d.rendered.len()
     );
     let mut block = panel(d.focus == Focus::Diff)
@@ -313,15 +289,8 @@ pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i
         .title_bottom(
             Line::from(Span::styled(position, theme::muted())).alignment(Alignment::Right),
         );
-    if let Some(selection) = d.selection {
-        let (first, last) = selection.rows();
-        block = block.title_bottom(Line::from(vec![
-            Span::styled(
-                format!(" {} selected", plural(last - first + 1, "row")),
-                theme::accent_bold(),
-            ),
-            Span::styled(" · a ask · f fix · esc clear ", theme::muted()),
-        ]));
+    if let Some(hint) = selection_hint(d.selection, "row") {
+        block = block.title_bottom(hint);
     }
     let inner = block.inner(diff_area);
     frame.render_widget(block, diff_area);
@@ -336,10 +305,9 @@ pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i
     let gutter = visible(&d.rendered.gutter)
         .into_iter()
         .zip(rows.clone())
-        .map(|(line, row)| match d.selection {
-            Some(s) if row == s.cursor => line.patch_style(theme::cursor()),
-            Some(s) if s.contains(row) => line.patch_style(theme::selected()),
-            _ => line,
+        .map(|(line, row)| {
+            let cursor = (d.focus == Focus::Diff).then_some(d.cursor);
+            mark_row(line, row, cursor, d.selection)
         })
         .collect::<Vec<_>>();
     render_columns(
@@ -351,6 +319,95 @@ pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i
         0,
         d.hscroll,
     );
+}
+
+/// Draws the change's file list, narrowed by the filter (`/`).
+fn draw_file_list(frame: &mut Frame<'_>, files_area: Rect, d: &mut DetailView) {
+    let shown = d.shown();
+    let count = if shown.len() == d.files.len() {
+        format!("{} ", d.files.len())
+    } else {
+        format!("{}/{} ", shown.len(), d.files.len())
+    };
+    let mut block = panel(d.focus == Focus::Files).title(Line::from(vec![
+        Span::raw(" Files "),
+        Span::styled(count, theme::muted()),
+    ]));
+    if d.filter_editing || !d.filter.is_empty() {
+        let cursor = if d.filter_editing { "_" } else { "" };
+        block = block.title_bottom(Line::from(Span::styled(
+            format!(" / {}{cursor} ", sanitize(&d.filter)),
+            theme::accent_bold(),
+        )));
+    }
+    let inner = block.inner(files_area);
+    frame.render_widget(block, files_area);
+    let height = usize::from(inner.height);
+    let mut pos = d.shown_pos(&shown);
+    let offset = pos.scrolled(height, shown.len());
+    d.pos.offset = pos.offset;
+    d.pos.height = pos.height;
+    if shown.is_empty() && !d.files.is_empty() {
+        empty_state(
+            frame,
+            inner,
+            "No files match",
+            "esc stops typing, ctrl-u clears",
+        );
+    }
+    let rows: Vec<Line<'_>> = shown
+        .iter()
+        .skip(offset)
+        .take(height)
+        .map(|&i| {
+            let s = &d.files[i].stat;
+            file_row(
+                &s.path,
+                s.status,
+                s.added,
+                s.removed,
+                s.binary,
+                usize::from(inner.width),
+                i == d.pos.selected,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// What the selection holds and the keys for it, for a pane's bottom
+/// border, counting `unit`s; `None` with nothing selected.
+fn selection_hint(selection: Option<Selection>, unit: &str) -> Option<Line<'static>> {
+    let s = selection?;
+    let (first, last) = s.rows();
+    let keys = if s.open {
+        " · v end · a ask · f fix · esc clear "
+    } else {
+        " · a ask · f fix · esc clear "
+    };
+    Some(Line::from(vec![
+        Span::styled(
+            format!(" {} selected", plural(last - first + 1, unit)),
+            theme::accent_bold(),
+        ),
+        Span::styled(keys, theme::muted()),
+    ]))
+}
+
+/// The gutter of `row`, marked when the cursor is on it or it is selected.
+fn mark_row(
+    line: Line<'static>,
+    row: usize,
+    cursor: Option<usize>,
+    selection: Option<Selection>,
+) -> Line<'static> {
+    if cursor == Some(row) {
+        line.patch_style(theme::cursor())
+    } else if selection.is_some_and(|s| s.contains(row)) {
+        line.patch_style(theme::selected())
+    } else {
+        line
+    }
 }
 
 fn render_columns(
@@ -438,12 +495,15 @@ pub fn draw_file(frame: &mut Frame<'_>, area: Rect, f: &mut FileView) {
         ));
     }
     bottom.push(Span::styled(
-        format!("{}/{} ", (f.scroll + 1).min(total), total),
+        format!("{}/{} ", (f.cursor + 1).min(total), total),
         theme::muted(),
     ));
-    let block = panel(true)
+    let mut block = panel(true)
         .title(Line::from(title))
         .title_bottom(Line::from(bottom).alignment(Alignment::Right));
+    if let Some(hint) = selection_hint(f.selection, "line") {
+        block = block.title_bottom(hint);
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     f.height = usize::from(inner.height);
@@ -472,11 +532,16 @@ pub fn draw_file(frame: &mut Frame<'_>, area: Rect, f: &mut FileView) {
                 theme::muted()
             };
             let pointer = if n == target { "›" } else { " " };
-            let gutter = Line::from(vec![
-                mark,
-                Span::styled(format!("{n:>w$}"), num_style),
-                Span::styled(format!(" {pointer} "), theme::accent()),
-            ]);
+            let gutter = mark_row(
+                Line::from(vec![
+                    mark,
+                    Span::styled(format!("{n:>w$}"), num_style),
+                    Span::styled(format!(" {pointer} "), theme::accent()),
+                ]),
+                i,
+                Some(f.cursor),
+                f.selection,
+            );
             let code = Line::from(
                 frags
                     .iter()

@@ -344,27 +344,34 @@ impl SearchState {
     }
 }
 
-/// Rows of the diff pane selected with `v`, for `a` and `f` to be about:
-/// every row from `anchor` to `cursor`, both included.
+/// Rows selected with `v` in a view with a cursor (the diff pane, the file
+/// viewer), for `a` and `f` to be about: every row from `anchor` to `end`,
+/// both included.
+///
+/// The first `v` starts a selection at the cursor and leaves it open: the
+/// end follows the cursor. The second `v` closes it there, so the cursor
+/// moves on without changing what is selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
     /// The row the selection started at.
     pub anchor: usize,
-    /// The row the cursor is on; `j`/`k` move it.
-    pub cursor: usize,
+    /// The row it ends at: the cursor's, while it is open.
+    pub end: usize,
+    /// Whether the end still follows the cursor.
+    pub open: bool,
 }
 
 impl Selection {
     /// The first and last selected rows.
     ///
     /// ```
-    /// let s = vert::app::Selection { anchor: 7, cursor: 3 };
+    /// let s = vert::app::Selection { anchor: 7, end: 3, open: false };
     /// assert_eq!(s.rows(), (3, 7));
     /// assert!(s.contains(5) && !s.contains(8));
     /// ```
     #[must_use]
     pub fn rows(self) -> (usize, usize) {
-        (self.anchor.min(self.cursor), self.anchor.max(self.cursor))
+        (self.anchor.min(self.end), self.anchor.max(self.end))
     }
 
     /// Whether `row` is selected.
@@ -372,6 +379,30 @@ impl Selection {
     pub fn contains(self, row: usize) -> bool {
         let (first, last) = self.rows();
         (first..=last).contains(&row)
+    }
+
+    /// `v` with the cursor at `cursor`: closes an open selection there, or
+    /// starts a new one, replacing a closed one.
+    fn toggled(selection: Option<Self>, cursor: usize) -> Self {
+        match selection {
+            Some(s) if s.open => Self {
+                end: cursor,
+                open: false,
+                ..s
+            },
+            _ => Self {
+                anchor: cursor,
+                end: cursor,
+                open: true,
+            },
+        }
+    }
+
+    /// The cursor moved to `cursor`: an open selection's end follows it.
+    fn follow(selection: &mut Option<Self>, cursor: usize) {
+        if let Some(s) = selection.as_mut().filter(|s| s.open) {
+            s.end = cursor;
+        }
     }
 }
 
@@ -388,6 +419,8 @@ pub struct DetailView {
     pub focus: Focus,
     /// First visible diff line.
     pub scroll: usize,
+    /// The diff pane's cursor: the row `j`/`k` move and `v` selects from.
+    pub cursor: usize,
     /// Horizontal scroll in columns.
     pub hscroll: usize,
     /// Visible diff lines in the last frame.
@@ -396,6 +429,87 @@ pub struct DetailView {
     pub rendered: RenderedDiff,
     /// Lines selected in the diff pane (`v`), if any.
     pub selection: Option<Selection>,
+    /// Narrows the file list to the paths that fuzzily match it (`/`).
+    pub filter: String,
+    /// Whether the filter is being typed.
+    pub filter_editing: bool,
+}
+
+impl DetailView {
+    /// Indices of the files the filter shows, in order: every file when it
+    /// is empty.
+    #[must_use]
+    pub fn shown(&self) -> Vec<usize> {
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| crate::search::fuzzy_match(&f.stat.path, &self.filter))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Where the selected file sits among those [`DetailView::shown`]:
+    /// the list position to draw and move from.
+    #[must_use]
+    pub fn shown_pos(&self, shown: &[usize]) -> ListPos {
+        ListPos {
+            selected: shown
+                .iter()
+                .position(|&i| i == self.pos.selected)
+                .unwrap_or(0),
+            ..self.pos
+        }
+    }
+
+    /// Moves the file selection among the files shown for `key`; returns
+    /// whether `key` was a move.
+    fn navigate_files(&mut self, key: &KeyEvent) -> bool {
+        let shown = self.shown();
+        let mut pos = self.shown_pos(&shown);
+        if !pos.navigate(key, shown.len()) {
+            return false;
+        }
+        if let Some(&i) = shown.get(pos.selected) {
+            self.pos.selected = i;
+        }
+        true
+    }
+
+    /// Clears the filter when it hides the selected file, so the list
+    /// always shows the file whose diff is open.
+    fn reveal(&mut self) {
+        if !self.shown().contains(&self.pos.selected) {
+            self.filter.clear();
+        }
+    }
+
+    /// The file shown after (`forward`) or before the selected one.
+    fn next_shown(&self, forward: bool) -> Option<usize> {
+        let shown = self.shown();
+        let selected = self.pos.selected;
+        if forward {
+            shown.into_iter().find(|&i| i > selected)
+        } else {
+            shown.into_iter().rev().find(|&i| i < selected)
+        }
+    }
+}
+
+/// Why `a`, `f` and `A` in a file opened from search or hotspots do nothing.
+const NO_CHANGE: &str = "Open the file from a change's diff (⏎) to ask or fix about it";
+
+/// What `a` and `f` in the file viewer act on (see [`App::file_pick`]).
+struct FilePick {
+    /// The change the file was opened from.
+    entry: Entry,
+    /// Its diff.
+    files: Vec<FileDiff>,
+    /// The file's diff in it, if it has one.
+    file: Option<FileDiff>,
+    /// The file.
+    path: String,
+    /// The place and excerpt of the lines selected, if any.
+    lines: Option<(String, String)>,
 }
 
 /// The file viewer.
@@ -405,14 +519,22 @@ pub struct FileView {
     pub path: String,
     /// Detected language name.
     pub language: String,
-    /// Highlighted lines.
+    /// Highlighted lines, for drawing.
     pub lines: Vec<Vec<Fragment>>,
+    /// The lines as they are in the file, for the agent (`a`, `f`): the
+    /// highlighted ones are made safe to draw, with tabs expanded.
+    pub text: Vec<String>,
     /// Line (1-based) to emphasise.
     pub target: u32,
     /// Lines (1-based) added by the change the file was opened from.
     pub marks: BTreeSet<u32>,
     /// First visible line (0-based).
     pub scroll: usize,
+    /// The cursor's line (0-based): the line `j`/`k` move and `v` selects
+    /// from.
+    pub cursor: usize,
+    /// Lines selected (`v`), if any, as 0-based rows.
+    pub selection: Option<Selection>,
     /// Horizontal scroll in columns.
     pub hscroll: usize,
     /// Visible lines in the last frame.
@@ -1032,10 +1154,13 @@ impl App {
             },
             focus: Focus::Files,
             scroll: 0,
+            cursor: 0,
             hscroll: 0,
             height: 0,
             rendered,
             selection: None,
+            filter: String::new(),
+            filter_editing: false,
         })));
     }
 
@@ -1062,7 +1187,9 @@ impl App {
                 .map(|f| build_diff(f, max))
                 .unwrap_or_default();
             d.scroll = d.scroll.min(max_scroll(d.rendered.len(), d.height));
+            d.cursor = d.cursor.min(d.rendered.len().saturating_sub(1));
             d.entry = entry;
+            d.reveal();
         }
     }
 
@@ -1075,23 +1202,32 @@ impl App {
         root: Option<PathBuf>,
     ) {
         let h = Highlighter::global();
-        let (lines, notice, language) = match content {
-            Ok(text) => {
-                let raw: Vec<&str> = text.lines().collect();
+        let (lines, text, notice, language) = match content {
+            Ok(content) => {
+                let raw: Vec<&str> = content.lines().collect();
                 let language = h.language(&path, raw.first().copied()).to_owned();
-                (h.highlight(&path, &raw, self.max_highlight), None, language)
+                let lines = h.highlight(&path, &raw, self.max_highlight);
+                let text = raw.into_iter().map(str::to_owned).collect();
+                (lines, text, None, language)
             }
-            Err(notice) => (Vec::new(), Some(notice), String::new()),
+            Err(notice) => (Vec::new(), Vec::new(), Some(notice), String::new()),
         };
         let target = line.max(1);
         let scroll = usize::try_from(target).unwrap_or(0).saturating_sub(4);
+        // The cursor starts on the line the file was opened at.
+        let cursor = usize::try_from(target - 1)
+            .unwrap_or(0)
+            .min(lines.len().saturating_sub(1));
         self.views.push(View::File(Box::new(FileView {
             path,
             language,
             lines,
+            text,
             target,
             marks,
             scroll,
+            cursor,
+            selection: None,
             hscroll: 0,
             height: 0,
             notice,
@@ -1130,10 +1266,15 @@ impl App {
         if self.agents.picker.is_some() {
             return self.on_picker_key(&key);
         }
-        // Everywhere but where text is typed (search, the name filter).
-        let typing = self.views.is_empty()
-            && (self.tab == Tab::Search
-                || (self.tab == Tab::Branches && self.branches.filter_editing));
+        // Everywhere but where text is typed (search, the name filters).
+        let typing = match self.views.last() {
+            Some(View::Detail(d)) => d.filter_editing,
+            Some(_) => false,
+            None => {
+                self.tab == Tab::Search
+                    || (self.tab == Tab::Branches && self.branches.filter_editing)
+            }
+        };
         if key.code == KeyCode::Char('M') && !typing {
             return self.open_picker();
         }
@@ -1395,12 +1536,52 @@ impl App {
         }
     }
 
+    /// What `a` and `f` in the file viewer act on: the change whose diff
+    /// the file was opened from (`⏎` there), right under the viewer, and
+    /// the lines selected. Says why not when the file wasn't opened from a
+    /// diff (search, hotspots): there is no change to ask about.
+    fn file_pick(&mut self) -> Option<FilePick> {
+        let pick = match self.views.as_slice() {
+            [.., View::Detail(d), View::File(f)] => Some(FilePick {
+                entry: d.entry.clone(),
+                file: d.files.iter().find(|x| x.stat.path == f.path).cloned(),
+                files: d.files.clone(),
+                path: f.path.clone(),
+                lines: selected_file_lines(f),
+            }),
+            _ => None,
+        };
+        if pick.is_none() {
+            self.notice = Some(NO_CHANGE.to_owned());
+        }
+        pick
+    }
+
     fn on_view_key(&mut self, key: &KeyEvent) -> Vec<Effect> {
+        let max = self.max_highlight;
+        if let Some(View::Detail(d)) = self.views.last_mut()
+            && d.filter_editing
+        {
+            return detail_filter_key(d, key, max);
+        }
         if key.code == KeyCode::Esc
             && let Some(View::Detail(d)) = self.views.last_mut()
-            && d.selection.take().is_some()
+            && d.selection.is_none()
+            && !d.filter.is_empty()
         {
+            // Back to every file before leaving the diff.
+            d.filter.clear();
             return Vec::new();
+        }
+        if key.code == KeyCode::Esc {
+            let selection = match self.views.last_mut() {
+                Some(View::Detail(d)) => Some(&mut d.selection),
+                Some(View::File(f)) => Some(&mut f.selection),
+                _ => None,
+            };
+            if selection.and_then(Option::take).is_some() {
+                return Vec::new();
+            }
         }
         if matches!(
             key.code,
@@ -1419,12 +1600,22 @@ impl App {
             self.help = true;
             return Vec::new();
         }
-        let max = self.max_highlight;
         match self.views.last_mut() {
             Some(View::Detail(_)) if key.code == KeyCode::Char('x') => self.open_explain(),
             Some(View::Detail(_)) if key.code == KeyCode::Char('f') => self.draft_fix_from_detail(),
             Some(View::Detail(_)) if key.code == KeyCode::Char('a') => self.draft_ask_from_detail(),
             Some(View::Detail(_)) if key.code == KeyCode::Char('A') => self.reopen_answers(),
+            Some(View::File(_)) if key.code == KeyCode::Char('A') => {
+                // Only a file opened from a diff has answers to bring back.
+                if matches!(self.views.as_slice(), [.., View::Detail(_), View::File(_)]) {
+                    self.reopen_answers()
+                } else {
+                    self.notice = Some(NO_CHANGE.to_owned());
+                    Vec::new()
+                }
+            }
+            Some(View::File(_)) if key.code == KeyCode::Char('a') => self.draft_ask_from_file(),
+            Some(View::File(_)) if key.code == KeyCode::Char('f') => self.draft_fix_from_file(),
             Some(View::Explain(_)) if key.code == KeyCode::Char('f') => {
                 self.draft_fix_from_explain()
             }
@@ -1462,59 +1653,123 @@ fn scroll_by(value: usize, delta: isize, max: usize) -> usize {
     value.saturating_add_signed(delta).min(max)
 }
 
-/// Moves the cursor of a selection in the diff pane (`v`) for `key`, and
-/// scrolls to keep it in view; returns whether `key` moved it.
-fn move_selection(d: &mut DetailView, key: &KeyEvent) -> bool {
-    let Some(selection) = d.selection.as_mut() else {
-        return false;
-    };
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let half = isize::try_from(half_page(d.height)).unwrap_or(1);
-    let last = d.rendered.len().saturating_sub(1);
-    let by = |delta: isize| selection.cursor.saturating_add_signed(delta);
-    let row = match key.code {
-        KeyCode::Down | KeyCode::Char('j') if !ctrl => by(1),
-        KeyCode::Up | KeyCode::Char('k') if !ctrl => by(-1),
-        KeyCode::Char('d') if ctrl => by(half),
-        KeyCode::Char('u') if ctrl => by(-half),
-        KeyCode::PageDown => by(half * 2),
-        KeyCode::PageUp => by(-half * 2),
-        KeyCode::Char('g') | KeyCode::Home => 0,
-        KeyCode::Char('G') | KeyCode::End => last,
-        _ => return false,
-    };
-    selection.cursor = row.min(last);
-    let cursor = selection.cursor;
-    if cursor < d.scroll {
-        d.scroll = cursor;
-    } else if d.height > 0 && cursor >= d.scroll + d.height {
-        d.scroll = cursor + 1 - d.height;
+/// The scroll that keeps row `cursor` in a view of `height` rows that
+/// starts at `scroll`.
+const fn follow(cursor: usize, scroll: usize, height: usize) -> usize {
+    if cursor < scroll {
+        cursor
+    } else if height > 0 && cursor >= scroll + height {
+        cursor + 1 - height
+    } else {
+        scroll
     }
-    true
+}
+
+/// A view with a cursor over `len` rows, `height` of them visible from
+/// `scroll`: the diff pane or the file viewer.
+struct CursorView<'a> {
+    len: usize,
+    height: usize,
+    scroll: &'a mut usize,
+    cursor: &'a mut usize,
+    selection: &'a mut Option<Selection>,
+}
+
+impl CursorView<'_> {
+    /// Puts the cursor on `row` (within the rows), scrolls to keep it in
+    /// view, and has an open selection follow it.
+    fn move_to(&mut self, row: usize) {
+        *self.cursor = row.min(self.len.saturating_sub(1));
+        *self.scroll = follow(*self.cursor, *self.scroll, self.height);
+        Selection::follow(self.selection, *self.cursor);
+    }
+
+    /// The view scrolled: brings the cursor back into it.
+    fn keep_in_view(&mut self) {
+        let bottom = (*self.scroll + self.height.max(1)).saturating_sub(1);
+        let row = (*self.cursor).clamp(*self.scroll, bottom.max(*self.scroll));
+        self.move_to(row);
+    }
+
+    /// Cursor keys and `v`; returns whether `key` was one. Page keys move
+    /// the view by as much as the cursor.
+    fn on_key(&mut self, key: &KeyEvent) -> bool {
+        if self.len == 0 {
+            return false;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let half = isize::try_from(half_page(self.height)).unwrap_or(1);
+        let by = |delta: isize| (delta, self.cursor.saturating_add_signed(delta));
+        let (shift, row) = match key.code {
+            KeyCode::Char('v') if !ctrl => {
+                *self.selection = Some(Selection::toggled(*self.selection, *self.cursor));
+                return true;
+            }
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => (0, by(1).1),
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => (0, by(-1).1),
+            KeyCode::Char('d') if ctrl => by(half),
+            KeyCode::Char('u') if ctrl => by(-half),
+            KeyCode::PageDown => by(half * 2),
+            KeyCode::PageUp => by(-half * 2),
+            KeyCode::Char('g') | KeyCode::Home => (0, 0),
+            KeyCode::Char('G') | KeyCode::End => (0, self.len - 1),
+            _ => return false,
+        };
+        *self.scroll = scroll_by(*self.scroll, shift, max_scroll(self.len, self.height));
+        self.move_to(row);
+        true
+    }
+}
+
+impl DetailView {
+    /// The diff pane as a view with a cursor.
+    fn pane(&mut self) -> CursorView<'_> {
+        CursorView {
+            len: self.rendered.len(),
+            height: self.height,
+            scroll: &mut self.scroll,
+            cursor: &mut self.cursor,
+            selection: &mut self.selection,
+        }
+    }
+}
+
+impl FileView {
+    /// The file as a view with a cursor.
+    fn pane(&mut self) -> CursorView<'_> {
+        CursorView {
+            len: self.lines.len(),
+            height: self.height,
+            scroll: &mut self.scroll,
+            cursor: &mut self.cursor,
+            selection: &mut self.selection,
+        }
+    }
 }
 
 fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<Effect> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let max_scroll = max_scroll(d.rendered.len(), d.height);
-    let half = isize::try_from(half_page(d.height)).unwrap_or(1);
     let previous = d.pos.selected;
-    if d.focus == Focus::Diff && move_selection(d, key) {
+    if key.code == KeyCode::Char('v') && !d.rendered.is_empty() {
+        // `v` from the file list selects in the diff.
+        d.focus = Focus::Diff;
+    }
+    if d.focus == Focus::Diff && d.pane().on_key(key) {
+        return Vec::new();
+    }
+    // `J`/`K` scroll the diff from either pane and take the cursor along;
+    // page keys move the cursor (above) or the file list (below).
+    let scrolled = match key.code {
+        KeyCode::Char('J') => Some(1),
+        KeyCode::Char('K') => Some(-1),
+        _ => None,
+    };
+    if let Some(delta) = scrolled {
+        d.scroll = scroll_by(d.scroll, delta, max_scroll);
+        d.pane().keep_in_view();
         return Vec::new();
     }
     match (key.code, d.focus) {
-        (KeyCode::Char('v'), _) => {
-            d.selection = match d.selection {
-                Some(_) => None,
-                None if d.rendered.is_empty() => None,
-                None => {
-                    d.focus = Focus::Diff;
-                    Some(Selection {
-                        anchor: d.scroll,
-                        cursor: d.scroll,
-                    })
-                }
-            };
-        }
         (KeyCode::Tab | KeyCode::BackTab, _) => {
             d.focus = match d.focus {
                 Focus::Files => Focus::Diff,
@@ -1525,35 +1780,25 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
         (KeyCode::Char('l'), _) => d.focus = Focus::Diff,
         (KeyCode::Left, _) => d.hscroll = d.hscroll.saturating_sub(H_SCROLL_STEP),
         (KeyCode::Right, _) => d.hscroll += H_SCROLL_STEP,
-        (KeyCode::Char('J'), _) | (KeyCode::Char('j') | KeyCode::Down, Focus::Diff) => {
-            d.scroll = scroll_by(d.scroll, 1, max_scroll);
-        }
-        (KeyCode::Char('K'), _) | (KeyCode::Char('k') | KeyCode::Up, Focus::Diff) => {
-            d.scroll = d.scroll.saturating_sub(1);
-        }
-        (KeyCode::Char('d'), _) if ctrl => d.scroll = scroll_by(d.scroll, half, max_scroll),
-        (KeyCode::PageDown, _) => d.scroll = scroll_by(d.scroll, half * 2, max_scroll),
-        (KeyCode::Char('u'), _) if ctrl => d.scroll = scroll_by(d.scroll, -half, max_scroll),
-        (KeyCode::PageUp, _) => d.scroll = scroll_by(d.scroll, -half * 2, max_scroll),
-        (KeyCode::Char('g') | KeyCode::Home, Focus::Diff) => d.scroll = 0,
-        (KeyCode::Char('G') | KeyCode::End, Focus::Diff) => d.scroll = max_scroll,
+        // Hunk jumps move the cursor too, so an open selection grows to
+        // the hunk; going on to another file drops it (below).
         (KeyCode::Char('n' | ']'), _) => {
-            // The jump leaves the selection's rows behind.
-            d.selection = None;
-            if let Some(&next) = d.rendered.hunk_starts.iter().find(|&&s| s > d.scroll) {
-                d.scroll = next;
-            } else if d.pos.selected + 1 < d.files.len() {
-                d.pos.selected += 1;
+            if let Some(&next) = d.rendered.hunk_starts.iter().find(|&&s| s > d.cursor) {
+                d.scroll = next.min(max_scroll);
+                d.pane().move_to(next);
+            } else if let Some(next) = d.next_shown(true) {
+                d.pos.selected = next;
             }
         }
         (KeyCode::Char('N' | '['), _) => {
-            d.selection = None;
-            if let Some(&prev) = d.rendered.hunk_starts.iter().rev().find(|&&s| s < d.scroll) {
-                d.scroll = prev;
-            } else if d.scroll == 0 && d.pos.selected > 0 {
-                d.pos.selected -= 1;
+            if let Some(&prev) = d.rendered.hunk_starts.iter().rev().find(|&&s| s < d.cursor) {
+                d.scroll = prev.min(max_scroll);
+                d.pane().move_to(prev);
+            } else if let Some(prev) = d.next_shown(false).filter(|_| d.cursor == 0) {
+                d.pos.selected = prev;
             } else {
                 d.scroll = 0;
+                d.pane().move_to(0);
             }
         }
         (KeyCode::Enter | KeyCode::Char('o'), _) => {
@@ -1573,8 +1818,12 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
                 vec![Effect::Edit { path, line, root }]
             });
         }
+        (KeyCode::Char('/'), _) => {
+            d.filter_editing = true;
+            d.focus = Focus::Files;
+        }
         (_, Focus::Files) => {
-            d.pos.navigate(key, d.files.len());
+            d.navigate_files(key);
         }
         _ => {}
     }
@@ -1583,8 +1832,15 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
         // `f` are about the whole file.
         d.selection = None;
     }
+    file_changed(d, previous, max_highlight);
+    Vec::new()
+}
+
+/// Shows the selected file's diff from its top if it isn't file `previous`.
+fn file_changed(d: &mut DetailView, previous: usize, max_highlight: usize) {
     if d.pos.selected != previous {
         d.scroll = 0;
+        d.cursor = 0;
         d.hscroll = 0;
         d.selection = None;
         d.rendered = d
@@ -1593,6 +1849,52 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
             .map(|f| build_diff(f, max_highlight))
             .unwrap_or_default();
     }
+}
+
+/// Keys while the file filter (`/`) is typed: characters narrow the file
+/// list and select its first match, list moves still act, `⏎` goes to the
+/// selected file's diff and `esc` stops typing, keeping the filter.
+fn detail_filter_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<Effect> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let previous = d.pos.selected;
+    let nav = matches!(
+        key.code,
+        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+    ) || (ctrl && matches!(key.code, KeyCode::Char('n' | 'p' | 'j' | 'k' | 'd')));
+    if nav {
+        d.navigate_files(key);
+    } else {
+        match key.code {
+            // Leaving with nothing matched clears the filter (`reveal`).
+            KeyCode::Esc => {
+                d.filter_editing = false;
+                d.reveal();
+            }
+            KeyCode::Enter => {
+                d.filter_editing = false;
+                if !d.shown().is_empty() {
+                    d.focus = Focus::Diff;
+                }
+                d.reveal();
+            }
+            KeyCode::Backspace => {
+                d.filter.pop();
+            }
+            KeyCode::Char('u') if ctrl => d.filter.clear(),
+            KeyCode::Char('w') if ctrl => {
+                delete_word(&mut d.filter, |c| c == '/' || c.is_whitespace());
+            }
+            KeyCode::Char(c) if !ctrl => d.filter.push(c),
+            _ => return Vec::new(),
+        }
+        if !matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            d.pos.offset = 0;
+            if let Some(&first) = d.shown().first() {
+                d.pos.selected = first;
+            }
+        }
+    }
+    file_changed(d, previous, max_highlight);
     Vec::new()
 }
 
@@ -1622,7 +1924,7 @@ fn open_from_detail(d: &DetailView) -> Option<(String, u32, BTreeSet<u32>)> {
     let file = d.files.get(d.pos.selected)?;
     let line = if d.focus == Focus::Diff {
         d.rendered
-            .new_line_at(d.scroll)
+            .new_line_at(d.cursor)
             .unwrap_or_else(|| file.first_changed_line())
     } else {
         file.first_changed_line()
@@ -1638,50 +1940,53 @@ fn open_from_detail(d: &DetailView) -> Option<(String, u32, BTreeSet<u32>)> {
 }
 
 fn file_key(f: &mut FileView, key: &KeyEvent) -> Vec<Effect> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // `space` pages down, as in a pager.
+    let key = if key.code == KeyCode::Char(' ') {
+        &KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)
+    } else {
+        key
+    };
+    if f.pane().on_key(key) {
+        return Vec::new();
+    }
     let max_scroll = max_scroll(f.lines.len(), f.height);
-    let half = isize::try_from(half_page(f.height)).unwrap_or(1);
-    let top_line = u32::try_from(f.scroll + 1).unwrap_or(u32::MAX);
+    let cursor_line = u32::try_from(f.cursor + 1).unwrap_or(u32::MAX);
+    // A change's first line, put a few lines below the top.
+    let jump = |f: &mut FileView, line: u32| {
+        let row = usize::try_from(line).unwrap_or(0).saturating_sub(1);
+        f.scroll = row.saturating_sub(4).min(max_scroll);
+        f.pane().move_to(row);
+    };
     match key.code {
-        KeyCode::Char('j') | KeyCode::Down if !ctrl => {
-            f.scroll = scroll_by(f.scroll, 1, max_scroll);
-        }
-        KeyCode::Char('k') | KeyCode::Up if !ctrl => f.scroll = f.scroll.saturating_sub(1),
-        KeyCode::Char('d') if ctrl => f.scroll = scroll_by(f.scroll, half, max_scroll),
-        KeyCode::Char('u') if ctrl => f.scroll = scroll_by(f.scroll, -half, max_scroll),
-        KeyCode::PageDown | KeyCode::Char(' ') => {
-            f.scroll = scroll_by(f.scroll, half * 2, max_scroll);
-        }
-        KeyCode::PageUp => f.scroll = scroll_by(f.scroll, -half * 2, max_scroll),
-        KeyCode::Char('g') | KeyCode::Home => f.scroll = 0,
-        KeyCode::Char('G') | KeyCode::End => f.scroll = max_scroll,
         KeyCode::Left | KeyCode::Char('h') => f.hscroll = f.hscroll.saturating_sub(H_SCROLL_STEP),
         KeyCode::Right | KeyCode::Char('l') => f.hscroll += H_SCROLL_STEP,
         KeyCode::Char('n' | ']') => {
-            let current = top_line + 4;
             if let Some(&next) = f
                 .marks
-                .range(current + 1..)
+                .range(cursor_line + 1..)
                 .find(|&&m| !f.marks.contains(&(m - 1)))
             {
-                f.scroll = usize::try_from(next).unwrap_or(0).saturating_sub(5);
+                jump(f, next);
             }
         }
         KeyCode::Char('N' | '[') => {
-            let current = top_line + 4;
             if let Some(&prev) = f
                 .marks
-                .range(..current)
+                .range(..cursor_line)
                 .rev()
                 .find(|&&m| !f.marks.contains(&(m - 1)))
             {
-                f.scroll = usize::try_from(prev).unwrap_or(0).saturating_sub(5);
+                jump(f, prev);
             }
         }
         KeyCode::Char('e') => {
-            let target_visible = usize::try_from(f.target)
-                .is_ok_and(|t| t > f.scroll && t <= f.scroll + f.height.max(1));
-            let line = if target_visible { f.target } else { top_line };
+            // A file shown only as a notice has no lines for the cursor:
+            // the line it was opened at.
+            let line = if f.lines.is_empty() {
+                f.target
+            } else {
+                cursor_line
+            };
             return vec![Effect::Edit {
                 path: f.path.clone(),
                 line,
@@ -1691,6 +1996,19 @@ fn file_key(f: &mut FileView, key: &KeyEvent) -> Vec<Effect> {
         _ => {}
     }
     Vec::new()
+}
+
+/// What `a` and `f` in the file viewer are about: the lines selected with
+/// `v`, as a place and those lines (see [`crate::fix::file_lines`]), or
+/// `None` when nothing is selected, for the whole file.
+pub(super) fn selected_file_lines(f: &FileView) -> Option<(String, String)> {
+    let (first, last) = f.selection?.rows();
+    let picked = f
+        .text
+        .get(first..=last.min(f.text.len().checked_sub(1)?))?
+        .to_vec();
+    let first = u32::try_from(first + 1).ok()?;
+    Some(crate::fix::file_lines(&f.path, first, &picked))
 }
 
 #[cfg(test)]

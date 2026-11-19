@@ -166,7 +166,7 @@ fn a_question_about_the_selection_is_written_sent_and_answered() {
 
     // The second hunk's lines.
     let d = diff_mut(&mut app);
-    d.scroll = d.rendered.hunk_starts[1] + 1;
+    d.cursor = d.rendered.hunk_starts[1] + 1;
     press(&mut app, KeyCode::Char('v'));
     press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Char('a'));
@@ -357,7 +357,7 @@ fn the_panel_moves_between_pointers_and_scrolls() {
 }
 
 #[test]
-fn selecting_lines_moves_a_cursor_and_clears_when_the_lines_go() {
+fn v_selects_from_the_cursor_until_v_again_and_clears_when_the_lines_go() {
     let (mut app, _) = showing();
     let d = diff_mut(&mut app);
     d.height = 3;
@@ -368,23 +368,19 @@ fn selecting_lines_moves_a_cursor_and_clears_when_the_lines_go() {
         Focus::Diff,
         "v from the file list selects in the diff"
     );
-    assert_eq!(
-        d.selection,
+    let open = |anchor, end| {
         Some(Selection {
-            anchor: 0,
-            cursor: 0
+            anchor,
+            end,
+            open: true,
         })
-    );
+    };
+    assert_eq!(d.selection, open(0, 0));
     press(&mut app, KeyCode::Char('G'));
     let d = diff_mut(&mut app);
     let last = d.rendered.len() - 1;
-    assert_eq!(
-        d.selection,
-        Some(Selection {
-            anchor: 0,
-            cursor: last
-        })
-    );
+    assert_eq!(d.selection, open(0, last), "an open selection follows");
+    assert_eq!(d.cursor, last);
     assert_eq!(d.scroll, last + 1 - 3, "the view follows the cursor");
     press(&mut app, KeyCode::Char('g'));
     assert_eq!(diff_mut(&mut app).scroll, 0);
@@ -404,24 +400,49 @@ fn selecting_lines_moves_a_cursor_and_clears_when_the_lines_go() {
         KeyCode::Char('u'),
         KeyModifiers::CONTROL,
     )));
-    assert_eq!(diff_mut(&mut app).selection.map(|s| s.cursor), Some(0));
-    // v again ends it; so does going to the file list.
+    assert_eq!(diff_mut(&mut app).selection, open(0, 0));
+    // v again ends it there: the cursor moves on, the selection stays.
+    press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Char('v'));
-    assert_eq!(diff_mut(&mut app).selection, None);
+    press(&mut app, KeyCode::Char('j'));
+    let d = diff_mut(&mut app);
+    assert_eq!(
+        d.selection,
+        Some(Selection {
+            anchor: 0,
+            end: 1,
+            open: false
+        })
+    );
+    assert_eq!(d.cursor, 2);
+    // Another v starts afresh at the cursor.
     press(&mut app, KeyCode::Char('v'));
+    assert_eq!(diff_mut(&mut app).selection, open(2, 2));
+    // Scrolling the view takes the cursor along.
+    press(&mut app, KeyCode::Char('J'));
+    press(&mut app, KeyCode::Char('J'));
+    press(&mut app, KeyCode::Char('J'));
+    let d = diff_mut(&mut app);
+    assert_eq!((d.scroll, d.cursor), (3, 3));
+    assert_eq!(d.selection, open(2, 3));
+    // Going to the file list drops it.
     press(&mut app, KeyCode::Tab);
     assert_eq!(diff_mut(&mut app).selection, None);
     // And another file.
     press(&mut app, KeyCode::Char('v'));
     let d = diff_mut(&mut app);
-    d.scroll = d.rendered.hunk_starts[1];
+    d.cursor = d.rendered.hunk_starts[1];
     press(&mut app, KeyCode::Char('n'));
-    assert_eq!(
-        diff_mut(&mut app).selection,
-        None,
-        "n went on to the next file"
-    );
+    let d = diff_mut(&mut app);
+    assert_eq!(d.selection, None, "n went on to the next file");
+    assert_eq!((d.scroll, d.cursor), (0, 0));
+}
+
+#[test]
+fn a_refresh_keeps_the_selection_only_on_the_same_lines() {
+    let (mut app, _) = showing();
     // A refresh that changes the file's diff drops it; one that doesn't keeps it.
+    press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Char('v'));
     app.update(Msg::Diff {
         entry: Box::new(commit()),
@@ -439,6 +460,16 @@ fn selecting_lines_moves_a_cursor_and_clears_when_the_lines_go() {
         file: None,
     });
     assert_eq!(diff_mut(&mut app).selection, None);
+    // A refresh that shortens the diff keeps the cursor on it.
+    diff_mut(&mut app).cursor = usize::MAX;
+    app.update(Msg::Diff {
+        entry: Box::new(commit()),
+        result: Ok(files()),
+        refresh: true,
+        file: None,
+    });
+    let d = diff_mut(&mut app);
+    assert_eq!(d.cursor, d.rendered.len() - 1);
     // Nothing to select in an empty diff.
     diff_mut(&mut app).rendered = crate::ui::detail::RenderedDiff::default();
     press(&mut app, KeyCode::Char('v'));
@@ -562,14 +593,25 @@ fn a_diff_that_moves_under_the_prompt_is_asked_as_it_is_now() {
 }
 
 #[test]
-fn hunk_jumps_drop_the_selection() {
+fn hunk_jumps_move_the_cursor_and_an_open_selection_with_it() {
     let (mut app, _) = showing();
+    let starts = diff_mut(&mut app).rendered.hunk_starts.clone();
     press(&mut app, KeyCode::Char('v'));
     press(&mut app, KeyCode::Char('n'));
-    assert_eq!(diff_mut(&mut app).selection, None);
+    let d = diff_mut(&mut app);
+    let next = *starts.iter().find(|&&s| s > 0).expect("a later hunk");
+    assert_eq!(d.cursor, next);
+    assert_eq!(d.selection.map(Selection::rows), Some((0, next)));
+    // A closed selection stays where it was.
     press(&mut app, KeyCode::Char('v'));
     press(&mut app, KeyCode::Char('N'));
-    assert_eq!(diff_mut(&mut app).selection, None);
+    let d = diff_mut(&mut app);
+    assert!(d.cursor < next);
+    assert_eq!(d.selection.map(Selection::rows), Some((0, next)));
+    // N at the top of the first file stays there.
+    press(&mut app, KeyCode::Char('g'));
+    press(&mut app, KeyCode::Char('N'));
+    assert_eq!(diff_mut(&mut app).cursor, 0);
 }
 
 #[test]
@@ -618,4 +660,132 @@ fn each_change_keeps_its_own_panel_until_its_answer_lands() {
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('A'));
     assert_eq!(panel(&app).answered.len(), 1);
+}
+
+/// Opens `src/a.rs` in the file viewer at line 2, as `⏎` in a diff does.
+fn open_file(app: &mut App) {
+    app.update(Msg::File {
+        path: "src/a.rs".to_owned(),
+        content: Ok("keep\nfirst\nthird\n".to_owned()),
+        line: 2,
+        marks: std::collections::BTreeSet::from([2]),
+        root: None,
+    });
+}
+
+#[test]
+fn the_file_viewer_opened_from_a_diff_asks_about_its_lines() {
+    let (mut app, key) = showing();
+    open_file(&mut app);
+    // Nothing selected: the whole file.
+    press(&mut app, KeyCode::Char('a'));
+    assert_eq!(
+        app.ask.draft.as_ref().map(|d| d.about.clone()),
+        Some(About {
+            place: "src/a.rs".to_owned(),
+            excerpt: String::new(),
+        })
+    );
+    press(&mut app, KeyCode::Esc);
+    // From line 1 to line 3, as they are on disk.
+    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('a'));
+    let about = About {
+        place: "src/a.rs:1-3".to_owned(),
+        excerpt: "@@ src/a.rs:1-3, as on disk @@\n keep\n first\n third\n".to_owned(),
+    };
+    assert_eq!(
+        app.ask.draft.as_ref().map(|d| d.about.clone()),
+        Some(about.clone())
+    );
+    typed(&mut app, "why?");
+    let asked = ask_of(&press(&mut app, KeyCode::Enter)).clone();
+    assert_eq!(asked.key, key, "about the diff the file was opened from");
+    assert_eq!(asked.about, Some(about));
+    assert!(matches!(
+        app.views.as_slice(),
+        [View::Detail(_), View::File(_), View::Answer(_)]
+    ));
+    app.update(Msg::Answered {
+        key,
+        result: Ok(answer("Because.", vec![at(1)], "src/a.rs:1-3")),
+    });
+    // Back to the file; A opens the answers again.
+    press(&mut app, KeyCode::Esc);
+    assert!(matches!(app.views.last(), Some(View::File(_))));
+    press(&mut app, KeyCode::Char('A'));
+    assert_eq!(panel(&app).answered.len(), 1);
+    // Going to the code leaves the file for the diff under it.
+    press(&mut app, KeyCode::Enter);
+    let d = diff_mut(&mut app);
+    assert_eq!(d.cursor, d.rendered.hunk_starts[1]);
+    assert_eq!(app.views.len(), 1);
+}
+
+#[test]
+fn the_file_viewer_without_a_diff_under_it_says_why_it_cannot_ask() {
+    let (mut app, _) = showing();
+    app.views.clear();
+    open_file(&mut app);
+    for c in ['a', 'f'] {
+        app.notice = None;
+        assert_eq!(press(&mut app, KeyCode::Char(c)), []);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Open the file from a change's diff (⏎) to ask or fix about it")
+        );
+    }
+    assert!(app.ask.draft.is_none() && app.fix.draft.is_none());
+    app.notice = None;
+    press(&mut app, KeyCode::Char('A'));
+    assert!(matches!(app.views.as_slice(), [View::File(_)]));
+    assert!(app.notice.is_some(), "A says why too");
+}
+
+#[test]
+fn the_file_viewer_sends_lines_as_they_are_on_disk() {
+    let (mut app, _) = showing();
+    app.update(Msg::File {
+        path: "src/a.rs".to_owned(),
+        content: Ok("fn a() {\n\tlet x = 1;\n}\n".to_owned()),
+        line: 2,
+        marks: std::collections::BTreeSet::new(),
+        root: None,
+    });
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('a'));
+    assert_eq!(
+        app.ask.draft.as_ref().map(|d| d.about.excerpt.clone()),
+        Some("@@ src/a.rs:2, as on disk @@\n \tlet x = 1;\n".to_owned()),
+        "the tab, not the spaces it is drawn as"
+    );
+}
+
+#[test]
+fn going_to_the_code_moves_an_open_selection_with_the_cursor() {
+    let (mut app, key) = showing();
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('a'));
+    typed(&mut app, "why?");
+    press(&mut app, KeyCode::Enter);
+    app.update(Msg::Answered {
+        key,
+        result: Ok(answer("Here.", vec![at(1)], "src/a.rs:1")),
+    });
+    press(&mut app, KeyCode::Enter);
+    let d = diff_mut(&mut app);
+    let start = d.rendered.hunk_starts[1];
+    assert_eq!(d.cursor, start);
+    assert_eq!(
+        d.selection,
+        Some(Selection {
+            anchor: 0,
+            end: start,
+            open: true
+        })
+    );
 }

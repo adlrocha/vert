@@ -226,7 +226,7 @@ fn feedback_on_a_hunk_is_written_sent_and_reported() {
         panic!("diff");
     };
     d.focus = Focus::Diff;
-    d.scroll = d.rendered.hunk_starts[1];
+    d.cursor = d.rendered.hunk_starts[1];
     press(&mut app, KeyCode::Char('f'));
     assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs"));
     press(&mut app, KeyCode::Esc);
@@ -478,7 +478,7 @@ fn a_selection_names_its_lines_and_sends_only_them() {
     // From the added line of the first hunk down to the blank row before
     // the second: the blank holds nothing of the diff.
     let first_added = d.rendered.hunk_starts[0] + 2;
-    d.scroll = first_added;
+    d.cursor = first_added;
     press(&mut app, KeyCode::Char('v'));
     press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Char('f'));
@@ -496,7 +496,7 @@ fn a_selection_names_its_lines_and_sends_only_them() {
         panic!("diff");
     };
     assert_eq!(d.selection, None, "esc clears it");
-    d.scroll = d.rendered.hunk_starts[1] - 1;
+    d.cursor = d.rendered.hunk_starts[1] - 1;
     press(&mut app, KeyCode::Char('v'));
     press(&mut app, KeyCode::Char('f'));
     assert_eq!(draft(&app).request.place.as_deref(), Some("src/a.rs"));
@@ -1043,5 +1043,39 @@ fn c_opens_what_the_last_fix_changed() {
     assert_eq!(
         app.notice.as_deref(),
         Some("/wt/gone has no uncommitted changes")
+    );
+}
+
+#[test]
+fn the_file_viewer_opened_from_a_diff_fixes_its_lines_or_the_file() {
+    let mut app = showing(commit());
+    app.update(Msg::File {
+        path: "src/a.rs".to_owned(),
+        content: Ok("one\ntwo\nthree\n".to_owned()),
+        line: 2,
+        marks: std::collections::BTreeSet::new(),
+        root: None,
+    });
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('f'));
+    let request = &draft(&app).request;
+    assert_eq!(request.change, "0000000 Add login");
+    assert_eq!(request.place.as_deref(), Some("src/a.rs:2-3"));
+    assert_eq!(
+        request.excerpt,
+        "@@ src/a.rs:2-3, as on disk @@\n two\n three\n"
+    );
+    press(&mut app, KeyCode::Esc);
+    // esc clears the selection; then f is about the whole file.
+    press(&mut app, KeyCode::Esc);
+    assert!(matches!(app.views.last(), Some(View::File(f)) if f.selection.is_none()));
+    press(&mut app, KeyCode::Char('f'));
+    let request = &draft(&app).request;
+    assert_eq!(request.place.as_deref(), Some("src/a.rs"));
+    assert_eq!(
+        request.excerpt,
+        crate::fix::excerpt(&file("src/a.rs"), None),
+        "the file's hunks"
     );
 }

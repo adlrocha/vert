@@ -516,7 +516,7 @@ fn detail_view_navigation() {
     let mut app = loaded();
     open_detail(&mut app);
     let detail = |app: &App| match app.views.last() {
-        Some(View::Detail(d)) => (d.pos.selected, d.focus, d.scroll, d.hscroll),
+        Some(View::Detail(d)) => (d.pos.selected, d.focus, d.cursor, d.hscroll),
         _ => panic!("not in detail"),
     };
     assert_eq!(detail(&app), (0, Focus::Files, 0, 0));
@@ -533,11 +533,7 @@ fn detail_view_navigation() {
     app.update(ch('N'));
     assert_eq!(detail(&app).2, 0);
     app.update(ch('G'));
-    assert_eq!(
-        detail(&app).2,
-        6,
-        "last row; viewport height unknown before first draw"
-    );
+    assert_eq!(detail(&app).2, 6, "last row");
     app.update(ch('g'));
     app.update(ch('J'));
     app.update(ch('K'));
@@ -571,6 +567,18 @@ fn detail_view_navigation() {
             root: None,
         }]
     );
+    // The file opens at the cursor's line.
+    app.update(ch('n'));
+    let marks = BTreeSet::from([2, 20]);
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        [Effect::OpenFile {
+            path: "src/a.rs".to_owned(),
+            line: 20,
+            marks,
+            root: None,
+        }]
+    );
     app.update(ch('h'));
     assert_eq!(
         app.update(ch('e')),
@@ -583,6 +591,118 @@ fn detail_view_navigation() {
     app.update(ch('?'));
     assert!(app.help);
     app.update(ch('x'));
+    app.update(key(KeyCode::Esc));
+    assert!(app.views.is_empty());
+}
+
+#[test]
+fn slash_in_a_diff_finds_files_by_name() {
+    let mut app = loaded();
+    app.update(Msg::Diff {
+        entry: Box::new(entry("c3", 9_000, &["src/a.rs", "docs/x.md", "src/b.rs"])),
+        result: Ok(vec![
+            file_diff("src/a.rs"),
+            file_diff("docs/x.md"),
+            file_diff("src/b.rs"),
+        ]),
+        refresh: false,
+        file: None,
+    });
+    let detail = |app: &App| match app.views.last() {
+        Some(View::Detail(d)) => (d.pos.selected, d.shown(), d.focus, d.filter_editing),
+        _ => panic!("not in detail"),
+    };
+    app.update(key(KeyCode::Tab));
+    app.update(ch('/'));
+    assert_eq!(detail(&app), (0, vec![0, 1, 2], Focus::Files, true));
+    // Keys type, even those bound elsewhere; the first match is selected.
+    app.update(ch('M'));
+    assert!(app.agents.picker.is_none(), "M types");
+    app.update(key(KeyCode::Backspace));
+    for c in "xq".chars() {
+        app.update(ch(c));
+    }
+    assert_eq!(detail(&app).1, Vec::<usize>::new(), "nothing matches xq");
+    app.update(key(KeyCode::Backspace));
+    assert_eq!(detail(&app).0, 1, "docs/x.md");
+    app.update(ctrl('u'));
+    for c in "rs".chars() {
+        app.update(ch(c));
+    }
+    assert_eq!(detail(&app).1, vec![0, 2]);
+    assert_eq!(detail(&app).0, 0);
+    // Moves go among the matches.
+    app.update(key(KeyCode::Down));
+    assert_eq!(detail(&app).0, 2, "skips docs/x.md");
+    app.update(key(KeyCode::Up));
+    app.update(ctrl('w'));
+    assert_eq!(detail(&app).1, vec![0, 1, 2], "ctrl-w deleted the word");
+    for c in "src/b".chars() {
+        app.update(ch(c));
+    }
+    app.update(ctrl('w'));
+    let Some(View::Detail(d)) = app.views.last() else {
+        panic!("detail")
+    };
+    assert_eq!(d.filter, "src/", "back to the slash");
+    app.update(ch('a'));
+    // ⏎ goes to the file's diff, keeping the filter.
+    app.update(key(KeyCode::Enter));
+    assert_eq!(detail(&app), (0, vec![0], Focus::Diff, false));
+    // n and N go only to files shown.
+    app.update(key(KeyCode::Tab));
+    app.update(ch('/'));
+    app.update(key(KeyCode::Backspace));
+    app.update(ch('b'));
+    app.update(key(KeyCode::Esc));
+    assert_eq!(detail(&app), (2, vec![2], Focus::Files, false));
+    app.update(key(KeyCode::Tab));
+    app.update(ch('N'));
+    assert_eq!(detail(&app).0, 2, "no shown file before it");
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("detail")
+    };
+    "rs".clone_into(&mut d.filter);
+    app.update(ch('N'));
+    assert_eq!(detail(&app).0, 0, "N skips docs/x.md");
+    app.update(ch('G'));
+    app.update(ch('n'));
+    assert_eq!(detail(&app).0, 2, "n skips docs/x.md");
+    // In the file list, j and k go among the matches too.
+    app.update(key(KeyCode::Tab));
+    app.update(ch('k'));
+    assert_eq!(detail(&app).0, 0);
+    // An unbound key while typing does nothing.
+    app.update(ch('/'));
+    assert_eq!(app.update(ctrl('x')), []);
+    app.update(key(KeyCode::Enter));
+    // A refresh that leaves the selected file hidden clears the filter.
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("detail")
+    };
+    "a.rs".clone_into(&mut d.filter);
+    app.update(Msg::Diff {
+        entry: Box::new(entry("c3", 9_000, &["docs/x.md", "src/b.rs"])),
+        result: Ok(vec![file_diff("docs/x.md"), file_diff("src/b.rs")]),
+        refresh: true,
+        file: None,
+    });
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("detail")
+    };
+    assert_eq!(d.filter, "", "docs/x.md, selected, isn't a.rs");
+    // So does leaving the filter with nothing matched.
+    app.update(ch('/'));
+    app.update(ch('z'));
+    app.update(key(KeyCode::Esc));
+    let Some(View::Detail(d)) = app.views.last_mut() else {
+        panic!("detail")
+    };
+    assert_eq!((d.filter.as_str(), d.shown().len()), ("", 2));
+    "b".clone_into(&mut d.filter);
+    // esc clears the filter before it leaves the diff.
+    app.update(key(KeyCode::Esc));
+    assert_eq!(detail(&app).1, vec![0, 1]);
     app.update(key(KeyCode::Esc));
     assert!(app.views.is_empty());
 }
@@ -619,41 +739,47 @@ fn file_view_navigation() {
         marks: BTreeSet::from([10, 11, 50, 80]),
         root: None,
     });
+    // (first visible line, cursor line, sideways scroll), 0-based.
     let file = |app: &App| match app.views.last() {
-        Some(View::File(f)) => (f.scroll, f.hscroll, f.lines.len()),
+        Some(View::File(f)) => (f.scroll, f.cursor, f.hscroll),
         _ => panic!("not in file view"),
     };
-    assert_eq!(file(&app), (26, 0, 100));
+    assert_eq!(file(&app), (26, 29, 0), "the cursor starts on line 30");
     if let Some(View::File(f)) = app.views.last_mut() {
         f.height = 20;
         assert_eq!(f.language, "Rust");
+        assert_eq!(f.lines.len(), 100);
     }
     app.update(ch('j'));
-    assert_eq!(file(&app).0, 27);
+    assert_eq!(file(&app), (26, 30, 0), "the cursor moves, the view stays");
     app.update(ch('k'));
     app.update(ch('n'));
-    assert_eq!(file(&app).0, 45, "next change block starts at 50");
+    assert_eq!(file(&app), (45, 49, 0), "next change block starts at 50");
     app.update(ch('n'));
-    assert_eq!(file(&app).0, 75);
+    assert_eq!(file(&app).0..=file(&app).1, 75..=79);
     app.update(ch('N'));
-    assert_eq!(file(&app).0, 45);
+    assert_eq!(file(&app).0..=file(&app).1, 45..=49);
     app.update(ch('N'));
-    assert_eq!(file(&app).0, 5);
+    assert_eq!(file(&app).0..=file(&app).1, 5..=9);
     app.update(ch('G'));
     assert_eq!(
-        file(&app).0,
-        80,
+        file(&app).0..=file(&app).1,
+        80..=99,
         "last line at the bottom of a 20-row viewport"
     );
     app.update(ch('g'));
+    assert_eq!(file(&app), (0, 0, 0));
     app.update(ctrl('d'));
-    assert_eq!(file(&app).0, 10);
+    assert_eq!(file(&app), (10, 10, 0), "half a page: view and cursor");
     app.update(ctrl('u'));
     app.update(key(KeyCode::PageDown));
-    assert_eq!(file(&app).0, 20);
+    assert_eq!(file(&app), (20, 20, 0));
+    app.update(key(KeyCode::PageUp));
+    app.update(ch(' '));
+    assert_eq!(file(&app), (20, 20, 0), "space pages down");
     app.update(key(KeyCode::PageUp));
     app.update(ch('l'));
-    assert_eq!(file(&app).1, H_SCROLL_STEP);
+    assert_eq!(file(&app).2, H_SCROLL_STEP);
     app.update(ch('h'));
     assert_eq!(
         app.update(ch('e')),
@@ -663,11 +789,10 @@ fn file_view_navigation() {
             root: None,
         }]
     );
-    app.update(ch('G'));
-    app.update(ch('g'));
-    for _ in 0..25 {
+    for _ in 0..29 {
         app.update(ch('j'));
     }
+    assert_eq!(file(&app), (10, 29, 0), "the view follows the cursor down");
     assert_eq!(
         app.update(ch('e')),
         [Effect::Edit {
@@ -675,8 +800,24 @@ fn file_view_navigation() {
             line: 30,
             root: None,
         }],
-        "target line is visible"
+        "edits at the cursor's line"
     );
+    // v selects from the cursor; esc clears it before it leaves.
+    app.update(ch('v'));
+    app.update(ch('j'));
+    let Some(View::File(f)) = app.views.last() else {
+        panic!("file view")
+    };
+    assert_eq!(
+        f.selection,
+        Some(Selection {
+            anchor: 29,
+            end: 30,
+            open: true
+        })
+    );
+    app.update(key(KeyCode::Esc));
+    assert!(matches!(app.views.last(), Some(View::File(f)) if f.selection.is_none()));
     app.update(ch('q'));
     assert!(app.views.is_empty());
 }
@@ -696,6 +837,37 @@ fn unreadable_files_show_a_notice() {
     };
     assert_eq!(f.notice.as_deref(), Some("binary"));
     assert_eq!(f.target, 1);
+}
+
+#[test]
+fn a_file_shown_as_a_notice_edits_at_the_line_it_was_opened_at() {
+    let mut app = loaded();
+    app.update(Msg::File {
+        path: "big.rs".to_owned(),
+        content: Err("too large".to_owned()),
+        line: 42,
+        marks: BTreeSet::new(),
+        root: None,
+    });
+    assert_eq!(
+        app.update(ch('e')),
+        [Effect::Edit {
+            path: "big.rs".to_owned(),
+            line: 42,
+            root: None,
+        }]
+    );
+}
+
+#[test]
+fn page_keys_in_the_file_list_move_the_list() {
+    let mut app = loaded();
+    open_detail(&mut app);
+    app.update(key(KeyCode::PageDown));
+    let Some(View::Detail(d)) = app.views.last() else {
+        panic!("detail")
+    };
+    assert_eq!((d.pos.selected, d.scroll), (1, 0));
 }
 
 #[test]
@@ -792,15 +964,22 @@ fn file_view_ignores_unbound_keys() {
         path: String::new(),
         language: String::new(),
         lines: Vec::new(),
+        text: Vec::new(),
         target: 1,
         marks: BTreeSet::new(),
         scroll: 0,
+        cursor: 0,
+        selection: None,
         hscroll: 0,
         height: 0,
         notice: None,
         root: None,
     })));
     assert_eq!(app.views.len(), 2);
+    // An empty file has no lines for the cursor.
+    assert_eq!(app.update(ch('j')), []);
+    assert_eq!(app.update(ch('v')), []);
+    assert!(matches!(app.views.last(), Some(View::File(f)) if f.selection.is_none()));
 }
 
 #[test]

@@ -936,7 +936,10 @@ impl App {
             .and_then(|h| d.rendered.hunk_starts.get(h))
             .copied()
             .unwrap_or(0);
+        d.reveal();
         d.scroll = start.min(max_scroll(d.rendered.len(), d.height));
+        // Through the pane, so an open selection follows the cursor.
+        d.pane().move_to(start);
     }
 }
 

@@ -28,7 +28,8 @@ in, and what deserves a second look.
 - **Labels:** `small/medium/large/xl` by lines changed, `wide` when a change
   touches many modules, plus `reverted` and `revert` detection.
 - **Diff view:** a file list and a syntax-highlighted diff with old and new line
-  numbers. `n`/`N` jump between hunks. An open working-tree diff refreshes in
+  numbers. `n`/`N` jump between hunks. `/` narrows the file list by name,
+  which helps in a big pull request. An open working-tree diff refreshes in
   place as files change.
 - **Search:** fuzzy file names, or content search using ripgrep's engine (smart
   case, regex with literal fallback, respects `.gitignore`).
@@ -66,14 +67,15 @@ in, and what deserves a second look.
   ones that name nothing, and lists the hunks nothing explains, which is
   where to look first. `a` asks the agent a follow-up question about the
   change. See [Explanations](#explanations).
-- **Questions:** select lines in a diff with `v` (`j`/`k` extend the
-  selection) and press `a` to ask the agent about them, or press `a` with
-  nothing selected to ask about the whole file. It sees the whole diff and
+- **Questions:** move the cursor in a diff, or in a file opened from one,
+  press `v` where the lines start and `v` again where they end, and press
+  `a` to ask the agent about them, or press `a` with nothing selected to
+  ask about the whole file. It sees the whole diff and
   the lines you picked, gets read-only tools (a `--explain-cmd` runs with
   your own permissions), and answers in a panel over the diff, with code pointers `⏎` jumps to. No explanation is needed first. See
   [Questions from the diff](#questions-from-the-diff).
-- **Fixes:** press `f` on lines selected with `v` (or with nothing selected,
-  on the whole file), or on a concern in an explanation (mark
+- **Fixes:** press `f` on lines selected with `v` in a diff or a file
+  opened from one (or with nothing selected, on the whole file), or on a concern in an explanation (mark
   several with `space` to fix them together), write
   what should change (a concern starts as its own text), and Claude Code
   or Codex makes the edit in that line of work's checkout, confined to
@@ -81,8 +83,9 @@ in, and what deserves a second look.
   is done, vert commits its edits, and only those, on that checkout's
   branch. Nothing is pushed. See [Fixes](#fixes).
 - **File viewer:** shows the full file, with lines added by the change you came
-  from marked in the gutter. `e` opens `$VISUAL`/`$EDITOR` at that line
-  (vim, nvim, helix, VS Code, Cursor, …).
+  from marked in the gutter, and a cursor to select lines with `v` and ask
+  (`a`) or fix (`f`) about them. `e` opens `$VISUAL`/`$EDITOR` at the
+  cursor's line (vim, nvim, helix, VS Code, Cursor, …).
 - **Inherits your terminal theme:** it only uses the 16 ANSI colours.
 
 ## Install
@@ -142,7 +145,8 @@ Press `?` inside vert for all keys. The essentials:
 | Anywhere  | `1` `2` `3` `4` / `tab` switch tab · `j` `k` move · `⏎` open · `esc` back · `q` quit · `M` agent and model |
 | Feed      | `n` next new change · `esc` clear filter · `r` reload                   |
 | Hotspots  | `w` time window · `m` files/modules · `⏎` filter feed · `o`/`e` view/edit |
-| Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit · `v` select lines (`j` `k` extend, `esc` clears) · `x` explain · `a` ask · `A` answers again · `f` fix |
+| Change    | `tab` switch pane · `/` find a file by name (`⏎` opens it, `esc` stops typing, `esc` again clears; leaving with nothing matched clears it) · `j` `k` move the cursor · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `⏎`/`e` view/edit the file at the cursor · `v` select from the cursor, `v` again ends (`esc` clears) · `x` explain · `a` ask · `A` answers again · `f` fix |
+| File      | `j` `k` move the cursor · `n` `N` changes · `←` `→` sideways · `e` edit at the cursor · `v` select from the cursor, `v` again ends (`esc` clears) · `a` ask · `A` answers again · `f` fix (`a` `A` `f` when opened from a diff) |
 | Answers   | `j` `k` move between code pointers · `⏎` go to the code · `J` `K` scroll · `a` ask more · `esc` back |
 | Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `a` ask a question · `r` explain again · `space` mark a concern · `f` fix the marked concerns (else the selected one) · `c` last fix |
 | Fix, Ask  | type the feedback or question · `⏎` send · `esc` cancel · `ctrl-w`/`ctrl-u` delete |
@@ -297,12 +301,21 @@ For the full output, run the command from the table above in a terminal.
 
 ### Questions from the diff
 
-In any diff, press `v` to start selecting lines at the top of the diff
-pane, move with `j` and `k` (or `ctrl-d`, `ctrl-u`, `g`, `G`) to extend
-the selection, and press `a` to ask about those lines. `v` again or `esc`
-clears the selection. Selecting a hunk's `⋯ @@` header picks the whole
+The diff pane has a cursor, like an editor: `j` and `k` (or `ctrl-d`,
+`ctrl-u`, `g`, `G`, `n`, `N`) move it, and the view follows. Press `v`
+where the lines you mean start, move to where they end, and press `v`
+again: the selection stays while the cursor moves on. Press `a` to ask
+about those lines. `esc` clears the selection, and another `v` starts a
+new one at the cursor. Selecting a hunk's `⋯ @@` header picks the whole
 hunk. With nothing selected, or from the file list, `a` asks about the
 whole file.
+
+For a long file or a big change it's easier to read the whole file: `⏎`
+opens it at the cursor's line, with the same cursor, `v` and `a`. There
+the agent gets the lines you selected as they are on disk now, with the
+change you opened the file from. `A` brings the answers back there too,
+and `⏎` on a code pointer goes back to the diff. A file opened from
+search or hotspots belongs to no change, so `a` and `f` say so instead.
 
 The question goes to the agent that explains (see
 [Explanations](#explanations)) like a follow-up question: read-only for
@@ -367,6 +380,8 @@ depends on where you press it:
 
 - in the diff pane: the lines selected with `v` (place
   `src/auth.rs:40-52` and those lines), else the whole file;
+- in a file opened from a diff: the lines selected with `v`, as they are
+  on disk, else the whole file;
 - in the file list: the whole selected file;
 - in an explanation: the selected code pointer. On *Concerns*, the
   feedback starts as the concern's text, so `f` then `⏎` asks the agent to

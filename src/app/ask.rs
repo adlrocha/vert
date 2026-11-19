@@ -179,6 +179,22 @@ impl App {
         Vec::new()
     }
 
+    /// `a` in the file viewer opened from a diff: starts writing a question
+    /// about the lines selected, else about the whole file.
+    pub(super) fn draft_ask_from_file(&mut self) -> Vec<Effect> {
+        if let Some(pick) = self.file_pick() {
+            let about = pick.lines.map_or_else(
+                || About {
+                    place: pick.path,
+                    excerpt: String::new(),
+                },
+                |(place, excerpt)| About { place, excerpt },
+            );
+            self.start_ask(pick.entry, pick.files, about);
+        }
+        Vec::new()
+    }
+
     /// Starts writing a question about `about` in `entry`, whose diff is
     /// `files`, unless there is no agent to ask or it is still answering
     /// about that change.
@@ -378,9 +394,11 @@ impl App {
         found.then_some(on_top)
     }
 
-    /// `A` in a diff: opens the answer panel of this change again.
+    /// `A` in a diff, or in the file viewer opened from one: opens the
+    /// answer panel of this change again.
     pub(super) fn reopen_answers(&mut self) -> Vec<Effect> {
-        let Some(View::Detail(d)) = self.views.last() else {
+        let ([.., View::Detail(d)] | [.., View::Detail(d), View::File(_)]) = self.views.as_slice()
+        else {
             return Vec::new();
         };
         let id = d.entry.id.clone();
@@ -437,6 +455,10 @@ impl App {
             KeyCode::Enter | KeyCode::Char('o') => {
                 if let Some(r) = v.targets().get(v.target).map(|r| (*r).clone()) {
                     self.close_answers();
+                    // Asked from the file viewer: back to the diff under it.
+                    if matches!(self.views.as_slice(), [.., View::Detail(_), View::File(_)]) {
+                        self.views.pop();
+                    }
                     self.show_in_diff(&r);
                 }
             }
