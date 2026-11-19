@@ -125,6 +125,77 @@ pub fn concerns_request(concerns: &[&Note], files: &[FileDiff]) -> (String, Stri
     (text, excerpts)
 }
 
+/// Where rows picked in `file`'s diff point, and those rows in diff form,
+/// for an agent to look at. Each pick is a hunk by index and one of its
+/// lines, or `None` for the hunk's header, which picks the whole hunk.
+///
+/// The place is `path:first-last` by new-file lines, or by old-file lines
+/// when only removed lines are picked. The excerpt has the picked lines,
+/// in order, under their hunks' headers. `None` when nothing of the diff
+/// is picked.
+///
+/// ```
+/// let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n";
+/// let files = vert::git::diff::parse(diff).unwrap();
+/// let (place, excerpt) = vert::fix::picked(&files[0], &[(0, Some(1)), (0, Some(2))]).unwrap();
+/// assert_eq!(place, "a.rs:2");
+/// assert_eq!(excerpt, "@@ -1,2 +1,2 @@\n-old\n+new\n");
+/// ```
+#[must_use]
+pub fn picked(file: &FileDiff, picks: &[(usize, Option<usize>)]) -> Option<(String, String)> {
+    let mut by_hunk: std::collections::BTreeMap<usize, std::collections::BTreeSet<usize>> =
+        std::collections::BTreeMap::new();
+    for &(h, line) in picks {
+        let Some(hunk) = file.hunks.get(h) else {
+            continue;
+        };
+        let lines = by_hunk.entry(h).or_default();
+        match line {
+            Some(i) if i < hunk.lines.len() => {
+                lines.insert(i);
+            }
+            Some(_) => {}
+            None => lines.extend(0..hunk.lines.len()),
+        }
+    }
+    by_hunk.retain(|_, lines| !lines.is_empty());
+    let picked: Vec<(usize, &crate::git::diff::DiffLine)> = by_hunk
+        .iter()
+        .flat_map(|(&h, lines)| lines.iter().map(move |&i| (h, &file.hunks[h].lines[i])))
+        .collect();
+    if picked.is_empty() {
+        return None;
+    }
+    let span = |numbers: Vec<u32>| {
+        let first = numbers.iter().min()?;
+        let last = numbers.iter().max()?;
+        Some(if first == last {
+            format!("{}:{first}", file.stat.path)
+        } else {
+            format!("{}:{first}-{last}", file.stat.path)
+        })
+    };
+    let place = span(picked.iter().filter_map(|(_, l)| l.new_no).collect())
+        .or_else(|| {
+            span(picked.iter().filter_map(|(_, l)| l.old_no).collect())
+                .map(|p| format!("{p} (removed lines, numbered as in the old file)"))
+        })
+        .unwrap_or_else(|| file.stat.path.clone());
+    let mut excerpt = String::new();
+    for (&h, lines) in &by_hunk {
+        let hunk = &file.hunks[h];
+        excerpt.push_str(&hunk.header);
+        excerpt.push('\n');
+        for &i in lines {
+            let line = &hunk.lines[i];
+            excerpt.push(line.sign());
+            excerpt.push_str(&line.content);
+            excerpt.push('\n');
+        }
+    }
+    Some((place, excerpt))
+}
+
 /// The hunk `hunk` of `file` in diff form (`+`, `-` and ` ` prefixes), or
 /// every hunk of the file when `hunk` is `None`.
 ///
@@ -404,6 +475,39 @@ mod tests {
             "@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n@@ -9 +9 @@\n-x\n+y\n"
         );
         assert_eq!(excerpt(&files[0], Some(5)), "");
+    }
+
+    #[test]
+    fn picked_rows_name_their_lines_and_keep_them_in_diff_form() {
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n@@ -9,2 +9,3 @@\n-x\n+y\n+z\n tail\n";
+        let files = crate::git::diff::parse(diff).expect("diff");
+        let f = &files[0];
+        assert_eq!(picked(f, &[]), None);
+        assert_eq!(picked(f, &[(7, None), (0, Some(42))]), None, "nothing real");
+        // Lines across two hunks, out of order and repeated.
+        assert_eq!(
+            picked(f, &[(1, Some(2)), (0, Some(2)), (1, Some(1)), (0, Some(2))]),
+            Some((
+                "a.rs:2-10".to_owned(),
+                "@@ -1,2 +1,2 @@\n+new\n@@ -9,2 +9,3 @@\n+y\n+z\n".to_owned()
+            ))
+        );
+        // A header picks its whole hunk.
+        assert_eq!(
+            picked(f, &[(1, None)]),
+            Some((
+                "a.rs:9-11".to_owned(),
+                "@@ -9,2 +9,3 @@\n-x\n+y\n+z\n tail\n".to_owned()
+            ))
+        );
+        // Only removed lines: numbered as in the old file.
+        assert_eq!(
+            picked(f, &[(0, Some(1))]),
+            Some((
+                "a.rs:2 (removed lines, numbered as in the old file)".to_owned(),
+                "@@ -1,2 +1,2 @@\n-old\n".to_owned()
+            ))
+        );
     }
 
     #[test]

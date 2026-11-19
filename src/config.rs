@@ -299,18 +299,63 @@ impl Config {
         })
     }
 
+    /// The agent and model vert starts with: `--explain-cmd` when one is
+    /// given, else `--explain-agent`, with `--explain-model`.
+    #[must_use]
+    pub fn setting(&self) -> agent::Setting {
+        agent::Setting {
+            pick: if self.command().is_some() {
+                agent::Pick::Command
+            } else {
+                agent::Pick::Agent(self.explain_agent)
+            },
+            model: self.model(),
+        }
+    }
+
+    /// Whether `--explain-cmd` names a command, so the agent picker (`M`)
+    /// can offer it.
+    #[must_use]
+    pub fn has_command(&self) -> bool {
+        self.command().is_some()
+    }
+
+    /// `--explain-cmd`, unless blank.
+    fn command(&self) -> Option<&str> {
+        self.explain_cmd
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+    }
+
     /// How to explain changes, given the `PATH` to look for agents in.
     ///
     /// # Errors
     /// Explains, for the user, why explanations are unavailable.
     pub fn explainer(&self, path: Option<&OsStr>) -> Result<Explainer, String> {
+        self.explainer_for(&self.setting(), path)
+    }
+
+    /// How to explain changes with `setting`, given the `PATH` to look for
+    /// agents in.
+    ///
+    /// # Errors
+    /// Explains, for the user, why explanations are unavailable.
+    pub fn explainer_for(
+        &self,
+        setting: &agent::Setting,
+        path: Option<&OsStr>,
+    ) -> Result<Explainer, String> {
         if self.no_network {
             return Err("network access is off (--no-network)".to_owned());
         }
-        let agent = agent::select(self.explain_agent, self.explain_cmd.as_deref(), path)?;
+        let agent = match setting.pick {
+            agent::Pick::Command => agent::select(self.explain_agent, self.command(), path)?,
+            agent::Pick::Agent(choice) => agent::select(choice, None, path)?,
+        };
         Ok(Explainer {
             agent,
-            model: self.model(),
+            model: setting.model.clone(),
             timeout: Duration::from_secs(self.explain_timeout_secs),
             max_diff_bytes: self.max_diff_bytes(),
             cache: Some(Cache::new(cache_dir().join("vert/explain"))),
@@ -326,13 +371,31 @@ impl Config {
     /// # Errors
     /// Explains, for the user, why fixes are unavailable.
     pub fn fixer(&self, path: Option<&OsStr>) -> Result<Fixer, String> {
+        self.fixer_for(&self.setting(), path)
+    }
+
+    /// How to fix changes with `setting`, given the `PATH` to look for
+    /// agents in. A command can't edit, so with one fixes use the agent
+    /// `--explain-agent` names.
+    ///
+    /// # Errors
+    /// Explains, for the user, why fixes are unavailable.
+    pub fn fixer_for(
+        &self,
+        setting: &agent::Setting,
+        path: Option<&OsStr>,
+    ) -> Result<Fixer, String> {
         if self.no_network {
             return Err("network access is off (--no-network)".to_owned());
         }
-        let agent = agent::select_editor(self.explain_agent, path)?;
+        let choice = match setting.pick {
+            agent::Pick::Command => self.explain_agent,
+            agent::Pick::Agent(choice) => choice,
+        };
+        let agent = agent::select_editor(choice, path)?;
         Ok(Fixer {
             agent,
-            model: self.model(),
+            model: setting.model.clone(),
             timeout: Duration::from_secs(self.explain_timeout_secs),
             max_excerpt_bytes: self.max_diff_bytes(),
             commit: !self.no_fix_commit,
@@ -525,6 +588,64 @@ mod tests {
             }
         }
         dir
+    }
+
+    #[test]
+    fn settings_start_from_the_flags_and_can_be_picked_in_vert() {
+        let base = ["vert", "--explain-agent", "codex", "--explain-model", " m "];
+        let config = Config::parse_from(base.iter().chain(&["--explain-cmd", " "]));
+        assert!(!config.has_command(), "blank is no command");
+        assert_eq!(
+            config.setting(),
+            agent::Setting {
+                pick: agent::Pick::Agent(Choice::Codex),
+                model: Some("m".to_owned()),
+            }
+        );
+        let config = Config::parse_from(base.iter().chain(&["--explain-cmd", "llm"]));
+        assert!(config.has_command());
+        assert_eq!(config.setting().pick, agent::Pick::Command);
+
+        let dir = agents(&["claude", "pi"]);
+        let path = Some(dir.path().as_os_str());
+        let pick = |pick, model: Option<&str>| agent::Setting {
+            pick,
+            model: model.map(str::to_owned),
+        };
+        // An agent picked in vert wins over the command for explanations.
+        let claude = pick(agent::Pick::Agent(Choice::Claude), Some("opus"));
+        let ex = config.explainer_for(&claude, path).expect("claude");
+        assert_eq!(
+            (ex.agent, ex.model),
+            (agent::Agent::Claude, Some("opus".to_owned()))
+        );
+        let fixer = config.fixer_for(&claude, path).expect("claude");
+        assert_eq!(
+            (fixer.agent, fixer.model),
+            (agent::Agent::Claude, Some("opus".to_owned()))
+        );
+        // Back to the command: it explains, and fixes use --explain-agent.
+        let command = pick(agent::Pick::Command, None);
+        let ex = config.explainer_for(&command, path).expect("command");
+        assert_eq!(
+            (ex.agent, ex.model),
+            (agent::Agent::Custom("llm".to_owned()), None)
+        );
+        let codex = config
+            .fixer_for(&command, path)
+            .expect_err("codex isn't installed");
+        assert!(codex.contains("codex"), "{codex}");
+        // One that isn't installed says so; offline nothing runs.
+        let missing = pick(agent::Pick::Agent(Choice::Codex), None);
+        assert!(config.explainer_for(&missing, path).is_err());
+        let auto = pick(agent::Pick::Agent(Choice::Auto), None);
+        assert_eq!(
+            config.fixer_for(&auto, path).map(|f| f.agent),
+            Ok(agent::Agent::Claude)
+        );
+        let offline = Config::parse_from(["vert", "--no-network"]);
+        assert!(offline.explainer_for(&claude, path).is_err());
+        assert!(offline.fixer_for(&claude, path).is_err());
     }
 
     #[test]

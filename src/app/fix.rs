@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, Effect, Focus, Item, View, concern_at, delete_word};
+use super::{App, Effect, Item, View, concern_at, delete_word};
 use crate::explain::Note;
 use crate::fix::{Done, Fixer, Request, excerpt, place};
 use crate::git::Target;
@@ -280,36 +280,19 @@ impl App {
         });
     }
 
-    /// `f` in a diff: feedback on the hunk at the top of the diff pane, or on
-    /// the selected file from the file list.
+    /// `f` in a diff: feedback on the lines selected with `v`, else on the
+    /// whole selected file.
     pub(super) fn draft_fix_from_detail(&mut self) -> Vec<Effect> {
         let Some(View::Detail(d)) = self.views.last() else {
             return Vec::new();
         };
         let entry = d.entry.clone();
+        if let Some((place, excerpt)) = super::ask::selected(d) {
+            self.start_draft(&entry, Some(place), excerpt, String::new(), None);
+            return Vec::new();
+        }
         let file = d.files.get(d.pos.selected).cloned();
-        // The hunk the top row is in, and a line of that same hunk: the row's
-        // own line, or the hunk's first changed one when the row has none in
-        // it (a separator, a trailing removed line).
-        let (hunk, line) = match (&file, d.focus) {
-            (Some(f), Focus::Diff) => {
-                let hunk = d
-                    .rendered
-                    .hunk_starts
-                    .iter()
-                    .rposition(|&s| s <= d.scroll)
-                    .unwrap_or(0);
-                let line = f.hunks.get(hunk).and_then(|h| {
-                    d.rendered
-                        .new_line_at(d.scroll)
-                        .filter(|&l| h.holds_new_line(l))
-                        .or_else(|| h.first_changed_line())
-                });
-                (Some(hunk), line)
-            }
-            _ => (None, None),
-        };
-        self.draft_fix(&entry, (file.as_ref(), hunk, line), String::new(), None);
+        self.draft_fix(&entry, (file.as_ref(), None, None), String::new(), None);
         Vec::new()
     }
 

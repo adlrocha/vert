@@ -1,6 +1,8 @@
 //! Rendering. Everything here is a pure function of [`App`] state, except
 //! that list offsets and viewport heights are written back for scrolling.
 
+mod agents;
+mod answer;
 mod branches;
 pub mod detail;
 mod explain;
@@ -51,6 +53,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             explain::draw(frame, body, v, (asking, fixes), app.now, app.tick);
             explain::EXPLAIN_HINTS
         }
+        Some(View::Answer(v)) => {
+            draw_crumbs(frame, tabs, &[app.tab.title(), &v.entry.short, "Ask"]);
+            answer::draw(frame, body, v, app.now, app.tick);
+            answer::ANSWER_HINTS
+        }
         None => {
             draw_tabs(frame, tabs, app);
             match app.tab {
@@ -70,6 +77,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.fix.draft.is_some() {
         fix::draw_draft(frame, frame.area(), app);
+    }
+    if app.ask.draft.is_some() {
+        answer::draw_draft(frame, frame.area(), app);
+    }
+    if app.agents.picker.is_some() {
+        agents::draw_picker(frame, frame.area(), app);
     }
     if let Some(View::Explain(v)) = app.views.last() {
         explain::draw_question(frame, frame.area(), v);
@@ -211,6 +224,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("⏎", "open"),
             ("esc q", "back / quit"),
             ("r", "reload"),
+            ("M", "agent and model"),
         ],
     ),
     ("Feed", &[("n", "next new change"), ("esc", "clear filter")]),
@@ -243,8 +257,11 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n N", "next / prev hunk"),
             ("← →", "scroll sideways"),
             ("⏎ e", "view / edit file"),
+            ("v", "select lines (j k extend)"),
             ("x", "explain the change"),
-            ("f", "have the agent fix the file or hunk"),
+            ("a", "ask about the lines or file"),
+            ("A", "answers asked here"),
+            ("f", "fix the lines or file"),
         ],
     ),
     (
@@ -1145,6 +1162,207 @@ mod render_tests {
         assert!(screen(&mut app, 140, 20).contains("Uncommitted changes"));
     }
 
+    #[test]
+    fn selections_answers_and_the_ask_prompt_render() {
+        use crate::explain::question::Question;
+        let (t, mut app) = real_app();
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
+        let entry = app.feed.commits[0].clone();
+        let files = git::diff::load(&t.repo, entry.target).expect("diff");
+        let key = crate::explain::diff_key(&entry, &files);
+        app.update(Msg::Diff {
+            entry: Box::new(entry),
+            result: Ok(files.clone()),
+            refresh: false,
+            file: None,
+        });
+        assert!(screen(&mut app, 140, 30).contains("v select"), "hints");
+        // Down to src/main.rs, whose diff has a few lines.
+        let main = files
+            .iter()
+            .position(|f| f.stat.path == "src/main.rs")
+            .expect("main");
+        for _ in 0..main {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        let s = screen(&mut app, 140, 30);
+        assert!(
+            s.contains("3 rows selected · a ask · f fix · esc clear"),
+            "{s}"
+        );
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+
+        press(&mut app, KeyCode::Char('a'));
+        for c in "why?".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Ask pi about src/main.rs:1-5"), "{s}");
+        assert!(s.contains("It sees the whole diff and these lines"), "{s}");
+        assert!(s.contains("why?▏"), "{s}");
+        press(&mut app, KeyCode::Enter);
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Q why?"), "{s}");
+        assert!(s.contains("about src/main.rs:1-5"), "{s}");
+        assert!(s.contains("pi is answering"), "{s}");
+        assert!(s.contains("ask more"), "hints: {s}");
+        app.update(Msg::Answered {
+            key,
+            result: Ok(Question {
+                question: "why?".to_owned(),
+                answer: "To greet.\n\nPolitely.".to_owned(),
+                refs: vec![crate::explain::Ref {
+                    path: "src/main.rs".to_owned(),
+                    hunk: Some(0),
+                    label: "@@ hunk".to_owned(),
+                }],
+                about: Some("src/main.rs:1-5".to_owned()),
+            }),
+        });
+        let s = screen(&mut app, 140, 30);
+        for needle in ["To greet.", "Politely.", "Code", "› src/main.rs"] {
+            assert!(s.contains(needle), "{needle}: {s}");
+        }
+        assert!(!s.contains("is answering"), "{s}");
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+        // A failed follow-up says why, under the answers.
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Enter);
+        app.update(Msg::Answered {
+            key,
+            result: Err("timed out".to_owned()),
+        });
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("Couldn't answer: timed out"), "{s}");
+        assert!(s.contains("To greet."), "{s}");
+
+        // A whole file, with nothing selected, says so.
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('a'));
+        let s = screen(&mut app, 140, 30);
+        assert!(s.contains("can read the file"), "{s}");
+    }
+
+    #[test]
+    fn the_answer_panel_follows_the_selected_pointer() {
+        use crate::explain::question::Question;
+        let (_t, mut app) = real_app();
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
+        let entry = app.feed.worktree.clone().expect("dirty");
+        app.update(Msg::Diff {
+            entry: Box::new(entry.clone()),
+            result: Ok(Vec::new()),
+            refresh: false,
+            file: None,
+        });
+        // An empty change has nothing to ask about; open the panel by hand.
+        let at = |label: &str| crate::explain::Ref {
+            path: "src/main.rs".to_owned(),
+            hunk: None,
+            label: label.to_owned(),
+        };
+        let long = "word ".repeat(200);
+        let answered = (0..3)
+            .map(|i| Question {
+                question: format!("q{i}"),
+                answer: long.clone(),
+                refs: vec![at(&format!("pointer {i}"))],
+                about: None,
+            })
+            .collect();
+        app.views
+            .push(crate::app::View::Answer(Box::new(crate::app::AnswerView {
+                key: 1,
+                entry,
+                files: Vec::new(),
+                agent: "pi".to_owned(),
+                about: crate::explain::question::About {
+                    place: "src/main.rs".to_owned(),
+                    excerpt: String::new(),
+                },
+                answered,
+                pending: None,
+                failed: None,
+                target: 0,
+                scroll: usize::MAX,
+                follow: false,
+                height: 0,
+                rows: 0,
+            })));
+        let s = screen(&mut app, 80, 16);
+        assert!(s.contains("Uncommitted changes"), "{s}");
+        assert!(s.contains("pointer 2"), "starts at the end: {s}");
+        press(&mut app, KeyCode::Char('g'));
+        let s = screen(&mut app, 80, 16);
+        assert!(s.contains("pointer 0") && !s.contains("pointer 2"), "{s}");
+        press(&mut app, KeyCode::Char('G'));
+        let s = screen(&mut app, 80, 16);
+        assert!(s.contains("pointer 2"), "{s}");
+    }
+
+    #[test]
+    fn a_long_selection_previews_its_first_lines() {
+        let (t, mut app) = real_app();
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
+        app.ask.draft = Some(crate::app::AskDraft {
+            key: 1,
+            entry: app.feed.commits[0].clone(),
+            files: Vec::new(),
+            about: crate::explain::question::About {
+                place: "a.rs:1-9".to_owned(),
+                excerpt: "@@ -1 +1 @@\n-a\n+b\n c\n+d\n+e\n+f\n".to_owned(),
+            },
+            text: String::new(),
+        });
+        drop(t);
+        let s = screen(&mut app, 100, 30);
+        assert!(
+            s.contains("-a") && s.contains("+b") && s.contains("+d"),
+            "{s}"
+        );
+        assert!(!s.contains("+e"), "{s}");
+        assert!(s.contains("… 2 more lines"), "{s}");
+    }
+
+    #[test]
+    fn the_agent_picker_renders() {
+        use crate::explain::agent::{Choice, Pick, Setting};
+        let (_t, mut app) = real_app();
+        app.set_agents(
+            Setting {
+                pick: Pick::Agent(Choice::Pi),
+                model: Some("anthropic/x".to_owned()),
+            },
+            true,
+        );
+        press(&mut app, KeyCode::Char('M'));
+        let s = screen(&mut app, 100, 30);
+        for needle in [
+            "Agent",
+            "--explain-cmd",
+            "[pi]",
+            " claude ",
+            "Model (blank for the agent's default)",
+            "provider/model",
+            "anthropic/x▏",
+            "←→ agent",
+        ] {
+            assert!(s.contains(needle), "{needle}: {s}");
+        }
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+    }
+
     /// The real app with the newest commit's diff open and an explanation
     /// asked for: the app, the diff, and the request's key.
     fn explaining() -> (TestRepo, App, Vec<git::diff::FileDiff>, u64) {
@@ -1336,6 +1554,7 @@ mod render_tests {
                     hunk: Some(0),
                     label: "@@ hunk".to_owned(),
                 }],
+                about: None,
             }),
         });
         let s = screen(&mut app, 140, 30);
@@ -1362,6 +1581,7 @@ mod render_tests {
                 question: "and?".to_owned(),
                 answer: "Nothing else.".to_owned(),
                 refs: Vec::new(),
+                about: None,
             }),
         });
         let s = screen(&mut app, 140, 30);

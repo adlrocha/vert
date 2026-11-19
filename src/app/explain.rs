@@ -294,6 +294,19 @@ impl ExplainState {
         self.questioning.get(&key).copied()
     }
 
+    /// The explanation of the diff `key`, if one has arrived while vert
+    /// runs, with every question answered about it since.
+    #[must_use]
+    pub fn explanation(&self, key: u64) -> Option<Explanation> {
+        self.answers.get(&key).map(|(e, _)| e.clone())
+    }
+
+    /// Records that the agent is answering a question about the diff
+    /// `key`, since `now`.
+    pub(super) fn start_question(&mut self, key: u64, now: i64) {
+        self.questioning.insert(key, now);
+    }
+
     /// The fixes asked for concerns of the diff `key`, by concern.
     #[must_use]
     pub fn concern_fixes(&self, key: u64) -> Option<&BTreeMap<String, ConcernFix>> {
@@ -769,7 +782,9 @@ impl App {
             key: v.key,
             entry: v.entry.clone(),
             files: v.files.clone(),
-            explanation: explanation.clone(),
+            explanation: Some(explanation.clone()),
+            earlier: explanation.questions.clone(),
+            about: None,
             question: question.clone(),
         }));
         v.question = None;
@@ -782,6 +797,8 @@ impl App {
     /// is on top.
     pub(super) fn on_answered(&mut self, key: u64, result: Result<Question, String>) {
         self.explain.questioning.remove(&key);
+        // Asked from the diff: its answer panel shows it, on screen or not.
+        let panel = self.on_panel_answer(key, &result);
         // Asked before its explanation was asked again about the change as
         // it is now: the answer joins the view there.
         let moved = self.explain.moved.get(&key).copied();
@@ -793,10 +810,18 @@ impl App {
             Ok(q) => q,
             Err(why) => {
                 // The agent's own error output: untrusted, like all it prints.
-                self.notice = Some(format!("Couldn't answer: {}", sanitize(&why)));
+                if panel != Some(true) {
+                    self.notice = Some(format!("Couldn't answer: {}", sanitize(&why)));
+                }
                 return;
             }
         };
+        // Unless its explanation on screen shows it (below).
+        let explained_on_top = matches!(self.views.last(), Some(View::Explain(v)) if v.key == key);
+        if panel == Some(false) && !explained_on_top {
+            self.notice =
+                Some("An answer is ready: open the change and press A to read it".to_owned());
+        }
         for view in self.explain_views(key) {
             if let Some(reload) = view.reload.as_mut() {
                 reload.answered.push(answered.clone());
@@ -828,7 +853,7 @@ impl App {
                 v.target = 0;
                 v.scroll = 0;
             }
-        } else {
+        } else if panel.is_none() {
             self.notice = Some("An answer is ready: open the change and press x".to_owned());
         }
     }
@@ -857,6 +882,11 @@ impl App {
     /// Leaves the explain view and shows the code `r` points at in the diff.
     fn jump(&mut self, r: &Ref) {
         self.close_explain();
+        self.show_in_diff(r);
+    }
+
+    /// Shows the code `r` points at in the diff on top.
+    pub(super) fn show_in_diff(&mut self, r: &Ref) {
         let max = self.max_highlight;
         let Some(View::Detail(d)) = self.views.last_mut() else {
             return;
@@ -865,6 +895,9 @@ impl App {
             self.notice = Some(format!("{} is no longer part of this change", r.path));
             return;
         };
+        if d.pos.selected != index {
+            d.selection = None;
+        }
         d.pos.selected = index;
         d.rendered = build_diff(&d.files[index], max);
         d.hscroll = 0;
@@ -1336,6 +1369,7 @@ mod tests {
             question: "Why retry?".to_owned(),
             answer: "GitHub flakes.".to_owned(),
             refs,
+            about: None,
         }
     }
 
@@ -1802,7 +1836,9 @@ mod tests {
         };
         assert_eq!(asking.key, key);
         assert_eq!(asking.question, "Why retry?");
-        assert_eq!(asking.explanation, explanation());
+        assert_eq!(asking.explanation, Some(explanation()));
+        assert_eq!(asking.earlier, explanation().questions);
+        assert_eq!(asking.about, None, "about the change as a whole");
         assert_eq!(asking.files.len(), 2);
         assert_eq!(view(&a).question, None);
         let asked_now = |a: &App| a.explain.question_asked(key);

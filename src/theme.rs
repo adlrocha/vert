@@ -61,3 +61,15 @@ pub fn border(focused: bool) -> Style {
 pub fn matched() -> Style {
     Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD)
 }
+
+/// Rows selected for an agent to look at (`v` in a diff).
+#[must_use]
+pub fn selected() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
+}
+
+/// The cursor row of a selection.
+#[must_use]
+pub fn cursor() -> Style {
+    accent_bold().add_modifier(Modifier::REVERSED)
+}

@@ -171,10 +171,14 @@ pub fn describe(e: &dyn std::error::Error) -> String {
 }
 
 /// Whether `effect` is background I/O handled by [`run`] (as opposed to
-/// quitting or launching the editor, which need the terminal).
+/// quitting or launching the editor, which need the terminal, or changing
+/// the agent, which changes what the runtime hands its workers).
 #[must_use]
 pub const fn is_background(effect: &Effect) -> bool {
-    !matches!(effect, Effect::Quit | Effect::Edit { .. })
+    !matches!(
+        effect,
+        Effect::Quit | Effect::Edit { .. } | Effect::SetAgent(_)
+    )
 }
 
 /// Records a new content search as the latest; call before spawning [`run`].
@@ -231,7 +235,7 @@ fn find_overlaps(
 pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
     let open = || git::open(&ctx.workdir);
     Some(match effect {
-        Effect::Quit | Effect::Edit { .. } => return None,
+        Effect::Quit | Effect::Edit { .. } | Effect::SetAgent(_) => return None,
         // The update check may have nothing to say; every other effect answers.
         Effect::CheckUpdate => return check_update(ctx),
         Effect::LoadCommits => {
@@ -598,9 +602,15 @@ mod tests {
             line: 1,
             root: None,
         }));
+        let pick = Effect::SetAgent(crate::explain::agent::Setting {
+            pick: crate::explain::agent::Pick::Command,
+            model: None,
+        });
+        assert!(!is_background(&pick));
         assert!(is_background(&Effect::LoadFiles));
         let t = repo();
         assert!(run(Effect::Quit, &ctx(&t)).is_none());
+        assert!(run(pick, &ctx(&t)).is_none());
     }
 
     #[test]
@@ -1229,7 +1239,9 @@ mod tests {
             key: 4,
             entry: elsewhere,
             files,
-            explanation,
+            explanation: Some(explanation),
+            earlier: Vec::new(),
+            about: None,
             question: "Where?".to_owned(),
         }));
         let Some(Msg::Answered { key: 4, result }) = run(asking.clone(), &c) else {

@@ -4,6 +4,8 @@
 //! returns the [`Effect`]s (I/O) the runtime should perform. This keeps all
 //! interaction logic testable without a terminal or repository.
 
+mod agents;
+mod ask;
 mod branches;
 mod explain;
 mod fix;
@@ -13,6 +15,8 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+pub use agents::{AgentsState, Picker, model_hint, pick_name};
+pub use ask::{AnswerView, AskDraft, AskState, Pending};
 pub use branches::{
     BranchRemoval, BranchesState, CollisionList, CollisionRow, PullStatus, Refresh, Removal, Row,
     RowFilter, Start, pull_entry,
@@ -340,6 +344,37 @@ impl SearchState {
     }
 }
 
+/// Rows of the diff pane selected with `v`, for `a` and `f` to be about:
+/// every row from `anchor` to `cursor`, both included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    /// The row the selection started at.
+    pub anchor: usize,
+    /// The row the cursor is on; `j`/`k` move it.
+    pub cursor: usize,
+}
+
+impl Selection {
+    /// The first and last selected rows.
+    ///
+    /// ```
+    /// let s = vert::app::Selection { anchor: 7, cursor: 3 };
+    /// assert_eq!(s.rows(), (3, 7));
+    /// assert!(s.contains(5) && !s.contains(8));
+    /// ```
+    #[must_use]
+    pub fn rows(self) -> (usize, usize) {
+        (self.anchor.min(self.cursor), self.anchor.max(self.cursor))
+    }
+
+    /// Whether `row` is selected.
+    #[must_use]
+    pub fn contains(self, row: usize) -> bool {
+        let (first, last) = self.rows();
+        (first..=last).contains(&row)
+    }
+}
+
 /// The diff detail view.
 #[derive(Debug)]
 pub struct DetailView {
@@ -359,6 +394,8 @@ pub struct DetailView {
     pub height: usize,
     /// Rendered lines of the selected file.
     pub rendered: RenderedDiff,
+    /// Lines selected in the diff pane (`v`), if any.
+    pub selection: Option<Selection>,
 }
 
 /// The file viewer.
@@ -395,6 +432,8 @@ pub enum View {
     File(Box<FileView>),
     /// An agent's explanation of the change underneath.
     Explain(Box<ExplainView>),
+    /// Answers to questions asked from the diff underneath (`a`).
+    Answer(Box<AnswerView>),
 }
 
 impl View {
@@ -597,6 +636,9 @@ pub enum Effect {
     },
     /// Ask a coding agent a follow-up question about a change it explained.
     Ask(Box<crate::explain::question::Ask>),
+    /// Use this agent and model from now on (`M`): the runtime builds them
+    /// and reports back with [`App::agents_changed`].
+    SetAgent(crate::explain::agent::Setting),
     /// Ask a coding agent to act on feedback, editing files in a checkout.
     Fix {
         /// Identifies the request in [`Msg::Fixed`].
@@ -639,6 +681,10 @@ pub struct App {
     pub explain: ExplainState,
     /// Fixes asked of the agent.
     pub fix: FixState,
+    /// Questions asked from diffs.
+    pub ask: AskState,
+    /// The agent and model in use, and the picker (`M`).
+    pub agents: AgentsState,
     /// Stacked views (detail, file); the last one is on screen.
     pub views: Vec<View>,
     /// Whether the help overlay is shown.
@@ -699,6 +745,8 @@ impl App {
             refresh: Refresh::default(),
             explain: ExplainState::default(),
             fix: FixState::default(),
+            ask: AskState::default(),
+            agents: AgentsState::default(),
             views: Vec::new(),
             help: false,
             watch: WatchStatus::Live,
@@ -987,6 +1035,7 @@ impl App {
             hscroll: 0,
             height: 0,
             rendered,
+            selection: None,
         })));
     }
 
@@ -996,11 +1045,16 @@ impl App {
         if let Some(d) = self.views.iter_mut().rev().find_map(View::as_detail_mut)
             && d.entry.id == entry.id
         {
-            let current = d.files.get(d.pos.selected).map(|f| f.stat.path.clone());
+            let current = d.files.get(d.pos.selected).cloned();
             d.pos.selected = current
-                .and_then(|p| files.iter().position(|f| f.stat.path == p))
+                .as_ref()
+                .and_then(|c| files.iter().position(|f| f.stat.path == c.stat.path))
                 .unwrap_or(0)
                 .min(files.len().saturating_sub(1));
+            // Selected rows only mean the same lines in the same diff.
+            if files.get(d.pos.selected) != current.as_ref() {
+                d.selection = None;
+            }
             d.files = files;
             d.rendered = d
                 .files
@@ -1064,11 +1118,24 @@ impl App {
         if self.fix.draft.is_some() {
             return self.on_draft_key(&key);
         }
+        if self.ask.draft.is_some() {
+            return self.on_ask_draft_key(&key);
+        }
         if self.branches.collisions.is_some() {
             return self.on_collisions_key(&key);
         }
         if matches!(self.views.last(), Some(View::Explain(v)) if v.question.is_some()) {
             return self.on_question_key(&key);
+        }
+        if self.agents.picker.is_some() {
+            return self.on_picker_key(&key);
+        }
+        // Everywhere but where text is typed (search, the name filter).
+        let typing = self.views.is_empty()
+            && (self.tab == Tab::Search
+                || (self.tab == Tab::Branches && self.branches.filter_editing));
+        if key.code == KeyCode::Char('M') && !typing {
+            return self.open_picker();
         }
         if !self.views.is_empty() {
             return self.on_view_key(&key);
@@ -1329,12 +1396,20 @@ impl App {
     }
 
     fn on_view_key(&mut self, key: &KeyEvent) -> Vec<Effect> {
+        if key.code == KeyCode::Esc
+            && let Some(View::Detail(d)) = self.views.last_mut()
+            && d.selection.take().is_some()
+        {
+            return Vec::new();
+        }
         if matches!(
             key.code,
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace
         ) {
             if matches!(self.views.last(), Some(View::Explain(_))) {
                 self.close_explain();
+            } else if matches!(self.views.last(), Some(View::Answer(_))) {
+                self.close_answers();
             } else {
                 self.views.pop();
             }
@@ -1348,12 +1423,15 @@ impl App {
         match self.views.last_mut() {
             Some(View::Detail(_)) if key.code == KeyCode::Char('x') => self.open_explain(),
             Some(View::Detail(_)) if key.code == KeyCode::Char('f') => self.draft_fix_from_detail(),
+            Some(View::Detail(_)) if key.code == KeyCode::Char('a') => self.draft_ask_from_detail(),
+            Some(View::Detail(_)) if key.code == KeyCode::Char('A') => self.reopen_answers(),
             Some(View::Explain(_)) if key.code == KeyCode::Char('f') => {
                 self.draft_fix_from_explain()
             }
             Some(View::Detail(d)) => detail_key(d, key, max),
             Some(View::File(f)) => file_key(f, key),
             Some(View::Explain(_)) => self.on_explain_key(key),
+            Some(View::Answer(_)) => self.on_answer_key(key),
             None => Vec::new(),
         }
     }
@@ -1384,12 +1462,59 @@ fn scroll_by(value: usize, delta: isize, max: usize) -> usize {
     value.saturating_add_signed(delta).min(max)
 }
 
+/// Moves the cursor of a selection in the diff pane (`v`) for `key`, and
+/// scrolls to keep it in view; returns whether `key` moved it.
+fn move_selection(d: &mut DetailView, key: &KeyEvent) -> bool {
+    let Some(selection) = d.selection.as_mut() else {
+        return false;
+    };
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let half = isize::try_from(half_page(d.height)).unwrap_or(1);
+    let last = d.rendered.len().saturating_sub(1);
+    let by = |delta: isize| selection.cursor.saturating_add_signed(delta);
+    let row = match key.code {
+        KeyCode::Down | KeyCode::Char('j') if !ctrl => by(1),
+        KeyCode::Up | KeyCode::Char('k') if !ctrl => by(-1),
+        KeyCode::Char('d') if ctrl => by(half),
+        KeyCode::Char('u') if ctrl => by(-half),
+        KeyCode::PageDown => by(half * 2),
+        KeyCode::PageUp => by(-half * 2),
+        KeyCode::Char('g') | KeyCode::Home => 0,
+        KeyCode::Char('G') | KeyCode::End => last,
+        _ => return false,
+    };
+    selection.cursor = row.min(last);
+    let cursor = selection.cursor;
+    if cursor < d.scroll {
+        d.scroll = cursor;
+    } else if d.height > 0 && cursor >= d.scroll + d.height {
+        d.scroll = cursor + 1 - d.height;
+    }
+    true
+}
+
 fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<Effect> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let max_scroll = max_scroll(d.rendered.len(), d.height);
     let half = isize::try_from(half_page(d.height)).unwrap_or(1);
     let previous = d.pos.selected;
+    if d.focus == Focus::Diff && move_selection(d, key) {
+        return Vec::new();
+    }
     match (key.code, d.focus) {
+        (KeyCode::Char('v'), _) => {
+            d.selection = match d.selection {
+                Some(_) => None,
+                None if d.rendered.is_empty() => None,
+                None => {
+                    d.focus = Focus::Diff;
+                    Some(Selection {
+                        anchor: d.scroll,
+                        cursor: d.scroll,
+                    })
+                }
+            };
+        }
         (KeyCode::Tab | KeyCode::BackTab, _) => {
             d.focus = match d.focus {
                 Focus::Files => Focus::Diff,
@@ -1450,9 +1575,15 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
         }
         _ => {}
     }
+    if d.focus == Focus::Files {
+        // A selection is of the diff pane's lines; the file list's `a` and
+        // `f` are about the whole file.
+        d.selection = None;
+    }
     if d.pos.selected != previous {
         d.scroll = 0;
         d.hscroll = 0;
+        d.selection = None;
         d.rendered = d
             .files
             .get(d.pos.selected)

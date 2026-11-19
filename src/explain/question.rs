@@ -1,8 +1,11 @@
-//! Follow-up questions about an explained change.
+//! Questions about a change: follow-ups to its explanation (`a` in the
+//! explain view), or asked straight from the diff (`a` there), about the
+//! lines selected or the whole file.
 //!
 //! A question is a fresh read-only run of the same agent. Its prompt carries
 //! the change and its diff (as the explanation's did), the explanation the
-//! agent gave, the questions asked so far with their answers, and the new
+//! agent gave if there is one, the questions asked so far with their
+//! answers, where in the change the person is looking, and the new
 //! question, so every agent and `--explain-cmd` can answer it, and so can an
 //! explanation read from the cache. The answer is one JSON object, a text
 //! and the hunks it is about, checked against the diff like the
@@ -26,12 +29,12 @@ use crate::git::feed::Entry;
 
 /// Names the question prompt's format, for whoever reads a prompt. Stored
 /// questions don't depend on it, so it isn't part of their key.
-const PROMPT_VERSION: &str = "vert-question-1";
+const PROMPT_VERSION: &str = "vert-question-2";
 
 /// Bumped whenever the way questions are stored changes.
 const THREAD_VERSION: &str = "vert-questions-1";
 
-const INSTRUCTIONS: &str = r#"You explained a code change in this repository to a person reviewing it. The change, your explanation and the questions they asked so far are below. Answer their new question.
+const INSTRUCTIONS: &str = r#"A person reviewing a code change in this repository asks you a question about it. Below are the change, the explanation you gave of it (if you gave one), the questions they asked so far, where in the change they are looking (if they pointed somewhere), and their new question. Answer the new question.
 
 You may read files in the current directory to answer. Do not modify anything. The diff below is the source of truth for what changed; the files on disk may be at a different version.
 
@@ -45,7 +48,18 @@ Rules:
 - If the change and the repository don't answer the question, say so. Do not invent.
 - Only refer to the files and hunks listed below."#;
 
-/// A follow-up question to put to the agent, with all it is about.
+/// Where in the change a question asked from the diff points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct About {
+    /// The place, as for a fix (see [`crate::fix::place`]): the lines
+    /// selected (`src/a.rs:10-14`), or a whole file.
+    pub place: String,
+    /// The lines selected, in diff form under their hunks' headers (see
+    /// [`crate::fix::picked`]); empty for a whole file.
+    pub excerpt: String,
+}
+
+/// A question to put to the agent, with all it is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     /// Identifies the exact diff (see [`diff_key`]).
@@ -54,8 +68,14 @@ pub struct Ask {
     pub entry: Entry,
     /// Its diff.
     pub files: Vec<FileDiff>,
-    /// The explanation, with the questions asked so far.
-    pub explanation: Explanation,
+    /// The explanation the agent gave, if there is one: a question asked
+    /// from the diff may come before any.
+    pub explanation: Option<Explanation>,
+    /// The questions asked so far, oldest first, replayed to the agent.
+    pub earlier: Vec<Question>,
+    /// Where in the change the question points, when it was asked from
+    /// the diff.
+    pub about: Option<About>,
     /// The new question.
     pub question: String,
 }
@@ -69,6 +89,9 @@ pub struct Question {
     pub answer: String,
     /// The code the answer is about.
     pub refs: Vec<Ref>,
+    /// Where in the change it was asked about ([`About::place`]), when it
+    /// was asked from the diff.
+    pub about: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +109,8 @@ struct Saved {
     answer: String,
     #[serde(default)]
     refs: Vec<RawRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    about: Option<String>,
 }
 
 impl Question {
@@ -121,6 +146,7 @@ impl Question {
             question: clean(question),
             answer: text,
             refs,
+            about: None,
         })
     }
 }
@@ -146,6 +172,7 @@ fn load(saved: &str, files: &[FileDiff]) -> Vec<Question> {
                 question: clean(&s.question),
                 answer,
                 refs: resolve.many(&s.refs),
+                about: s.about.as_deref().map(clean).filter(|a| !a.is_empty()),
             })
         })
         .collect()
@@ -159,6 +186,7 @@ fn save(questions: &[Question]) -> serde_json::Result<String> {
             question: q.question.clone(),
             answer: q.answer.clone(),
             refs: q.refs.iter().map(RawRef::from).collect(),
+            about: q.about.clone(),
         })
         .collect();
     serde_json::to_string(&saved)
@@ -252,37 +280,44 @@ fn push_within(out: &mut String, text: &str, budget: &mut usize) {
     *budget = 0;
 }
 
-/// Builds the prompt for `question` about `entry`, whose diff is `files`
-/// and which the agent explained as `explanation` (its questions so far
-/// included). Hunk bodies stop once the diff passes `max_diff_bytes`; the
-/// explanation and the earlier answers get the same budget again, the
-/// newest answers first.
+/// Builds the prompt for `asked`. Hunk bodies stop once the diff passes
+/// `max_diff_bytes`; the explanation and the earlier answers get the same
+/// budget again, the newest answers first, and so do the lines the person
+/// selected.
 #[must_use]
-pub fn prompt(
-    entry: &Entry,
-    files: &[FileDiff],
-    max_diff_bytes: usize,
-    explanation: &Explanation,
-    question: &str,
-) -> String {
+pub fn prompt(asked: &Ask, max_diff_bytes: usize) -> String {
+    let Ask {
+        entry,
+        files,
+        explanation,
+        earlier,
+        about,
+        question,
+        ..
+    } = asked;
     let mut out = String::with_capacity(max_diff_bytes.min(1 << 20) + INSTRUCTIONS.len() + 4096);
     out.push_str(PROMPT_VERSION);
     out.push_str("\n\n");
     out.push_str(INSTRUCTIONS);
     describe_change(&mut out, entry, files, max_diff_bytes);
-    out.push_str("\n# Your explanation\n\n");
     let mut budget = max_diff_bytes;
-    let mut said = String::new();
-    recap(&mut said, explanation);
-    push_within(&mut out, &said, &mut budget);
-    if !explanation.questions.is_empty() {
-        let mut replayed: Vec<String> = explanation
-            .questions
+    if let Some(explanation) = explanation {
+        out.push_str("\n# Your explanation\n\n");
+        let mut said = String::new();
+        recap(&mut said, explanation);
+        push_within(&mut out, &said, &mut budget);
+    }
+    if !earlier.is_empty() {
+        let mut replayed: Vec<String> = earlier
             .iter()
             .rev()
             .map(|q| {
+                let at = q
+                    .about
+                    .as_deref()
+                    .map_or_else(String::new, |a| format!(" (about {a})"));
                 format!(
-                    "\nQ: {}\nA: {}{}\n",
+                    "\nQ{at}: {}\nA: {}{}\n",
                     q.question,
                     q.answer,
                     pointers(&q.refs)
@@ -298,7 +333,7 @@ pub fn prompt(
             .collect();
         replayed.reverse();
         out.push_str("\n# Earlier questions\n");
-        let left_out = explanation.questions.len() - replayed.len();
+        let left_out = earlier.len() - replayed.len();
         if left_out > 0 {
             let _ = writeln!(
                 out,
@@ -307,6 +342,20 @@ pub fn prompt(
             );
         }
         out.push_str(&replayed.concat());
+    }
+    if let Some(about) = about {
+        let _ = writeln!(out, "\n# Where they are looking\n\n{}", about.place);
+        if about.excerpt.is_empty() {
+            out.push_str("\nThe question is about this file as a whole. Read it for the code around the change.\n");
+        } else {
+            out.push_str("\nThe lines they selected:\n\n```diff\n");
+            let mut room = max_diff_bytes;
+            push_within(&mut out, &about.excerpt, &mut room);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```\n");
+        }
     }
     let _ = write!(out, "\n# The question\n\n{}\n", question.trim());
     out
@@ -335,11 +384,12 @@ impl Explainer {
         let Ask {
             entry,
             files,
-            explanation,
+            earlier,
+            about,
             question,
             ..
         } = asked;
-        let prompt = prompt(entry, files, self.max_diff_bytes, explanation, question);
+        let prompt = prompt(asked, self.max_diff_bytes);
         let how = agent::Run {
             access: agent::Access::ReadOnly,
             model: self.model.as_deref(),
@@ -348,11 +398,14 @@ impl Explainer {
             groups,
         };
         let out = agent::run(&self.agent, how, &prompt).map_err(|e| e.to_string())?;
-        let answered = Question::validate(question, &out, files)
-            .map_err(|e| format!("{}: {e}", self.agent.name()))?;
+        let answered = Question {
+            about: about.as_ref().map(|a| a.place.clone()),
+            ..Question::validate(question, &out, files)
+                .map_err(|e| format!("{}: {e}", self.agent.name()))?
+        };
         if let Some(cache) = &self.cache {
             let mut all = self.questions(entry, files);
-            for q in explanation.questions.iter().chain([&answered]) {
+            for q in earlier.iter().chain([&answered]) {
                 if !all.contains(q) {
                     all.push(q.clone());
                 }
@@ -426,7 +479,9 @@ mod tests {
             key: 1,
             entry: entry(),
             files: sample(),
-            explanation: e.clone(),
+            explanation: Some(e.clone()),
+            earlier: e.questions.clone(),
+            about: None,
             question: question.to_owned(),
         }
     }
@@ -487,7 +542,7 @@ mod tests {
     #[test]
     fn prompts_carry_the_explanation_and_earlier_questions() {
         let mut e = explanation();
-        let p = prompt(&entry(), &sample(), 1 << 20, &e, "  What about timeouts? ");
+        let p = prompt(&asking(&e, "  What about timeouts? "), 1 << 20);
         assert!(p.starts_with(PROMPT_VERSION));
         assert!(p.contains("Add retries"), "the change");
         assert!(p.contains("--- hunk 1 @@ -1 +1 @@ fn a"), "the diff");
@@ -503,8 +558,9 @@ mod tests {
             question: "Why retry?".to_owned(),
             answer: "GitHub flakes.".to_owned(),
             refs: vec![r("src/a.rs", Some(1))],
+            about: None,
         });
-        let p = prompt(&entry(), &sample(), 1 << 20, &e, "And then?");
+        let p = prompt(&asking(&e, "And then?"), 1 << 20);
         assert!(p.contains(
             "# Earlier questions\n\nQ: Why retry?\nA: GitHub flakes. [src/a.rs hunk 2]\n"
         ));
@@ -514,8 +570,63 @@ mod tests {
             concerns: Vec::new(),
             ..explanation()
         };
-        let p = prompt(&entry(), &sample(), 1 << 20, &bare, "q");
+        let p = prompt(&asking(&bare, "q"), 1 << 20);
         assert!(!p.contains("Steps:") && !p.contains("Diagram") && !p.contains("Concerns:"));
+    }
+
+    #[test]
+    fn questions_from_the_diff_need_no_explanation_and_say_where() {
+        let selected = About {
+            place: "src/a.rs:2-3".to_owned(),
+            excerpt: "@@ -1 +1 @@ fn a\n+new\n".to_owned(),
+        };
+        let earlier = Question {
+            question: "Why?".to_owned(),
+            answer: "Because.".to_owned(),
+            refs: Vec::new(),
+            about: Some("src/b.rs".to_owned()),
+        };
+        let asked = Ask {
+            explanation: None,
+            earlier: vec![earlier],
+            about: Some(selected.clone()),
+            ..asking(&explanation(), " Is this safe? ")
+        };
+        let p = prompt(&asked, 1 << 20);
+        assert!(p.contains("--- hunk 1 @@ -1 +1 @@ fn a"), "the whole diff");
+        assert!(!p.contains("# Your explanation"), "{p}");
+        assert!(p.contains("# Earlier questions\n\nQ (about src/b.rs): Why?\nA: Because.\n"));
+        assert!(p.contains(
+            "# Where they are looking\n\nsrc/a.rs:2-3\n\nThe lines they selected:\n\n```diff\n@@ -1 +1 @@ fn a\n+new\n```\n"
+        ));
+        assert!(p.ends_with("# The question\n\nIs this safe?\n"));
+
+        // A whole file: no excerpt, the agent reads the file.
+        let whole = Ask {
+            about: Some(About {
+                place: "src/a.rs".to_owned(),
+                excerpt: String::new(),
+            }),
+            ..asked.clone()
+        };
+        let p = prompt(&whole, 1 << 20);
+        assert!(p.contains("src/a.rs\n\nThe question is about this file as a whole."));
+        assert!(!p.contains("The lines they selected"));
+
+        // A long selection is cut to the budget, and the fence still closes.
+        let long = Ask {
+            about: Some(About {
+                excerpt: "+x\n".repeat(100),
+                ..selected
+            }),
+            earlier: Vec::new(),
+            ..asked
+        };
+        let p = prompt(&long, 12);
+        assert!(
+            p.contains("+x\n+x\n+x\n+x\n\n(the rest was left out to save space)\n```\n"),
+            "{p}"
+        );
     }
 
     #[test]
@@ -530,13 +641,14 @@ mod tests {
                 question: q.to_owned(),
                 answer: a.to_owned(),
                 refs: Vec::new(),
+                about: None,
             });
         }
         let mut said = String::new();
         recap(&mut said, &e);
         let turn = |q: &str, a: &str| format!("\nQ: {q}\nA: {a}\n").len();
         let room = said.len() + turn("Third?", "Newest.") + turn("Second?", "Newer.");
-        let p = prompt(&entry(), &sample(), room, &e, "q");
+        let p = prompt(&asking(&e, "q"), room);
         assert!(
             p.contains("(1 earlier question was left out to save space)"),
             "{p}"
@@ -546,12 +658,12 @@ mod tests {
             p.contains("Q: Second?\nA: Newer.\n\nQ: Third?"),
             "in order: {p}"
         );
-        let p = prompt(&entry(), &sample(), said.len(), &e, "q");
+        let p = prompt(&asking(&e, "q"), said.len());
         assert!(p.contains("(3 earlier questions were left out"), "{p}");
         // Too little room for the explanation itself: it is cut, on a
         // character boundary.
         e.intent = "é".repeat(40);
-        let p = prompt(&entry(), &sample(), 15, &e, "q");
+        let p = prompt(&asking(&e, "q"), 15);
         assert!(
             p.contains("Intent: ééé\n(the rest was left out to save space)"),
             "{p}"
@@ -620,6 +732,39 @@ mod tests {
             .expect("explained");
         assert!(cached.cached);
         assert_eq!(cached.explanation.questions.len(), 3);
+    }
+
+    #[test]
+    fn answers_keep_where_they_were_asked_about() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let files = sample();
+        let ex = explainer(dir.path(), r#"cat > /dev/null; echo '{"answer": "Yes."}'"#);
+        let asked = Ask {
+            explanation: None,
+            earlier: Vec::new(),
+            about: Some(About {
+                place: "src/a.rs:1".to_owned(),
+                excerpt: "+new\n".to_owned(),
+            }),
+            ..asking(&explanation(), "Safe?")
+        };
+        let groups = agent::Groups::default();
+        let answered = ex.ask(&asked, dir.path(), &groups).expect("answered");
+        assert_eq!(answered.about.as_deref(), Some("src/a.rs:1"));
+        assert_eq!(
+            ex.questions(&entry(), &files),
+            vec![answered],
+            "stored with it"
+        );
+        // Stores from before `about` existed still read.
+        let store = cache::Cache::new(dir.path().join("cache"));
+        store.put(
+            thread_key(&entry(), &files),
+            r#"[{"question": "old", "answer": "kept"}, {"question": "q", "answer": "a", "about": " "}]"#,
+        );
+        let kept = ex.questions(&entry(), &files);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|q| q.about.is_none()), "blank is none");
     }
 
     #[test]

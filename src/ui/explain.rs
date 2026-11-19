@@ -111,23 +111,29 @@ pub fn draw_question(frame: &mut Frame<'_>, area: Rect, v: &ExplainView) {
         return;
     };
     let earlier = v.explanation().map_or(0, |e| e.questions.len());
-    super::prompt::draw_prompt(frame, area, " Ask ", typed, |inner| {
-        let context = if earlier == 0 {
-            "It sees the change and its explanation".to_owned()
-        } else {
-            format!(
-                "It sees the change, its explanation and {}",
-                plural(earlier, "earlier answer")
-            )
-        };
-        vec![
-            Line::from(Span::styled(
-                truncate(&format!("Ask {} about this change", v.agent), inner),
-                theme::bold(),
-            )),
-            Line::from(Span::styled(truncate(&context, inner), theme::muted())),
-        ]
-    });
+    super::prompt::draw_prompt(
+        frame,
+        area,
+        (" Ask ", super::prompt::SEND),
+        typed,
+        |inner| {
+            let context = if earlier == 0 {
+                "It sees the change and its explanation".to_owned()
+            } else {
+                format!(
+                    "It sees the change, its explanation and {}",
+                    plural(earlier, "earlier answer")
+                )
+            };
+            vec![
+                Line::from(Span::styled(
+                    truncate(&format!("Ask {} about this change", v.agent), inner),
+                    theme::bold(),
+                )),
+                Line::from(Span::styled(truncate(&context, inner), theme::muted())),
+            ]
+        },
+    );
 }
 
 /// How a concern's fix went, in a line and its colour.
@@ -344,12 +350,7 @@ fn detail_lines(
     selected: Option<usize>,
     marks: ConcernMarks<'_>,
 ) -> (Vec<Line<'static>>, Vec<usize>) {
-    let mut out = Detail {
-        lines: Vec::new(),
-        targets: Vec::new(),
-        selected,
-        width: pane_width.saturating_sub(2).max(8),
-    };
+    let mut out = Detail::new(pane_width, selected);
     match item {
         Item::Overview => overview(&mut out, e),
         Item::Step(i) => {
@@ -434,36 +435,47 @@ fn detail_lines(
 
 /// Accumulates the right pane's lines. Every line starts with a one-column
 /// selection marker.
-struct Detail {
-    lines: Vec<Line<'static>>,
-    targets: Vec<usize>,
+pub(super) struct Detail {
+    pub(super) lines: Vec<Line<'static>>,
+    pub(super) targets: Vec<usize>,
     selected: Option<usize>,
     width: usize,
 }
 
 impl Detail {
+    /// An empty pane `pane_width` columns wide, with code pointer
+    /// `selected` highlighted.
+    pub(super) fn new(pane_width: usize, selected: Option<usize>) -> Self {
+        Self {
+            lines: Vec::new(),
+            targets: Vec::new(),
+            selected,
+            width: pane_width.saturating_sub(2).max(8),
+        }
+    }
+
     fn push(&mut self, spans: Vec<Span<'static>>) {
         let mut line = vec![Span::raw(" ")];
         line.extend(spans);
         self.lines.push(Line::from(line));
     }
 
-    fn blank(&mut self) {
+    pub(super) fn blank(&mut self) {
         self.lines.push(Line::raw(""));
     }
 
-    fn heading(&mut self, text: &str) {
+    pub(super) fn heading(&mut self, text: &str) {
         self.push(vec![Span::styled(text.to_owned(), theme::accent_bold())]);
     }
 
-    fn text(&mut self, text: &str, style: Style) {
+    pub(super) fn text(&mut self, text: &str, style: Style) {
         for l in wrap(text, self.width) {
             self.push(vec![Span::styled(l, style)]);
         }
     }
 
     /// Wrapped text after a marker, continuation lines indented to match.
-    fn prefixed(&mut self, mark: &str, style: Style, text: &str) {
+    pub(super) fn prefixed(&mut self, mark: &str, style: Style, text: &str) {
         let indent = width(mark);
         for (i, l) in wrap(text, self.width.saturating_sub(indent).max(1))
             .into_iter()
@@ -479,7 +491,7 @@ impl Detail {
     }
 
     /// Wrapped text in `style`, every line indented by `indent` columns.
-    fn indented(&mut self, indent: usize, text: &str, style: Style) {
+    pub(super) fn indented(&mut self, indent: usize, text: &str, style: Style) {
         for l in wrap(text, self.width.saturating_sub(indent).max(1)) {
             self.push(vec![Span::raw(" ".repeat(indent)), Span::styled(l, style)]);
         }
@@ -507,7 +519,7 @@ impl Detail {
         }
     }
 
-    fn reference(&mut self, r: &Ref) {
+    pub(super) fn reference(&mut self, r: &Ref) {
         let selected = self.target();
         let path_w = width(&r.path);
         let label = truncate(&r.label, self.width.saturating_sub(path_w + 4));

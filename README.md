@@ -66,7 +66,14 @@ in, and what deserves a second look.
   ones that name nothing, and lists the hunks nothing explains, which is
   where to look first. `a` asks the agent a follow-up question about the
   change. See [Explanations](#explanations).
-- **Fixes:** press `f` on a hunk, or on a concern in an explanation (mark
+- **Questions:** select lines in a diff with `v` (`j`/`k` extend the
+  selection) and press `a` to ask the agent about them, or press `a` with
+  nothing selected to ask about the whole file. It sees the whole diff and
+  the lines you picked, changes nothing, and answers in a panel over the
+  diff, with code pointers `⏎` jumps to. No explanation is needed first. See
+  [Questions from the diff](#questions-from-the-diff).
+- **Fixes:** press `f` on lines selected with `v` (or with nothing selected,
+  on the whole file), or on a concern in an explanation (mark
   several with `space` to fix them together), write
   what should change (a concern starts as its own text), and Claude Code
   or Codex makes the edit in that line of work's checkout, confined to
@@ -132,12 +139,14 @@ Press `?` inside vert for all keys. The essentials:
 
 | Where     | Keys                                                                   |
 | --------- | ---------------------------------------------------------------------- |
-| Anywhere  | `1` `2` `3` `4` / `tab` switch tab · `j` `k` move · `⏎` open · `esc` back · `q` quit |
+| Anywhere  | `1` `2` `3` `4` / `tab` switch tab · `j` `k` move · `⏎` open · `esc` back · `q` quit · `M` agent and model |
 | Feed      | `n` next new change · `esc` clear filter · `r` reload                   |
 | Hotspots  | `w` time window · `m` files/modules · `⏎` filter feed · `o`/`e` view/edit |
-| Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit · `x` explain · `f` fix |
+| Change    | `tab` switch pane · `J` `K` scroll · `n` `N` hunks · `←` `→` sideways · `e` edit · `v` select lines (`j` `k` extend, `esc` clears) · `x` explain · `a` ask · `A` answers again · `f` fix |
+| Answers   | `j` `k` move between code pointers · `⏎` go to the code · `J` `K` scroll · `a` ask more · `esc` back |
 | Explain   | `tab` switch pane · `j` `k` move · `⏎` go to the code · `J` `K` scroll · `a` ask a question · `r` explain again · `space` mark a concern · `f` fix the marked concerns (else the selected one) · `c` last fix |
-| Fix       | type the feedback · `⏎` send · `esc` cancel · `ctrl-w`/`ctrl-u` delete |
+| Fix, Ask  | type the feedback or question · `⏎` send · `esc` cancel · `ctrl-w`/`ctrl-u` delete |
+| Agent     | `←` `→` choose the agent · type the model · `⏎` use · `esc` cancel |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
 | Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names or PR number · `c` collisions · `d` remove · `r` refresh |
 
@@ -172,7 +181,15 @@ agent's login, subscription and settings apply, and vert needs no API key.
 vert uses the first of `claude`, `codex` and `pi` it finds on `PATH`. The
 agent and model in use are shown at the top of each explanation.
 
-**Choosing the agent and model.** Set them once per machine in your shell
+**Choosing the agent and model.** Press `M` anywhere in vert to switch
+the agent (`auto`, `claude`, `codex`, `pi`, or your `--explain-cmd` when
+you set one) and type the model, or leave it blank for the agent's
+default. The choice applies to everything you explain, ask or fix from
+then on, until vert exits; work already on its way finishes with the agent
+it went to. The footer says which agent explains and which fixes. An
+agent picked with `M` explains even when `--explain-cmd` is set.
+
+To set what vert starts with, set them once per machine in your shell
 profile (`~/.zshrc`, `~/.bashrc`, …) and they apply to every run:
 
 ```sh
@@ -242,6 +259,30 @@ Questions are kept with the change: reopening it, or pressing `r` for a new
 explanation, keeps them. When a fix has changed the code since, answered
 questions stay with the old code they were about; a question the agent is
 still answering when you press `r` joins the new explanation instead.
+
+### Questions from the diff
+
+In any diff, press `v` to start selecting lines at the top of the diff
+pane, move with `j` and `k` (or `ctrl-d`, `ctrl-u`, `g`, `G`) to extend
+the selection, and press `a` to ask about those lines. `v` again or `esc`
+clears the selection. Selecting a hunk's `⋯ @@` header picks the whole
+hunk. With nothing selected, or from the file list, `a` asks about the
+whole file.
+
+The question goes to the agent that explains (see
+[Explanations](#explanations)), read-only, like a follow-up question: it
+gets the change and its whole diff, the place (`src/auth.rs:40-52`) and the
+lines you selected, its explanation of the change if there is one, and
+the questions asked so far. The agent can read the file for the code
+around it. You don't have to explain the change first.
+
+Sending opens an answer panel over the diff. It shows the agent working,
+then its answer; `j` and `k` move between the code it points at and `⏎`
+jumps there in the diff. `a` asks a follow-up about the same place. `esc`
+goes back to the diff and keeps the panel, and `A` in the diff brings it
+back, also when an answer came in while you were reading elsewhere. The
+questions are kept with the change, like follow-up questions, so its
+explanation (`x`) lists them too.
 
 **Explaining again.** `r` loads the change as it is now and explains that:
 uncommitted work as it is on disk, and a branch at its current tip, so a fix
@@ -315,7 +356,8 @@ and of its pull request once you push. Nothing is pushed. To undo a fix,
 feedback points, the hunk there, and your words. What `f` points at
 depends on where you press it:
 
-- in the diff pane: the hunk at the top of the screen and its line;
+- in the diff pane: the lines selected with `v` (place
+  `src/auth.rs:40-52` and those lines), else the whole file;
 - in the file list: the whole selected file;
 - in an explanation: the selected code pointer. On *Concerns*, the
   feedback starts as the concern's text, so `f` then `⏎` asks the agent to
@@ -444,7 +486,7 @@ the event loop. This keeps all interaction logic testable without a terminal.
 | ----------- | ---------------------------------------------------------------- |
 | `git`       | Feed entries (with a per-commit cache), branches and worktrees, collisions between them, structured diffs, committing a fix's edits |
 | `github`    | `origin` detection, token lookup, open pull requests and their diffs |
-| `explain`   | Prompts, agent routing, answer validation and caching, follow-up questions, diagram layout |
+| `explain`   | Prompts, agent routing, answer validation and caching, questions (follow-ups and from the diff), diagram layout |
 | `fix`       | Fix prompts, the agent's summary of what it changed, and the fix commit's message |
 | `labels`    | Size, breadth and revert classification                          |
 | `hotspots`  | Ranking by change frequency                                      |

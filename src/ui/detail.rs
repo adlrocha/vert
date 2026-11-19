@@ -18,12 +18,12 @@ use crate::theme;
 /// Footer hints for the detail view.
 pub const DETAIL_HINTS: Hints = &[
     ("tab", "pane"),
-    ("j/k", "move"),
-    ("J/K", "scroll"),
+    ("v", "select"),
     ("n/N", "hunk"),
     ("⏎", "view file"),
     ("e", "edit"),
     ("x", "explain"),
+    ("a", "ask"),
     ("f", "fix"),
     ("esc", "back"),
 ];
@@ -37,6 +37,18 @@ pub const FILE_HINTS: Hints = &[
     ("esc", "back"),
 ];
 
+/// Where a row of a [`RenderedDiff`] comes from in the file's diff.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Nothing of the diff: a blank between hunks, or a message.
+    #[default]
+    None,
+    /// The header of the hunk with this index.
+    Header(usize),
+    /// Line `.1` of the hunk with index `.0`.
+    Line(usize, usize),
+}
+
 /// A diff pre-rendered into gutter and code columns.
 #[derive(Debug, Default, Clone)]
 pub struct RenderedDiff {
@@ -46,6 +58,8 @@ pub struct RenderedDiff {
     pub code: Vec<Line<'static>>,
     /// The new-file line number of each row, if any.
     pub new_lines: Vec<Option<u32>>,
+    /// Where each row comes from in the file's diff.
+    pub sources: Vec<Source>,
     /// Rows where hunks start.
     pub hunk_starts: Vec<usize>,
     /// Gutter width in columns.
@@ -71,10 +85,17 @@ impl RenderedDiff {
         self.new_lines.get(row..)?.iter().flatten().next().copied()
     }
 
-    fn push(&mut self, gutter: Line<'static>, code: Line<'static>, new_no: Option<u32>) {
+    fn push(
+        &mut self,
+        gutter: Line<'static>,
+        code: Line<'static>,
+        new_no: Option<u32>,
+        source: Source,
+    ) {
         self.gutter.push(gutter);
         self.code.push(code);
         self.new_lines.push(new_no);
+        self.sources.push(source);
     }
 
     fn message(text: String) -> Self {
@@ -83,6 +104,7 @@ impl RenderedDiff {
             Line::raw(""),
             Line::from(Span::styled(text, theme::muted())),
             None,
+            Source::None,
         );
         r
     }
@@ -126,7 +148,7 @@ pub fn build_diff(file: &FileDiff, max_highlight: usize) -> RenderedDiff {
     };
     for (h, hunk) in file.hunks.iter().enumerate() {
         if h > 0 {
-            out.push(Line::raw(""), Line::raw(""), None);
+            out.push(Line::raw(""), Line::raw(""), None, Source::None);
         }
         out.hunk_starts.push(out.len());
         let (range, context) = split_header(&hunk.header);
@@ -145,57 +167,69 @@ pub fn build_diff(file: &FileDiff, max_highlight: usize) -> RenderedDiff {
                 ),
             ]),
             hunk.lines.iter().find_map(|l| l.new_no),
+            Source::Header(h),
         );
-        for line in &hunk.lines {
-            let (old_style, new_style, bar) = match line.kind {
-                LineKind::Context => (theme::muted(), theme::muted(), Span::raw("  ")),
-                LineKind::Added => (
-                    theme::muted(),
-                    Style::default().fg(theme::ADDED),
-                    Span::styled("▌ ", Style::default().fg(theme::ADDED)),
-                ),
-                LineKind::Removed => (
-                    Style::default().fg(theme::REMOVED),
-                    theme::muted(),
-                    Span::styled("▌ ", Style::default().fg(theme::REMOVED)),
-                ),
-            };
-            let gutter = Line::from(vec![
-                Span::styled(num(line.old_no, w), old_style),
-                Span::raw(" "),
-                Span::styled(num(line.new_no, w), new_style),
-                Span::raw(" "),
-                bar,
-            ]);
-            let code = match line.kind {
-                LineKind::Removed => Line::from(Span::styled(
-                    sanitize(&line.content),
-                    Style::default().fg(theme::REMOVED),
-                )),
-                LineKind::Added | LineKind::Context => {
-                    let fragments = highlighted.next().unwrap_or_default();
-                    let dim = line.kind == LineKind::Context;
-                    Line::from(
-                        fragments
-                            .into_iter()
-                            .map(|(style, text)| {
-                                Span::styled(
-                                    text,
-                                    if dim {
-                                        style.add_modifier(Modifier::DIM)
-                                    } else {
-                                        style
-                                    },
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                }
-            };
-            out.push(gutter, code, line.new_no);
+        for (i, line) in hunk.lines.iter().enumerate() {
+            let (gutter, code) = diff_row(line, w, &mut highlighted);
+            out.push(gutter, code, line.new_no, Source::Line(h, i));
         }
     }
     out
+}
+
+/// The gutter and code columns of one diff line, taking the next of the
+/// new side's highlighted lines when it has one.
+fn diff_row(
+    line: &crate::git::diff::DiffLine,
+    w: usize,
+    highlighted: &mut impl Iterator<Item = Vec<crate::highlight::Fragment>>,
+) -> (Line<'static>, Line<'static>) {
+    let (old_style, new_style, bar) = match line.kind {
+        LineKind::Context => (theme::muted(), theme::muted(), Span::raw("  ")),
+        LineKind::Added => (
+            theme::muted(),
+            Style::default().fg(theme::ADDED),
+            Span::styled("▌ ", Style::default().fg(theme::ADDED)),
+        ),
+        LineKind::Removed => (
+            Style::default().fg(theme::REMOVED),
+            theme::muted(),
+            Span::styled("▌ ", Style::default().fg(theme::REMOVED)),
+        ),
+    };
+    let gutter = Line::from(vec![
+        Span::styled(num(line.old_no, w), old_style),
+        Span::raw(" "),
+        Span::styled(num(line.new_no, w), new_style),
+        Span::raw(" "),
+        bar,
+    ]);
+    let code = match line.kind {
+        LineKind::Removed => Line::from(Span::styled(
+            sanitize(&line.content),
+            Style::default().fg(theme::REMOVED),
+        )),
+        LineKind::Added | LineKind::Context => {
+            let fragments = highlighted.next().unwrap_or_default();
+            let dim = line.kind == LineKind::Context;
+            Line::from(
+                fragments
+                    .into_iter()
+                    .map(|(style, text)| {
+                        Span::styled(
+                            text,
+                            if dim {
+                                style.add_modifier(Modifier::DIM)
+                            } else {
+                                style
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    (gutter, code)
 }
 
 /// Splits `@@ -1,2 +1,3 @@ fn ctx` into the range part and the context.
@@ -274,21 +308,47 @@ pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i
         (d.scroll + 1).min(d.rendered.len()),
         d.rendered.len()
     );
-    let block = panel(d.focus == Focus::Diff)
+    let mut block = panel(d.focus == Focus::Diff)
         .title(Line::from(title))
         .title_bottom(
             Line::from(Span::styled(position, theme::muted())).alignment(Alignment::Right),
         );
+    if let Some(selection) = d.selection {
+        let (first, last) = selection.rows();
+        block = block.title_bottom(Line::from(vec![
+            Span::styled(
+                format!(" {} selected", plural(last - first + 1, "row")),
+                theme::accent_bold(),
+            ),
+            Span::styled(" · a ask · f fix · esc clear ", theme::muted()),
+        ]));
+    }
     let inner = block.inner(diff_area);
     frame.render_widget(block, diff_area);
     d.height = usize::from(inner.height);
+    let rows = d.scroll..d.scroll + d.height;
+    let visible = |lines: &[Line<'static>]| {
+        lines
+            .get(rows.start..rows.end.min(lines.len()))
+            .unwrap_or_default()
+            .to_vec()
+    };
+    let gutter = visible(&d.rendered.gutter)
+        .into_iter()
+        .zip(rows.clone())
+        .map(|(line, row)| match d.selection {
+            Some(s) if row == s.cursor => line.patch_style(theme::cursor()),
+            Some(s) if s.contains(row) => line.patch_style(theme::selected()),
+            _ => line,
+        })
+        .collect::<Vec<_>>();
     render_columns(
         frame,
         inner,
         d.rendered.gutter_width,
-        &d.rendered.gutter,
-        &d.rendered.code,
-        d.scroll,
+        &gutter,
+        &visible(&d.rendered.code),
+        0,
         d.hscroll,
     );
 }
