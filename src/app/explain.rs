@@ -327,8 +327,14 @@ impl ExplainState {
 
     /// Records that the agent is answering a question about the diff
     /// `key`, since `now`.
-    pub(crate) fn start_question(&mut self, key: u64, now: i64) {
+    pub(super) fn start_question(&mut self, key: u64, now: i64) {
         self.questioning.insert(key, now);
+    }
+
+    /// [`ExplainState::start_question`], for the rendering tests.
+    #[cfg(test)]
+    pub(crate) fn question_for_tests(&mut self, key: u64, now: i64) {
+        self.start_question(key, now);
     }
 
     /// The fixes asked for concerns of the diff `key`, by concern.

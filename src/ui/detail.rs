@@ -11,7 +11,7 @@ use super::{
     Hints, empty_state, highlight, module_list, panel, plural, spans_width, stat_spans, truncate,
 };
 use crate::age::ago;
-use crate::app::{DetailView, FileView, Focus, Origin, Selection};
+use crate::app::{Checkout, DetailView, FileView, Focus, Origin, Selection};
 use crate::git::Target;
 use crate::git::diff::{FileDiff, LineKind};
 use crate::highlight::{Highlighter, sanitize};
@@ -259,15 +259,10 @@ fn empty_reason(target: Target) -> &'static str {
 }
 
 /// Draws the detail view.
-pub fn draw_detail(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    d: &mut DetailView,
-    (now, origin): (i64, Option<&Origin>),
-) {
+pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i64) {
     let [summary, panes] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(area);
-    draw_summary(frame, summary, d, (now, origin));
+    draw_summary(frame, summary, d, now);
 
     let files_w = (panes.width * 3 / 10).clamp(28, 56).min(panes.width / 2);
     let [files_area, diff_area] =
@@ -438,12 +433,7 @@ fn render_columns(
     frame.render_widget(Paragraph::new(slice(code)).scroll((0, x)), c);
 }
 
-fn draw_summary(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    d: &DetailView,
-    (now, origin): (i64, Option<&Origin>),
-) {
+fn draw_summary(frame: &mut Frame<'_>, area: Rect, d: &DetailView, now: i64) {
     let e = &d.entry;
     let chip_spans = chips(e);
     let chip_w = spans_width(&chip_spans);
@@ -461,8 +451,8 @@ fn draw_summary(
         Span::raw(" "),
         Span::styled(e.short.clone(), Style::default().fg(theme::WARN)),
     ];
-    if let Some(origin) = origin {
-        meta.extend(origin_spans(origin));
+    if let Some(origin) = &d.origin {
+        meta.extend(origin_spans(origin, &e.short));
     }
     if !e.author.is_empty() {
         meta.push(Span::styled(format!(" · {}", e.author), theme::muted()));
@@ -491,21 +481,33 @@ fn draw_summary(
     frame.render_widget(Line::from(meta), l2);
 }
 
-/// The branch of a branch or pull request diff, and where its files open
-/// (`o`, `e`): a linked worktree is named, and a branch that isn't checked
-/// out says so, as its files then open from this checkout.
-fn origin_spans(origin: &Origin) -> Vec<Span<'static>> {
-    let mut spans = vec![
-        Span::styled(" · ", theme::muted()),
-        Span::styled(format!("⎇ {}", origin.branch), theme::bold()),
-    ];
-    match &origin.checkout {
-        Some((Some(_), name)) => spans.push(Span::styled(format!(" in {name}"), theme::muted())),
-        Some((None, _)) => {}
-        None => spans.push(Span::styled(
-            " not checked out",
-            Style::default().fg(theme::WARN),
-        )),
+/// The branch of a branch or pull request diff, unless it is already the
+/// diff's `short` name, and where its files open (`o`, `e`): a linked
+/// worktree is named, and anything but a checkout says why its files open
+/// from this checkout instead.
+fn origin_spans(origin: &Origin, short: &str) -> Vec<Span<'static>> {
+    let branch = origin
+        .branch
+        .as_deref()
+        .filter(|b| *b != short)
+        .map(|b| Span::styled(format!("⎇ {b}"), theme::bold()));
+    let warn = |text: &str| Span::styled(text.to_owned(), Style::default().fg(theme::WARN));
+    let place = match &origin.checkout {
+        Checkout::At(Some(_), name) => Some(Span::styled(format!("in {name}"), theme::muted())),
+        Checkout::At(None, _) => None,
+        Checkout::Missing(_) => Some(warn("not checked out")),
+        Checkout::Unknown(_) => Some(warn("checkout unknown")),
+    };
+    let parts: Vec<Span<'static>> = [branch, place].into_iter().flatten().collect();
+    if parts.is_empty() {
+        return parts;
+    }
+    let mut spans = vec![Span::styled(" · ", theme::muted())];
+    for (i, part) in parts.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(part);
     }
     spans
 }
@@ -696,21 +698,40 @@ mod tests {
     #[test]
     fn the_origin_names_the_branch_and_its_checkout() {
         use crate::app::Origin;
-        let line = |checkout| {
-            origin_spans(&Origin {
-                branch: "claude/dora".to_owned(),
-                checkout,
-            })
+        let line = |branch: Option<&str>, checkout, short| {
+            origin_spans(
+                &Origin {
+                    branch: branch.map(str::to_owned),
+                    checkout,
+                },
+                short,
+            )
             .iter()
             .map(|s| s.content.to_string())
             .collect::<String>()
         };
+        let dora = Some("claude/dora");
+        let at = |root: Option<&str>| Checkout::At(root.map(Into::into), "dora".to_owned());
         assert_eq!(
-            line(Some((Some("/wt/dora".into()), "dora".to_owned()))),
+            line(dora, at(Some("/wt/dora")), "#5"),
             " · ⎇ claude/dora in dora"
         );
-        assert_eq!(line(Some((None, "here".to_owned()))), " · ⎇ claude/dora");
-        assert_eq!(line(None), " · ⎇ claude/dora not checked out");
+        assert_eq!(line(dora, at(None), "#5"), " · ⎇ claude/dora");
+        let missing = || Checkout::Missing(String::new());
+        assert_eq!(
+            line(dora, missing(), "#5"),
+            " · ⎇ claude/dora not checked out"
+        );
+        // A branch diff is already named after its branch.
+        assert_eq!(
+            line(dora, at(Some("/wt/dora")), "claude/dora"),
+            " · in dora"
+        );
+        assert_eq!(line(dora, at(None), "claude/dora"), "");
+        assert_eq!(
+            line(None, Checkout::Unknown(String::new()), "#5"),
+            " · checkout unknown"
+        );
     }
 
     #[test]

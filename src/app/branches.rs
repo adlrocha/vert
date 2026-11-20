@@ -764,21 +764,14 @@ impl App {
     /// Opens a diff of the selected row: `code` picks which, mirroring the
     /// keys that reach this.
     fn open_selected(&mut self, code: KeyCode) -> Vec<Effect> {
-        let Some((dirty, changes, pull, checkout)) = self
-            .branches
-            .rows()
-            .get(self.branches.pos.selected)
-            .map(|r| {
-                (
-                    r.dirty().cloned(),
-                    r.changes().cloned(),
-                    r.pull.map(pull_entry),
-                    r.branch
-                        .and_then(|b| b.worktree.as_ref())
-                        .map(|w| w.name.clone()),
-                )
-            })
-        else {
+        let selected = self.branches.pos.selected;
+        let Some((dirty, changes, pull)) = self.branches.rows().get(selected).map(|r| {
+            (
+                r.dirty().cloned(),
+                r.changes().cloned(),
+                r.pull.map(pull_entry),
+            )
+        }) else {
             return Vec::new();
         };
         let entry = match code {
@@ -792,10 +785,15 @@ impl App {
                 .into_iter()
                 .flatten()
                 .collect();
-                if !others.is_empty() {
+                // Uncommitted work only ever comes from a worktree.
+                let checkout = self
+                    .branches
+                    .rows()
+                    .get(selected)
+                    .and_then(|r| r.branch?.worktree.as_ref().map(|w| w.name.clone()));
+                if let Some(checkout) = checkout.filter(|_| !others.is_empty()) {
                     self.notice = Some(format!(
-                        "Showing uncommitted changes in {} ({})",
-                        checkout.as_deref().unwrap_or("this checkout"),
+                        "Showing uncommitted changes in {checkout} ({})",
                         others.join(", ")
                     ));
                 }

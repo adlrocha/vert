@@ -35,14 +35,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     .areas(frame.area());
 
     draw_header(frame, header, app);
-    let origin = match app.views.last() {
-        Some(View::Detail(d)) => app.origin(&d.entry),
-        _ => None,
-    };
     let hints = match app.views.last_mut() {
         Some(View::Detail(d)) => {
             draw_crumbs(frame, tabs, &[app.tab.title(), &d.entry.short]);
-            detail::draw_detail(frame, body, d, (app.now, origin.as_ref()));
+            detail::draw_detail(frame, body, d, app.now);
             detail::DETAIL_HINTS
         }
         Some(View::File(f)) => {
@@ -125,21 +121,11 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(theme::HIGHLIGHT),
         ));
     }
-    match app.fix.running.as_slice() {
-        [] => {}
-        [one] => right.push(Span::styled(
-            format!(
-                "{} fixing in {} {}  ",
-                spinner(app.tick),
-                one.checkout,
-                clock(app.now - one.since)
-            ),
+    if let Some(fixes) = fixes_at_work(app) {
+        right.push(Span::styled(
+            format!("{fixes}  "),
             Style::default().fg(theme::INFO),
-        )),
-        many => right.push(Span::styled(
-            format!("{} {} fixes  ", spinner(app.tick), many.len()),
-            Style::default().fg(theme::INFO),
-        )),
+        ));
     }
     if app.feed.loading() {
         right.push(Span::styled(
@@ -203,7 +189,20 @@ pub type Hints = &'static [(&'static str, &'static str)];
 /// that confirmed it is gone.
 fn agent_work(app: &App) -> Option<String> {
     let spin = spinner(app.tick);
-    let fixes = match app.fix.running.as_slice() {
+    let fixes = fixes_at_work(app);
+    let questions = app.explain.questions_running().map(|(n, since)| match n {
+        1 => format!("{spin} answering {}", clock(app.now - since)),
+        n => format!("{spin} answering {n} questions"),
+    });
+    let parts: Vec<String> = [fixes, questions].into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The fixes running, as the header and the footer show them: where and
+/// for how long, or how many.
+fn fixes_at_work(app: &App) -> Option<String> {
+    let spin = spinner(app.tick);
+    match app.fix.running.as_slice() {
         [] => None,
         [one] => Some(format!(
             "{spin} fixing in {} {}",
@@ -211,13 +210,7 @@ fn agent_work(app: &App) -> Option<String> {
             clock(app.now - one.since)
         )),
         many => Some(format!("{spin} {} fixes running", many.len())),
-    };
-    let questions = app.explain.questions_running().map(|(n, since)| match n {
-        1 => format!("{spin} answering {}", clock(app.now - since)),
-        n => format!("{spin} answering {n} questions"),
-    });
-    let parts: Vec<String> = [fixes, questions].into_iter().flatten().collect();
-    (!parts.is_empty()).then(|| parts.join(" · "))
+    }
 }
 
 /// Draws the key hints, and on the right the notice, if any, then what the
@@ -1058,7 +1051,7 @@ mod render_tests {
         });
         let s = screen(&mut app, 120, 20);
         assert!(s.contains("Pull request #13"), "{s}");
-        assert!(s.contains("#13 · +"), "{s}");
+        assert!(s.contains("#13 · checkout unknown · +"), "{s}");
         assert!(!s.contains(" ago"), "{s}");
     }
 
@@ -1168,7 +1161,7 @@ mod render_tests {
             since: app.now,
             concerns: None,
         });
-        assert!(screen(&mut app, 140, 30).contains("2 fixes"));
+        assert!(screen(&mut app, 140, 30).contains("2 fixes running"));
         app.notice = Some(format!("Fixed in x: {}", "long ".repeat(40)));
         let footer = screen(&mut app, 60, 10)
             .lines()
@@ -1469,8 +1462,8 @@ mod render_tests {
         };
         let (a, b) = (running(1), running(2));
         app.fix.running.extend([a, b]);
-        app.explain.start_question(1, app.now);
-        app.explain.start_question(2, app.now - 5);
+        app.explain.question_for_tests(1, app.now);
+        app.explain.question_for_tests(2, app.now - 5);
         assert_eq!(app.explain.questions_running(), Some((2, app.now - 5)));
         let s = screen(&mut app, 140, 30);
         assert!(
