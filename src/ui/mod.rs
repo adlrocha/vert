@@ -615,6 +615,42 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|s| width(&s.content)).sum()
 }
 
+/// Paints the selected row of a list grey across `width` columns, so every
+/// column of it reads at a glance; other rows come back unchanged. Muted text
+/// would vanish on the grey, so it takes the default colour instead.
+fn highlight(line: Line<'static>, selected: bool, width: usize) -> Line<'static> {
+    if !selected {
+        return line;
+    }
+    let pad = width.saturating_sub(line.width());
+    let Line {
+        style,
+        alignment,
+        spans,
+    } = line;
+    let mut spans: Vec<Span<'static>> = spans
+        .into_iter()
+        .map(|span| {
+            let mut style = span.style.bg(theme::ROW);
+            if style.fg == Some(theme::MUTED) {
+                style.fg = None;
+            }
+            span.style(style)
+        })
+        .collect();
+    if pad > 0 {
+        spans.push(Span::styled(
+            " ".repeat(pad),
+            Style::default().bg(theme::ROW),
+        ));
+    }
+    Line {
+        style: style.bg(theme::ROW),
+        alignment,
+        spans,
+    }
+}
+
 /// Left selection marker.
 fn marker(selected: bool) -> Span<'static> {
     if selected {
@@ -627,6 +663,26 @@ fn marker(selected: bool) -> Span<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn highlight_paints_the_selected_row_across_the_width() {
+        let line = Line::from(vec![
+            Span::styled("ab", theme::muted()),
+            Span::styled("cd", theme::accent()),
+        ]);
+        assert_eq!(highlight(line.clone(), false, 10), line, "unselected rows");
+
+        let lit = highlight(line, true, 6);
+        assert_eq!(lit.width(), 6, "padded to the width");
+        assert_eq!(lit.style.bg, Some(theme::ROW));
+        assert!(lit.spans.iter().all(|s| s.style.bg == Some(theme::ROW)));
+        assert_eq!(lit.spans[0].style.fg, None, "muted text stays readable");
+        assert_eq!(lit.spans[1].style.fg, Some(theme::ACCENT));
+
+        // Rows already as wide as the pane get no padding.
+        let full = highlight(Line::raw("abcdef"), true, 4);
+        assert_eq!(full.spans.len(), 1);
+    }
 
     #[test]
     fn truncation_respects_width() {
@@ -1946,6 +2002,9 @@ mod render_tests {
             branches: Some(5),
             pulls: Some(60),
         });
+        // Every kind of row shows under `all`; the open pull request
+        // default has its own test.
+        app.branches.filter = crate::app::RowFilter::All;
         press(&mut app, KeyCode::Char('1'));
         assert!(screen(&mut app, 120, 20).contains("Scanning branches"));
         assert!(screen(&mut app, 120, 20).contains("PRs loading"));
@@ -2118,6 +2177,28 @@ mod render_tests {
     }
 
     #[test]
+    fn the_selected_branch_row_is_grey_across_the_pane() {
+        let mut app = branches_app();
+        let (w, h) = (160, 20);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+        terminal.draw(|f| draw(f, &mut app)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let row_of = |needle: &str| {
+            (0..h)
+                .find(|&y| {
+                    (0..w)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains(needle)
+                })
+                .expect(needle)
+        };
+        let grey = |y: u16| (1..w - 1).all(|x| buf[(x, y)].bg == crate::theme::ROW);
+        assert!(grey(row_of("work on main")), "the selected row");
+        assert!(!grey(row_of("work on origin/feat")), "other rows");
+    }
+
+    #[test]
     fn branches_render() {
         use crate::app::PullStatus;
         use crate::git::branches::Branches;
@@ -2172,14 +2253,18 @@ mod render_tests {
         app.branches.pull_status = PullStatus::Off;
         assert!(screen(&mut app, 160, 20).contains("PRs off"));
 
-        // Pull requests come first; with none listed, the hint says how out.
-        press(&mut app, KeyCode::Char('f'));
-        let s = screen(&mut app, 160, 20);
-        assert!(s.contains("· pull requests"), "{s}");
-        assert!(s.contains("f changes the filter"), "{s}");
+        // Branches, then worktrees, then pull requests; with none listed,
+        // the hint says how to see everything.
         press(&mut app, KeyCode::Char('f'));
         press(&mut app, KeyCode::Char('f'));
         assert!(screen(&mut app, 160, 20).contains("· worktrees"));
+        app.branches.list.branches.retain(|b| b.worktree.is_none());
+        assert!(screen(&mut app, 160, 20).contains("f changes the filter"));
+        press(&mut app, KeyCode::Char('f'));
+        let s = screen(&mut app, 160, 20);
+        assert!(s.contains("· pull requests"), "{s}");
+        assert!(s.contains("No open pull requests"), "{s}");
+        assert!(s.contains("f shows all branches"), "{s}");
         press(&mut app, KeyCode::Char('f'));
 
         app.update(Msg::Branches(Err("no repo".to_owned())));

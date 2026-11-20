@@ -6,7 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::{Hints, empty_state, marker, panel, path_spans, spans_width, stat_spans};
+use super::{Hints, empty_state, highlight, marker, panel, path_spans, spans_width, stat_spans};
 use crate::age::relative;
 use crate::app::App;
 use crate::hotspots::{Grouping, Hotspot};
@@ -171,7 +171,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &mut App) -> Hints {
         .enumerate()
         .skip(offset)
         .take(height)
-        .map(|(i, spot)| layout.row(i, spot, i == state.pos.selected))
+        .map(|(i, spot)| {
+            let selected = i == state.pos.selected;
+            highlight(layout.row(i, spot, selected), selected, width)
+        })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
     HINTS

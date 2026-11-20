@@ -7,7 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::feed::{chips, file_row};
-use super::{Hints, empty_state, module_list, panel, plural, spans_width, stat_spans, truncate};
+use super::{
+    Hints, empty_state, highlight, module_list, panel, plural, spans_width, stat_spans, truncate,
+};
 use crate::age::ago;
 use crate::app::{DetailView, FileView, Focus, Selection};
 use crate::git::Target;
@@ -361,15 +363,12 @@ fn draw_file_list(frame: &mut Frame<'_>, files_area: Rect, d: &mut DetailView) {
         .take(height)
         .map(|&i| {
             let s = &d.files[i].stat;
-            file_row(
-                &s.path,
-                s.status,
-                s.added,
-                s.removed,
-                s.binary,
-                usize::from(inner.width),
-                i == d.pos.selected,
-            )
+            let width = usize::from(inner.width);
+            let selected = i == d.pos.selected;
+            let row = file_row(
+                &s.path, s.status, s.added, s.removed, s.binary, width, selected,
+            );
+            highlight(row, selected, width)
         })
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);

@@ -8,8 +8,8 @@ use ratatui::widgets::{Clear, Paragraph};
 
 use super::feed::chips;
 use super::{
-    Hints, centered, empty_state, marker, pad, panel, plural, spans_width, spinner, stat_spans,
-    truncate, width,
+    Hints, centered, empty_state, highlight, marker, pad, panel, plural, spans_width, spinner,
+    stat_spans, truncate, width,
 };
 use crate::age::relative;
 use crate::app::{App, PullStatus, Row, RowFilter};
@@ -96,6 +96,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &mut App) -> Hints {
                 "Nothing to show",
                 "Branches, worktrees and open pull requests will appear here.",
             )
+        } else if app.branches.filter == RowFilter::Pulls {
+            ("No open pull requests", "f shows all branches")
         } else {
             ("Nothing to show", "f changes the filter")
         };
@@ -116,13 +118,12 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &mut App) -> Hints {
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            row(
-                r,
-                flag(r, overlaps),
-                columns,
-                offset + i == selected,
-                usize::from(inner.width),
-                app.now,
+            let selected = offset + i == selected;
+            let width = usize::from(inner.width);
+            highlight(
+                row(r, flag(r, overlaps), columns, selected, width, app.now),
+                selected,
+                width,
             )
         })
         .collect();
@@ -413,6 +414,11 @@ pub(super) fn draw_collisions(frame: &mut Frame<'_>, area: Rect, app: &mut App) 
     let content = lines.iter().map(Line::width).max().unwrap_or(0);
     let box_w = content.max(width(COLLISION_HINT)).max(width(&title)) + CONTENT_PAD;
     let box_h = lines.len() + 2;
+    let lines: Vec<Line<'_>> = lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| highlight(l, offset + i == list.pos.selected, content))
+        .collect();
     let area = centered(
         area,
         u16::try_from(box_w).unwrap_or(u16::MAX),

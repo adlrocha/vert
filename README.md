@@ -42,8 +42,9 @@ in, and what deserves a second look.
   its CI checks (✓ passing, ✗ failing, ● running). Pull requests without a local branch get their own rows. `⏎` opens the most
   relevant diff: uncommitted work first, then the branch against the point
   where it left the base, then the pull request. `b` and `p` pick the branch
-  or pull request diff. `f` filters by kind, starting with open pull requests
-  to show what still waits for a review or a merge, `/` narrows rows by name or pull request number, and
+  or pull request diff. The tab opens on open pull requests, to show what
+  still waits for a review or a merge; `f` moves to all rows, then branches,
+  then worktrees. `/` narrows rows by name or pull request number, and
   `d` removes a line of work — a linked worktree together with its branch —
   after a confirmation that warns about unmerged commits and open pull
   requests. vert never removes the checkout it runs in, the repository's
@@ -156,7 +157,7 @@ Press `?` inside vert for all keys. The essentials:
 | Fix, Ask  | type the feedback or question · `⏎` send · `esc` cancel · `ctrl-w`/`ctrl-u` delete |
 | Agent     | `←` `→` choose the agent · type the model · `⏎` use · `esc` cancel |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
-| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds (pull requests first) · `/` filter names or PR number · `c` collisions · `d` remove · `r` refresh |
+| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds (all after the pull request default) · `/` filter names or PR number · `c` collisions · `d` remove · `r` refresh |
 
 ### Pull requests
 

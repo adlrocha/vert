@@ -62,6 +62,10 @@ pub fn matched() -> Style {
     Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD)
 }
 
+/// Background of the selected row in a list, so every column of it reads
+/// at a glance. Grey: the muted colour, as a background.
+pub const ROW: Color = MUTED;
+
 /// Rows selected for an agent to look at (`v` in a diff).
 #[must_use]
 pub fn selected() -> Style {
