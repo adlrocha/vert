@@ -6,7 +6,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::{Hints, empty_state, marker, panel, spinner, truncate, truncate_left, width};
+use super::{
+    Hints, empty_state, highlight, marker, panel, spinner, truncate, truncate_left, width,
+};
 use crate::app::{App, SearchMode};
 use crate::highlight::sanitize;
 use crate::search::{FileMatch, TextMatch};
@@ -143,7 +145,7 @@ fn draw_results(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             .enumerate()
             .skip(offset)
             .take(height)
-            .map(|(i, hit)| file_line(hit, i == selected, cols))
+            .map(|(i, hit)| highlight(file_line(hit, i == selected, cols), i == selected, cols))
             .collect(),
         SearchMode::Text => {
             let path_w = s
@@ -162,7 +164,8 @@ fn draw_results(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 .take(height)
                 .map(|(i, m)| {
                     let same_file = i > offset && s.text.matches[i - 1].path == m.path;
-                    text_line(m, i == selected, same_file, path_w, cols)
+                    let line = text_line(m, i == selected, same_file, path_w, cols);
+                    highlight(line, i == selected, cols)
                 })
                 .collect()
         }

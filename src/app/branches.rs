@@ -29,13 +29,15 @@ pub struct Refresh {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RowFilter {
     /// Everything.
-    #[default]
     All,
     /// Checkouts only.
     Worktrees,
     /// Rows with a local or remote branch.
     Branches,
-    /// Rows with an open pull request.
+    /// Rows with an open pull request: the default, since finding what
+    /// waits for a review or a merge is the most common reason to open the
+    /// tab.
+    #[default]
     Pulls,
 }
 
@@ -51,15 +53,14 @@ impl RowFilter {
         }
     }
 
-    /// The filter `f` moves to. Open pull requests come first: finding
-    /// what waits for a review or a merge is the most common reason to
-    /// filter.
+    /// The filter `f` moves to. From the default, open pull requests, the
+    /// first press shows everything.
     const fn next(self) -> Self {
         match self {
-            Self::All => Self::Pulls,
-            Self::Pulls => Self::Branches,
+            Self::Pulls => Self::All,
+            Self::All => Self::Branches,
             Self::Branches => Self::Worktrees,
-            Self::Worktrees => Self::All,
+            Self::Worktrees => Self::Pulls,
         }
     }
 
@@ -1313,6 +1314,9 @@ mod tests {
             branches: Some(5),
             pulls: pulls.then_some(60),
         });
+        // Most tests look at every row; `the_default_filter_shows_open_pull_requests`
+        // covers the default.
+        app.branches.filter = RowFilter::All;
         app
     }
 
@@ -1416,8 +1420,17 @@ mod tests {
     }
 
     #[test]
+    fn the_default_filter_shows_open_pull_requests() {
+        assert_eq!(BranchesState::default().filter, RowFilter::Pulls);
+        let mut app = loaded();
+        app.branches.filter = RowFilter::default();
+        assert_eq!(keys(&app), ["p:9", "b:feat", "p:8"]);
+    }
+
+    #[test]
     fn filter_cycles() {
         let mut app = loaded();
+        app.branches.filter = RowFilter::default();
         let mut seen = Vec::new();
         for _ in 0..4 {
             press(&mut app, KeyCode::Char('f'));
@@ -1426,10 +1439,10 @@ mod tests {
         assert_eq!(
             seen,
             [
-                ("pull requests", 3),
+                ("all", 6),
                 ("branches", 4),
                 ("worktrees", 2),
-                ("all", 6)
+                ("pull requests", 3)
             ]
         );
     }
@@ -2301,8 +2314,8 @@ mod tests {
     #[test]
     fn kind_and_name_filters_intersect() {
         let mut app = loaded();
-        // Pull requests, branches, then worktrees.
-        for _ in 0..3 {
+        // Branches, then worktrees.
+        for _ in 0..2 {
             press(&mut app, KeyCode::Char('f'));
         }
         assert_eq!(keys(&app), ["b:main", "b:agent"]);

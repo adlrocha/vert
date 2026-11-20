@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::{
-    Hints, churn_bar, empty_state, marker, module_list, pad, panel, path_spans, plural,
+    Hints, churn_bar, empty_state, highlight, marker, module_list, pad, panel, path_spans, plural,
     spans_width, spinner, stat_spans, truncate,
 };
 use crate::age::{ago, relative};
@@ -107,13 +107,12 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &mut App) -> Hints {
         .skip(offset)
         .take(height)
         .map(|(i, e)| {
-            row(
-                e,
-                columns,
+            let width = usize::from(inner.width);
+            let fresh = app.feed.fresh.contains(&e.id);
+            highlight(
+                row(e, columns, i == selected, fresh, width, app.now),
                 i == selected,
-                app.feed.fresh.contains(&e.id),
-                usize::from(inner.width),
-                app.now,
+                width,
             )
         })
         .collect();

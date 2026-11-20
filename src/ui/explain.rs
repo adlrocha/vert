@@ -9,7 +9,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::{Hints, clock, empty_state, marker, panel, plural, spinner, truncate, width, wrap};
+use super::{
+    Hints, clock, empty_state, highlight, marker, panel, plural, spinner, truncate, width, wrap,
+};
 use crate::app::{ConcernFix, ExplainView, Item, Pane, Status, concern_key, items};
 use crate::explain::question::Question;
 use crate::explain::{Change, Diagram, Explanation, Ref, tree};
@@ -269,10 +271,11 @@ fn draw_ready(
             } else {
                 style
             };
-            Line::from(vec![
+            let line = Line::from(vec![
                 marker(selected),
                 Span::styled(truncate(&text, w), style),
-            ])
+            ]);
+            highlight(line, selected, w + 1)
         })
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
