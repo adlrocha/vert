@@ -469,6 +469,176 @@ fn fixes_go_to_the_checkout_of_the_line_of_work() {
 }
 
 #[test]
+fn a_line_of_work_opens_and_edits_its_files_in_its_checkout() {
+    // Where `o`, `e` and `⏎` open each change's files, and whether the
+    // notice says its branch isn't checked out.
+    let cases = [
+        (
+            crate::app::pull_entry(&pull(7, "agent")),
+            Some("/wt/agent-dir"),
+            false,
+        ),
+        (range("agent"), Some("/wt/agent-dir"), false),
+        (range("here"), None, false),
+        (crate::app::pull_entry(&pull(8, "loose")), None, true),
+        (range("loose"), None, true),
+        (commit(), None, false),
+        (Entry::blank(Target::PullRequest(99)), None, true),
+    ];
+    for (entry, expected, missing) in cases {
+        let id = entry.id.clone();
+        let mut app = showing(entry);
+        with_lines_of_work(&mut app);
+        for key in [KeyCode::Char('o'), KeyCode::Char('e'), KeyCode::Enter] {
+            let effects = press(&mut app, key);
+            let root = match effects.as_slice() {
+                [Effect::OpenFile { root, path, .. } | Effect::Edit { root, path, .. }] => {
+                    assert_eq!(path, "src/a.rs", "{id}");
+                    root.clone()
+                }
+                other => panic!("{id}: expected a file to open, got {other:?}"),
+            };
+            assert_eq!(root, expected.map(PathBuf::from), "{id} {key:?}");
+            let warned = app
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.ends_with(", so this is the file in this checkout"));
+            assert_eq!(warned, missing, "{id} {key:?}: {:?}", app.notice);
+        }
+        // Moving on opens nothing, and leaves the notice to clear.
+        assert_eq!(press(&mut app, KeyCode::Char('j')), []);
+        assert_eq!(app.notice, None, "{id}");
+    }
+}
+
+#[test]
+fn a_fork_s_pull_request_is_never_its_namesake_branch() {
+    use crate::app::Checkout;
+    let mut app = blank_app();
+    with_lines_of_work(&mut app);
+    let mut fork = pull(12, "agent");
+    fork.fork = true;
+    app.update(Msg::Pulls(Ok((
+        "o/r".to_owned(),
+        vec![pull(7, "agent"), fork.clone()],
+    ))));
+    let origin = app.origin(&crate::app::pull_entry(&fork)).expect("#12");
+    assert_eq!(
+        origin.branch, None,
+        "agent is a local branch, not the fork's"
+    );
+    assert!(matches!(origin.checkout, Checkout::Missing(_)));
+    assert_eq!(
+        origin.fallback("#12").as_deref(),
+        Some("#12 isn't checked out, so this is the file in this checkout")
+    );
+    // A pull request without a local branch is named by its head.
+    let mut remote = pull(13, "remote-only");
+    app.update(Msg::Pulls(Ok(("o/r".to_owned(), vec![remote.clone()]))));
+    let origin = app.origin(&crate::app::pull_entry(&remote)).expect("#13");
+    assert_eq!(origin.branch.as_deref(), Some("remote-only"));
+    remote.fork = true;
+    app.update(Msg::Pulls(Ok(("o/r".to_owned(), vec![remote.clone()]))));
+    assert_eq!(
+        app.origin(&crate::app::pull_entry(&remote))
+            .expect("#13")
+            .branch,
+        None
+    );
+}
+
+#[test]
+fn a_branch_whose_worktree_went_opens_from_vert_s_checkout() {
+    let mut entry = range("agent");
+    entry.root = Some(PathBuf::from("/wt/agent-dir"));
+    let mut app = showing(entry);
+    with_lines_of_work(&mut app);
+    // The worktree is removed: the branch is no longer checked out.
+    app.update(Msg::Branches(Ok(Branches {
+        base: Some("main".to_owned()),
+        branches: vec![branch("agent", None)],
+    })));
+    match press(&mut app, KeyCode::Char('e')).as_slice() {
+        [Effect::Edit { root, .. }] => assert_eq!(root, &None),
+        other => panic!("expected an edit, got {other:?}"),
+    }
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("agent isn't checked out, so this is the file in this checkout")
+    );
+}
+
+#[test]
+fn a_file_opened_from_a_worktree_follows_its_diff() {
+    let pr7 = crate::app::pull_entry(&pull(7, "agent"));
+    let mut app = showing(pr7.clone());
+    with_lines_of_work(&mut app);
+    let root = match press(&mut app, KeyCode::Char('o')).as_slice() {
+        [Effect::OpenFile { root, .. }] => root.clone(),
+        other => panic!("expected a file to open, got {other:?}"),
+    };
+    assert_eq!(root, Some(PathBuf::from("/wt/agent-dir")));
+    app.update(Msg::File {
+        path: "src/a.rs".to_owned(),
+        content: Ok("keep\nfirst\n".to_owned()),
+        line: 1,
+        marks: std::collections::BTreeSet::new(),
+        root,
+    });
+    // The diff refreshes: the file's marks follow it from the worktree.
+    app.update(Msg::Diff {
+        entry: Box::new(pr7),
+        result: Ok(vec![file("src/a.rs")]),
+        refresh: true,
+        file: None,
+    });
+    let Some(View::File(f)) = app.views.last() else {
+        panic!("file view");
+    };
+    assert_eq!(f.marks, std::collections::BTreeSet::from([2, 41]));
+}
+
+#[test]
+fn the_origin_names_the_branch_and_where_it_is_checked_out() {
+    use crate::app::Checkout;
+    let mut app = blank_app();
+    let origin = |app: &App, entry: &Entry| app.origin(entry);
+    let pr7 = crate::app::pull_entry(&pull(7, "agent"));
+    // Before the lines of work load, vert can't tell where #7 is.
+    let early = origin(&app, &pr7).expect("#7");
+    assert_eq!(early.branch, None);
+    assert!(matches!(&early.checkout, Checkout::Unknown(why) if why.contains("still loading")));
+    assert_eq!(
+        early.fallback("#7").as_deref(),
+        Some("vert can't tell where #7 is checked out, so this is the file in this checkout")
+    );
+    with_lines_of_work(&mut app);
+    let agent = origin(&app, &pr7).expect("#7");
+    assert_eq!(agent.branch.as_deref(), Some("agent"));
+    assert_eq!(
+        agent.checkout,
+        Checkout::At(Some(PathBuf::from("/wt/agent-dir")), "agent-dir".to_owned())
+    );
+    assert_eq!(
+        (agent.root(), agent.fallback("#7")),
+        (Some("/wt/agent-dir".into()), None)
+    );
+    let here = origin(&app, &range("here")).expect("here");
+    assert_eq!(here.checkout, Checkout::At(None, "here".to_owned()));
+    let loose = origin(&app, &range("loose")).expect("loose");
+    assert!(matches!(loose.checkout, Checkout::Missing(_)));
+    assert_eq!(
+        loose.fallback("loose").as_deref(),
+        Some("loose isn't checked out, so this is the file in this checkout")
+    );
+    // A closed or unlisted pull request: no branch, and it says so.
+    let closed = origin(&app, &Entry::blank(Target::PullRequest(99))).expect("#99");
+    assert_eq!(closed.branch, None);
+    assert!(matches!(closed.checkout, Checkout::Unknown(_)));
+    assert_eq!(origin(&app, &commit()), None);
+}
+
+#[test]
 fn a_selection_names_its_lines_and_sends_only_them() {
     let mut app = showing(commit());
     let Some(View::Detail(d)) = app.views.last_mut() else {

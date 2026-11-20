@@ -298,6 +298,15 @@ impl ExplainState {
         self.questioning.get(&key).copied()
     }
 
+    /// How many questions agents are answering, whichever view asked them,
+    /// and since when (Unix time) the oldest has been waiting; `None` when
+    /// none is.
+    #[must_use]
+    pub fn questions_running(&self) -> Option<(usize, i64)> {
+        let oldest = self.questioning.values().min().copied()?;
+        Some((self.questioning.len(), oldest))
+    }
+
     /// The explanation of the diff `key`, if one has arrived while vert
     /// runs, with every question answered about it since.
     #[must_use]
@@ -320,6 +329,12 @@ impl ExplainState {
     /// `key`, since `now`.
     pub(super) fn start_question(&mut self, key: u64, now: i64) {
         self.questioning.insert(key, now);
+    }
+
+    /// [`ExplainState::start_question`], for the rendering tests.
+    #[cfg(test)]
+    pub(crate) fn question_for_tests(&mut self, key: u64, now: i64) {
+        self.start_question(key, now);
     }
 
     /// The fixes asked for concerns of the diff `key`, by concern.

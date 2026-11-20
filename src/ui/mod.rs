@@ -68,7 +68,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         }
     };
-    draw_footer(frame, footer, hints, app.notice.as_deref());
+    draw_footer(
+        frame,
+        footer,
+        hints,
+        (app.notice.as_deref(), agent_work(app).as_deref()),
+    );
     if app.branches.confirm.is_some() {
         branches::draw_confirm(frame, frame.area(), app);
     }
@@ -116,21 +121,11 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(theme::HIGHLIGHT),
         ));
     }
-    match app.fix.running.as_slice() {
-        [] => {}
-        [one] => right.push(Span::styled(
-            format!(
-                "{} fixing in {} {}  ",
-                spinner(app.tick),
-                one.checkout,
-                clock(app.now - one.since)
-            ),
+    if let Some(fixes) = fixes_at_work(app) {
+        right.push(Span::styled(
+            format!("{fixes}  "),
             Style::default().fg(theme::INFO),
-        )),
-        many => right.push(Span::styled(
-            format!("{} {} fixes  ", spinner(app.tick), many.len()),
-            Style::default().fg(theme::INFO),
-        )),
+        ));
     }
     if app.feed.loading() {
         right.push(Span::styled(
@@ -188,7 +183,44 @@ fn draw_crumbs(frame: &mut Frame<'_>, area: Rect, parts: &[&str]) {
 /// Key hints shown in the footer: `(keys, description)`.
 pub type Hints = &'static [(&'static str, &'static str)];
 
-fn draw_footer(frame: &mut Frame<'_>, area: Rect, hints: Hints, notice: Option<&str>) {
+/// What the agents are working on, for the footer of every view: the fixes
+/// running and the questions being answered. A request sent from any view
+/// shows there that it was picked up, until it is done, after the notice
+/// that confirmed it is gone.
+fn agent_work(app: &App) -> Option<String> {
+    let spin = spinner(app.tick);
+    let fixes = fixes_at_work(app);
+    let questions = app.explain.questions_running().map(|(n, since)| match n {
+        1 => format!("{spin} answering {}", clock(app.now - since)),
+        n => format!("{spin} answering {n} questions"),
+    });
+    let parts: Vec<String> = [fixes, questions].into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The fixes running, as the header and the footer show them: where and
+/// for how long, or how many.
+fn fixes_at_work(app: &App) -> Option<String> {
+    let spin = spinner(app.tick);
+    match app.fix.running.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "{spin} fixing in {} {}",
+            one.checkout,
+            clock(app.now - one.since)
+        )),
+        many => Some(format!("{spin} {} fixes running", many.len())),
+    }
+}
+
+/// Draws the key hints, and on the right the notice, if any, then what the
+/// agents are working on, if anything.
+fn draw_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    hints: Hints,
+    (notice, work): (Option<&str>, Option<&str>),
+) {
     let mut spans = vec![Span::raw(" ")];
     for (i, (keys, desc)) in hints.iter().enumerate() {
         if i > 0 {
@@ -198,18 +230,28 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, hints: Hints, notice: Option<&
         spans.push(Span::styled(format!(" {desc}"), theme::muted()));
     }
     frame.render_widget(Line::from(spans), area);
-    if let Some(notice) = notice {
+    let room = usize::from(area.width).saturating_sub(2);
+    // The work keeps its place on the right; the notice gets what is left.
+    let work = work.map(|w| truncate(w, room));
+    let left = room.saturating_sub(work.as_ref().map_or(0, |w| width(w) + 3));
+    let mut right = Vec::new();
+    if let Some(notice) = notice.filter(|_| left > 0) {
         // A long notice (an agent's summary) keeps its start, where it says
         // what happened, and loses its end.
-        let notice = truncate(notice, usize::from(area.width).saturating_sub(2));
-        frame.render_widget(
-            Line::from(Span::styled(
-                format!("{notice} "),
-                Style::default().fg(theme::WARN),
-            ))
-            .alignment(Alignment::Right),
-            area,
-        );
+        right.push(Span::styled(
+            truncate(notice, left),
+            Style::default().fg(theme::WARN),
+        ));
+        if work.is_some() {
+            right.push(Span::styled(" · ", theme::muted()));
+        }
+    }
+    if let Some(work) = work {
+        right.push(Span::styled(work, Style::default().fg(theme::INFO)));
+    }
+    if !right.is_empty() {
+        right.push(Span::raw(" "));
+        frame.render_widget(Line::from(right).alignment(Alignment::Right), area);
     }
 }
 
@@ -1009,7 +1051,7 @@ mod render_tests {
         });
         let s = screen(&mut app, 120, 20);
         assert!(s.contains("Pull request #13"), "{s}");
-        assert!(s.contains("#13 · +"), "{s}");
+        assert!(s.contains("#13 · checkout unknown · +"), "{s}");
         assert!(!s.contains(" ago"), "{s}");
     }
 
@@ -1119,7 +1161,7 @@ mod render_tests {
             since: app.now,
             concerns: None,
         });
-        assert!(screen(&mut app, 140, 30).contains("2 fixes"));
+        assert!(screen(&mut app, 140, 30).contains("2 fixes running"));
         app.notice = Some(format!("Fixed in x: {}", "long ".repeat(40)));
         let footer = screen(&mut app, 60, 10)
             .lines()
@@ -1330,6 +1372,111 @@ mod render_tests {
             file: None,
         });
         assert!(screen(&mut app, 140, 20).contains("Uncommitted changes"));
+    }
+
+    #[test]
+    fn the_footer_shows_the_agents_at_work_until_they_finish() {
+        let (t, mut app) = real_app();
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
+        app.set_fixer(&Ok(crate::fix::Fixer {
+            commit: true,
+            agent: crate::explain::agent::Agent::Claude,
+            model: None,
+            timeout: std::time::Duration::from_secs(1),
+            max_excerpt_bytes: 1024,
+        }));
+        let footer = |app: &mut App| {
+            screen(app, 140, 30)
+                .lines()
+                .last()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert!(!footer(&mut app).contains('⠋'), "idle: nothing at work");
+        let entry = app.feed.commits[0].clone();
+        let files = git::diff::load(&t.repo, entry.target).expect("diff");
+        let key = crate::explain::diff_key(&entry, &files);
+        app.update(Msg::Diff {
+            entry: Box::new(entry),
+            result: Ok(files),
+            refresh: false,
+            file: None,
+        });
+        // A fix of selected lines in the diff.
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char('f'));
+        for c in "rename it".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        let f = footer(&mut app);
+        assert!(f.contains("Asked the agent to fix this"), "{f}");
+        assert!(f.contains("fixing in this checkout 0:00"), "{f}");
+        // The notice goes with the next key; the fix still shows, and its
+        // time runs.
+        press(&mut app, KeyCode::Char('j'));
+        app.update(Msg::Tick(app.now + 7));
+        let f = footer(&mut app);
+        assert!(!f.contains("Asked the agent"), "{f}");
+        assert!(f.contains("fixing in this checkout 0:07"), "{f}");
+        for (w, h) in SIZES {
+            screen(&mut app, w, h);
+        }
+        // A question too, still showing once its panel is left.
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.views.last(), Some(View::Detail(_))));
+        let f = footer(&mut app);
+        assert!(f.contains("fixing in this checkout 0:07 · "), "{f}");
+        assert!(f.contains("answering 0:00"), "{f}");
+        // Elsewhere too (the first esc clears the selection).
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.views.is_empty());
+        assert!(footer(&mut app).contains("answering 0:00"));
+        app.update(Msg::Answered {
+            key,
+            result: Err("timed out".to_owned()),
+        });
+        let id = app.fix.running.first().map(|r| r.id).expect("running");
+        app.update(Msg::Fixed {
+            id,
+            result: Err("gave up".to_owned()),
+        });
+        let f = footer(&mut app);
+        assert!(!f.contains("fixing in") && !f.contains("answering"), "{f}");
+        assert!(f.contains("Couldn't fix in this checkout"), "{f}");
+    }
+
+    #[test]
+    fn several_agents_at_work_are_counted_in_the_footer() {
+        let (_t, mut app) = real_app();
+        let running = |id| crate::app::Running {
+            id,
+            root: None,
+            checkout: "x".to_owned(),
+            since: app.now,
+            concerns: None,
+        };
+        let (a, b) = (running(1), running(2));
+        app.fix.running.extend([a, b]);
+        app.explain.question_for_tests(1, app.now);
+        app.explain.question_for_tests(2, app.now - 5);
+        assert_eq!(app.explain.questions_running(), Some((2, app.now - 5)));
+        let s = screen(&mut app, 140, 30);
+        assert!(
+            s.contains("2 fixes running · ⠋ answering 2 questions"),
+            "{s}"
+        );
+        // Too narrow for both: the work keeps its place over the notice.
+        app.notice = Some("a long notice ".repeat(10));
+        let s = screen(&mut app, 30, 10);
+        assert!(
+            s.lines().last().is_some_and(|l| l.contains("2 fixes")),
+            "{s}"
+        );
     }
 
     #[test]

@@ -27,7 +27,9 @@ pub use explain::{
     ExplainState, ExplainView, Item, Pane, Reload, Status, Stop, concern_at, items, row_pointer,
     stops, targets,
 };
-pub use fix::{ConcernFix, Concerns, Draft, Finished, FixState, Running, concern_key};
+pub use fix::{
+    Checkout, ConcernFix, Concerns, Draft, Finished, FixState, Origin, Running, concern_key,
+};
 
 use crate::explain::Answer;
 use crate::git::RepoInfo;
@@ -433,9 +435,22 @@ pub struct DetailView {
     pub filter: String,
     /// Whether the filter is being typed.
     pub filter_editing: bool,
+    /// The branch it belongs to and where that is checked out, for a branch
+    /// or pull request; kept up to date as the lines of work load.
+    pub origin: Option<Origin>,
 }
 
 impl DetailView {
+    /// The checkout its files open from (`o`, `e`): for a branch or pull
+    /// request, its origin's (vert's own when it isn't checked out), else
+    /// the change's own.
+    #[must_use]
+    pub fn files_root(&self) -> Option<PathBuf> {
+        self.origin
+            .as_ref()
+            .map_or_else(|| self.entry.root.clone(), Origin::root)
+    }
+
     /// Indices of the files the filter shows, in order: every file when it
     /// is empty.
     #[must_use]
@@ -956,9 +971,9 @@ impl App {
                 self.now = now;
                 self.poll_branches()
             }
-            Msg::Branches(result) => self.on_branches(result),
+            Msg::Branches(result) => self.relocating(|app| app.on_branches(result)),
             Msg::Overlaps(result) => self.on_overlaps(result),
-            Msg::Pulls(result) => self.on_pulls(result),
+            Msg::Pulls(result) => self.relocating(|app| app.on_pulls(result)),
             Msg::Commits(result) => self.on_commits(result),
             Msg::Worktree(result) => self.on_worktree(result),
             Msg::Changed(changes) => self.on_changed(&changes),
@@ -1213,7 +1228,32 @@ impl App {
             selection: None,
             filter: String::new(),
             filter_editing: false,
+            origin: None,
         })));
+        self.locate_details();
+    }
+
+    /// Applies `load`, a load of the lines of work, then works out again
+    /// where the open diffs' branches are checked out.
+    fn relocating(&mut self, load: impl FnOnce(&mut Self) -> Vec<Effect>) -> Vec<Effect> {
+        let effects = load(self);
+        self.locate_details();
+        effects
+    }
+
+    /// Works out again where each open diff's branch is checked out, as the
+    /// lines of work it depends on load.
+    fn locate_details(&mut self) {
+        let origins: Vec<Option<Origin>> = self
+            .views
+            .iter()
+            .map(|v| v.as_detail().and_then(|d| self.origin(&d.entry)))
+            .collect();
+        for (view, origin) in self.views.iter_mut().zip(origins) {
+            if let View::Detail(d) = view {
+                d.origin = origin;
+            }
+        }
     }
 
     /// Replaces the diff of the open detail view if it still shows `entry`.
@@ -1296,7 +1336,7 @@ impl App {
             let Some(d) = below.iter().rev().find_map(View::as_detail) else {
                 continue;
             };
-            if d.entry.root != f.root {
+            if d.files_root() != f.root {
                 continue;
             }
             f.marks = d
@@ -1738,7 +1778,16 @@ impl App {
             Some(View::Explain(_)) if key.code == KeyCode::Char('f') => {
                 self.draft_fix_from_explain()
             }
-            Some(View::Detail(d)) => detail_key(d, key, max),
+            Some(View::Detail(d)) => {
+                let effects = detail_key(d, key, max);
+                let opens = |e: &Effect| matches!(e, Effect::OpenFile { .. } | Effect::Edit { .. });
+                if effects.iter().any(opens)
+                    && let Some(why) = d.origin.as_ref().and_then(|o| o.fallback(&d.entry.short))
+                {
+                    self.notice = Some(why);
+                }
+                effects
+            }
             Some(View::File(f)) => file_key(f, key),
             Some(View::Explain(_)) => self.on_explain_key(key),
             Some(View::Answer(_)) => self.on_answer_key(key),
@@ -1921,7 +1970,7 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
             }
         }
         (KeyCode::Enter | KeyCode::Char('o'), _) => {
-            let root = d.entry.root.clone();
+            let root = d.files_root();
             return open_from_detail(d).map_or_else(Vec::new, |(path, line, marks)| {
                 vec![Effect::OpenFile {
                     path,
@@ -1932,7 +1981,7 @@ fn detail_key(d: &mut DetailView, key: &KeyEvent, max_highlight: usize) -> Vec<E
             });
         }
         (KeyCode::Char('e'), _) => {
-            let root = d.entry.root.clone();
+            let root = d.files_root();
             return open_from_detail(d).map_or_else(Vec::new, |(path, line, _)| {
                 vec![Effect::Edit { path, line, root }]
             });

@@ -140,7 +140,84 @@ pub struct FixState {
     next: u64,
 }
 
+/// Where a change is checked out, as far as vert can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checkout {
+    /// In a linked worktree (its path) or in vert's own checkout (`None`),
+    /// named for the user.
+    At(Option<PathBuf>, String),
+    /// Its branch isn't checked out anywhere; why, phrased for a fix.
+    Missing(String),
+    /// vert can't tell where it is: its branch is unknown, or the lines of
+    /// work haven't loaded; why, phrased for a fix.
+    Unknown(String),
+}
+
+/// The line of work a branch or pull request diff belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    /// Its branch, when vert knows it.
+    pub branch: Option<String>,
+    /// Where it is checked out, which is where its files open (`o`, `e`);
+    /// anything but [`Checkout::At`] leaves them in vert's own checkout.
+    pub checkout: Checkout,
+}
+
+impl Origin {
+    /// The checkout files open from: a linked worktree, or `None` for
+    /// vert's own.
+    #[must_use]
+    pub fn root(&self) -> Option<PathBuf> {
+        match &self.checkout {
+            Checkout::At(root, _) => root.clone(),
+            Checkout::Missing(_) | Checkout::Unknown(_) => None,
+        }
+    }
+
+    /// Why files of the diff `short` open from vert's own checkout when
+    /// they should open from its branch's, if they do.
+    #[must_use]
+    pub fn fallback(&self, short: &str) -> Option<String> {
+        let name = self.branch.as_deref().unwrap_or(short);
+        match &self.checkout {
+            Checkout::At(..) => None,
+            Checkout::Missing(_) => Some(format!(
+                "{name} isn't checked out, so this is the file in this checkout"
+            )),
+            Checkout::Unknown(_) => Some(format!(
+                "vert can't tell where {name} is checked out, so this is the file in this checkout"
+            )),
+        }
+    }
+}
+
 impl App {
+    /// The branch the diff of `entry` belongs to and where it is checked
+    /// out, for a branch or a pull request; `None` for anything else.
+    #[must_use]
+    pub fn origin(&self, entry: &Entry) -> Option<Origin> {
+        let branch = match entry.target {
+            // The rows match a pull request to its branch, never a fork's:
+            // the same match `locate` finds its checkout by. One without a
+            // local branch is named by its head, unless it is a fork's.
+            Target::PullRequest(number) => self
+                .branches
+                .all_rows()
+                .into_iter()
+                .find(|r| r.pull.is_some_and(|p| p.number == number))
+                .and_then(|r| {
+                    r.branch
+                        .map(|b| b.name.clone())
+                        .or_else(|| r.pull.filter(|p| !p.fork).map(|p| p.head.clone()))
+                }),
+            _ => Some(entry.branch()?.to_owned()),
+        };
+        Some(Origin {
+            branch,
+            checkout: self.locate(entry),
+        })
+    }
+
     /// Sets the agent fixes come from, or why there is none.
     pub fn set_fixer(&mut self, fixer: &Result<Fixer, String>) {
         self.fix.agent = Some(fixer.as_ref().map(Fixer::label).map_err(Clone::clone));
@@ -149,16 +226,24 @@ impl App {
 
     /// The checkout a fix to `entry` goes to, and its name for the user.
     fn fix_checkout(&self, entry: &Entry) -> Result<(Option<PathBuf>, String), String> {
+        match self.locate(entry) {
+            Checkout::At(root, name) => Ok((root, name)),
+            Checkout::Missing(why) | Checkout::Unknown(why) => Err(why),
+        }
+    }
+
+    /// Where `entry` is checked out.
+    fn locate(&self, entry: &Entry) -> Checkout {
         let checkout_of = |b: &Branch| {
-            b.worktree
-                .as_ref()
-                .map(|w| ((!w.current).then(|| w.path.clone()), w.name.clone()))
-                .ok_or_else(|| {
-                    format!(
+            b.worktree.as_ref().map_or_else(
+                || {
+                    Checkout::Missing(format!(
                         "{} isn't checked out: check it out in a worktree to fix it there",
                         b.name
-                    )
-                })
+                    ))
+                },
+                |w| Checkout::At((!w.current).then(|| w.path.clone()), w.name.clone()),
+            )
         };
         let named = |root: &Option<PathBuf>| {
             root.as_ref().map_or_else(
@@ -184,22 +269,26 @@ impl App {
                 .iter()
                 .find(|b| b.name == name)
                 .map_or_else(
-                    || Err(format!("{name} isn't a line of work vert knows")),
+                    || Checkout::Unknown(format!("{name} isn't a line of work vert knows")),
                     checkout_of,
                 );
         }
         match entry.target {
-            Target::WorkingTree | Target::Commit(_) => Ok((entry.root.clone(), named(&entry.root))),
-            Target::Range { .. } => Err(format!("{} isn't a line of work vert knows", entry.short)),
+            Target::WorkingTree | Target::Commit(_) => {
+                Checkout::At(entry.root.clone(), named(&entry.root))
+            }
+            Target::Range { .. } => {
+                Checkout::Unknown(format!("{} isn't a line of work vert knows", entry.short))
+            }
             Target::PullRequest(number) => {
                 if !self.branches.loaded {
-                    return Err(self.branches.error.as_ref().map_or_else(
+                    return Checkout::Unknown(self.branches.error.as_ref().map_or_else(
                         || "the lines of work are still loading; try again in a moment".to_owned(),
                         |e| format!("couldn't list the lines of work: {e}"),
                     ));
                 }
                 if !self.branches.pulls.iter().any(|p| p.number == number) {
-                    return Err(format!(
+                    return Checkout::Unknown(format!(
                         "#{number} isn't an open pull request vert lists, so it can't tell its branch: open the branch (vert branch NAME) to fix it there"
                     ));
                 }
@@ -213,7 +302,7 @@ impl App {
                     .and_then(|r| r.branch);
                 branch.map_or_else(
                     || {
-                        Err(format!(
+                        Checkout::Missing(format!(
                             "#{number} isn't checked out here: check out its branch in a worktree to fix it"
                         ))
                     },
