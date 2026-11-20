@@ -1199,3 +1199,36 @@ fn a_file_not_opened_from_a_diff_keeps_its_marks() {
     });
     assert_eq!(file_view(&app).marks, BTreeSet::from([4]));
 }
+
+#[test]
+fn a_diff_reloaded_before_its_file_arrives_still_marks_the_file() {
+    let mut app = loaded();
+    let wt = entry(crate::git::feed::WORKTREE_ID, 9_999, &["src/a.rs"]);
+    app.update(Msg::Worktree(Ok(Some(wt.clone()))));
+    app.update(Msg::Diff {
+        entry: Box::new(wt.clone()),
+        result: Ok(vec![file_diff("src/a.rs")]),
+        refresh: false,
+        file: None,
+    });
+    let open = app.update(key(KeyCode::Enter));
+    let [Effect::OpenFile { path, marks, .. }] = &open[..] else {
+        panic!("{open:?}")
+    };
+    let mut grown = file_diff("src/a.rs");
+    grown.hunks[1].lines[0].new_no = Some(25);
+    app.update(Msg::Diff {
+        entry: Box::new(wt),
+        result: Ok(vec![grown]),
+        refresh: true,
+        file: None,
+    });
+    app.update(Msg::File {
+        path: path.clone(),
+        content: Ok(numbered(30)),
+        line: 2,
+        marks: marks.clone(),
+        root: None,
+    });
+    assert_eq!(file_view(&app).marks, BTreeSet::from([2, 25]));
+}

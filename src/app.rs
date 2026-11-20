@@ -1337,6 +1337,8 @@ impl App {
             notice,
             root,
         })));
+        // The diff below may have reloaded since the file was asked for.
+        self.sync_marks();
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Vec<Effect> {

@@ -698,7 +698,7 @@ mod render_tests {
     use ratatui::backend::TestBackend;
 
     use super::draw;
-    use crate::app::{App, Msg, Tab, WatchStatus};
+    use crate::app::{App, Msg, Tab, View, WatchStatus};
     use crate::git::RepoInfo;
     use crate::git::testutil::TestRepo;
     use crate::labels::Labeler;
@@ -1119,6 +1119,11 @@ mod render_tests {
             marks: BTreeSet::from([2]),
             root: None,
         });
+        // The commit underneath doesn't touch this file, so opening it
+        // marked nothing; mark a line by hand to draw one.
+        if let Some(View::File(f)) = app.views.last_mut() {
+            f.marks = BTreeSet::from([2]);
+        }
         for (w, h) in SIZES {
             screen(&mut app, w, h);
         }
