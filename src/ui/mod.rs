@@ -35,10 +35,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     .areas(frame.area());
 
     draw_header(frame, header, app);
+    let origin = match app.views.last() {
+        Some(View::Detail(d)) => app.origin(&d.entry),
+        _ => None,
+    };
     let hints = match app.views.last_mut() {
         Some(View::Detail(d)) => {
             draw_crumbs(frame, tabs, &[app.tab.title(), &d.entry.short]);
-            detail::draw_detail(frame, body, d, app.now);
+            detail::draw_detail(frame, body, d, (app.now, origin.as_ref()));
             detail::DETAIL_HINTS
         }
         Some(View::File(f)) => {

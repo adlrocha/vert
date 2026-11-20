@@ -11,7 +11,7 @@ use super::{
     Hints, empty_state, highlight, module_list, panel, plural, spans_width, stat_spans, truncate,
 };
 use crate::age::ago;
-use crate::app::{DetailView, FileView, Focus, Selection};
+use crate::app::{DetailView, FileView, Focus, Origin, Selection};
 use crate::git::Target;
 use crate::git::diff::{FileDiff, LineKind};
 use crate::highlight::{Highlighter, sanitize};
@@ -259,10 +259,15 @@ fn empty_reason(target: Target) -> &'static str {
 }
 
 /// Draws the detail view.
-pub fn draw_detail(frame: &mut Frame<'_>, area: Rect, d: &mut DetailView, now: i64) {
+pub fn draw_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    d: &mut DetailView,
+    (now, origin): (i64, Option<&Origin>),
+) {
     let [summary, panes] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(area);
-    draw_summary(frame, summary, d, now);
+    draw_summary(frame, summary, d, (now, origin));
 
     let files_w = (panes.width * 3 / 10).clamp(28, 56).min(panes.width / 2);
     let [files_area, diff_area] =
@@ -433,7 +438,12 @@ fn render_columns(
     frame.render_widget(Paragraph::new(slice(code)).scroll((0, x)), c);
 }
 
-fn draw_summary(frame: &mut Frame<'_>, area: Rect, d: &DetailView, now: i64) {
+fn draw_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    d: &DetailView,
+    (now, origin): (i64, Option<&Origin>),
+) {
     let e = &d.entry;
     let chip_spans = chips(e);
     let chip_w = spans_width(&chip_spans);
@@ -451,6 +461,9 @@ fn draw_summary(frame: &mut Frame<'_>, area: Rect, d: &DetailView, now: i64) {
         Span::raw(" "),
         Span::styled(e.short.clone(), Style::default().fg(theme::WARN)),
     ];
+    if let Some(origin) = origin {
+        meta.extend(origin_spans(origin));
+    }
     if !e.author.is_empty() {
         meta.push(Span::styled(format!(" · {}", e.author), theme::muted()));
     }
@@ -476,6 +489,25 @@ fn draw_summary(frame: &mut Frame<'_>, area: Rect, d: &DetailView, now: i64) {
     right.push(Span::raw(" "));
     frame.render_widget(Line::from(right).alignment(Alignment::Right), l1);
     frame.render_widget(Line::from(meta), l2);
+}
+
+/// The branch of a branch or pull request diff, and where its files open
+/// (`o`, `e`): a linked worktree is named, and a branch that isn't checked
+/// out says so, as its files then open from this checkout.
+fn origin_spans(origin: &Origin) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled(" · ", theme::muted()),
+        Span::styled(format!("⎇ {}", origin.branch), theme::bold()),
+    ];
+    match &origin.checkout {
+        Some((Some(_), name)) => spans.push(Span::styled(format!(" in {name}"), theme::muted())),
+        Some((None, _)) => {}
+        None => spans.push(Span::styled(
+            " not checked out",
+            Style::default().fg(theme::WARN),
+        )),
+    }
+    spans
 }
 
 /// Draws the file viewer.
@@ -659,6 +691,26 @@ mod tests {
             .contains("branch")
         );
         assert!(empty_reason(Target::PullRequest(1)).contains("pull request"));
+    }
+
+    #[test]
+    fn the_origin_names_the_branch_and_its_checkout() {
+        use crate::app::Origin;
+        let line = |checkout| {
+            origin_spans(&Origin {
+                branch: "claude/dora".to_owned(),
+                checkout,
+            })
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect::<String>()
+        };
+        assert_eq!(
+            line(Some((Some("/wt/dora".into()), "dora".to_owned()))),
+            " · ⎇ claude/dora in dora"
+        );
+        assert_eq!(line(Some((None, "here".to_owned()))), " · ⎇ claude/dora");
+        assert_eq!(line(None), " · ⎇ claude/dora not checked out");
     }
 
     #[test]

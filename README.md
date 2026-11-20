@@ -41,8 +41,11 @@ in, and what deserves a second look.
   behind the base branch, its size, and the matching open pull request with
   its CI checks (✓ passing, ✗ failing, ● running). Pull requests without a local branch get their own rows. `⏎` opens the most
   relevant diff: uncommitted work first, then the branch against the point
-  where it left the base, then the pull request. `b` and `p` pick the branch
-  or pull request diff. The tab opens on open pull requests, to show what
+  where it left the base, then the pull request; when it opens uncommitted
+  work, the footer says so and names the other diffs. `b` and `p` pick the
+  branch or pull request diff. A branch or pull request diff names its
+  branch and the worktree it is checked out in, or says it isn't checked
+  out. The tab opens on open pull requests, to show what
   still waits for a review or a merge; `f` moves to all rows, then branches,
   then worktrees. `/` narrows rows by name or pull request number, and
   `d` removes a line of work — a linked worktree together with its branch —
@@ -88,7 +91,10 @@ in, and what deserves a second look.
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter, and a cursor to select lines with `v` and ask
   (`a`) or fix (`f`) about them. `e` opens `$VISUAL`/`$EDITOR` at the
-  cursor's line (vim, nvim, helix, VS Code, Cursor, …). The file reloads
+  cursor's line (vim, nvim, helix, VS Code, Cursor, …). A branch or pull
+  request's files open from the worktree its branch is checked out in;
+  when it isn't checked out, they open from vert's own checkout, and the
+  footer says so, as they may differ from the diff. The file reloads
   when it changes on disk, by an agent, your editor or anything else, and
   the marks follow the diff it was opened from.
 - **Inherits your terminal theme:** it only uses the 16 ANSI colours.

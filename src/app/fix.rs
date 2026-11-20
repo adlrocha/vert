@@ -140,7 +140,78 @@ pub struct FixState {
     next: u64,
 }
 
+/// The line of work a branch or pull request diff belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    /// Its branch.
+    pub branch: String,
+    /// The checkout its files open from (`o`, `e`), and its name: a linked
+    /// worktree, or `None` for vert's own. `None` when the branch isn't
+    /// checked out, so they open from vert's own checkout.
+    pub checkout: Option<(Option<PathBuf>, String)>,
+}
+
 impl App {
+    /// The branch the diff of `entry` belongs to and where it is checked
+    /// out, for a branch or a pull request whose branch vert knows; `None`
+    /// for anything else.
+    #[must_use]
+    pub fn origin(&self, entry: &Entry) -> Option<Origin> {
+        let branch = match entry.target {
+            Target::PullRequest(number) => self
+                .branches
+                .pulls
+                .iter()
+                .find(|p| p.number == number)
+                .map(|p| p.head.clone()),
+            _ => entry.branch().map(str::to_owned),
+        }?;
+        Some(Origin {
+            branch,
+            checkout: self.fix_checkout(entry).ok(),
+        })
+    }
+
+    /// Points the files `effects` open or edit from the diff of `entry` at
+    /// the checkout of its branch. A branch that isn't checked out leaves
+    /// them in vert's own checkout, and the notice says so: what opens
+    /// there may differ from the diff, or not exist.
+    pub(super) fn open_from_checkout(
+        &mut self,
+        entry: &Entry,
+        effects: Vec<Effect>,
+    ) -> Vec<Effect> {
+        let Some(origin) = self.origin(entry) else {
+            return effects;
+        };
+        let Some((checkout, _)) = origin.checkout else {
+            self.notice = Some(format!(
+                "{} isn't checked out, so this is the file in this checkout",
+                origin.branch
+            ));
+            return effects;
+        };
+        effects
+            .into_iter()
+            .map(|e| match e {
+                Effect::OpenFile {
+                    path, line, marks, ..
+                } => Effect::OpenFile {
+                    path,
+                    line,
+                    marks,
+                    root: checkout.clone(),
+                },
+                Effect::Edit { path, line, .. } => Effect::Edit {
+                    path,
+                    line,
+                    root: checkout.clone(),
+                },
+                other => other,
+            })
+            .collect()
+    }
+
     /// Sets the agent fixes come from, or why there is none.
     pub fn set_fixer(&mut self, fixer: &Result<Fixer, String>) {
         self.fix.agent = Some(fixer.as_ref().map(Fixer::label).map_err(Clone::clone));

@@ -469,6 +469,67 @@ fn fixes_go_to_the_checkout_of_the_line_of_work() {
 }
 
 #[test]
+fn a_line_of_work_opens_and_edits_its_files_in_its_checkout() {
+    // Where `o`, `e` and `⏎` open each change's files, and whether the
+    // notice says its branch isn't checked out.
+    let cases = [
+        (
+            crate::app::pull_entry(&pull(7, "agent")),
+            Some("/wt/agent-dir"),
+            false,
+        ),
+        (range("agent"), Some("/wt/agent-dir"), false),
+        (range("here"), None, false),
+        (crate::app::pull_entry(&pull(8, "loose")), None, true),
+        (range("loose"), None, true),
+        (commit(), None, false),
+        (Entry::blank(Target::PullRequest(99)), None, false),
+    ];
+    for (entry, expected, missing) in cases {
+        let id = entry.id.clone();
+        let mut app = showing(entry);
+        with_lines_of_work(&mut app);
+        for key in [KeyCode::Char('o'), KeyCode::Char('e'), KeyCode::Enter] {
+            let effects = press(&mut app, key);
+            let root = match effects.as_slice() {
+                [Effect::OpenFile { root, path, .. } | Effect::Edit { root, path, .. }] => {
+                    assert_eq!(path, "src/a.rs", "{id}");
+                    root.clone()
+                }
+                other => panic!("{id}: expected a file to open, got {other:?}"),
+            };
+            assert_eq!(root, expected.map(PathBuf::from), "{id} {key:?}");
+            let warned = app.notice.as_deref().is_some_and(|n| {
+                n.contains("isn't checked out, so this is the file in this checkout")
+            });
+            assert_eq!(warned, missing, "{id} {key:?}: {:?}", app.notice);
+        }
+        // Moving on opens nothing, and leaves the notice to clear.
+        assert_eq!(press(&mut app, KeyCode::Char('j')), []);
+        assert_eq!(app.notice, None, "{id}");
+    }
+}
+
+#[test]
+fn the_origin_names_the_branch_and_where_it_is_checked_out() {
+    let mut app = blank_app();
+    with_lines_of_work(&mut app);
+    let origin = |entry: &Entry| app.origin(entry);
+    let agent = origin(&crate::app::pull_entry(&pull(7, "agent"))).expect("#7");
+    assert_eq!(agent.branch, "agent");
+    assert_eq!(
+        agent.checkout,
+        Some((Some(PathBuf::from("/wt/agent-dir")), "agent-dir".to_owned()))
+    );
+    let here = origin(&range("here")).expect("here");
+    assert_eq!(here.checkout, Some((None, "here".to_owned())));
+    let loose = origin(&range("loose")).expect("loose");
+    assert_eq!((loose.branch.as_str(), loose.checkout), ("loose", None));
+    assert_eq!(origin(&commit()), None);
+    assert_eq!(origin(&Entry::blank(Target::PullRequest(99))), None);
+}
+
+#[test]
 fn a_selection_names_its_lines_and_sends_only_them() {
     let mut app = showing(commit());
     let Some(View::Detail(d)) = app.views.last_mut() else {

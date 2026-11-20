@@ -764,7 +764,7 @@ impl App {
     /// Opens a diff of the selected row: `code` picks which, mirroring the
     /// keys that reach this.
     fn open_selected(&mut self, code: KeyCode) -> Vec<Effect> {
-        let Some((dirty, changes, pull)) = self
+        let Some((dirty, changes, pull, checkout)) = self
             .branches
             .rows()
             .get(self.branches.pos.selected)
@@ -773,13 +773,35 @@ impl App {
                     r.dirty().cloned(),
                     r.changes().cloned(),
                     r.pull.map(pull_entry),
+                    r.branch
+                        .and_then(|b| b.worktree.as_ref())
+                        .map(|w| w.name.clone()),
                 )
             })
         else {
             return Vec::new();
         };
         let entry = match code {
-            KeyCode::Enter | KeyCode::Char('l') => dirty.or(changes).or(pull),
+            // Uncommitted work comes first, ahead of the branch and its pull
+            // request: the notice says so, and how to reach those.
+            KeyCode::Enter | KeyCode::Char('l') if dirty.is_some() => {
+                let others: Vec<&str> = [
+                    changes.is_some().then_some("b branch diff"),
+                    pull.is_some().then_some("p PR diff"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                if !others.is_empty() {
+                    self.notice = Some(format!(
+                        "Showing uncommitted changes in {} ({})",
+                        checkout.as_deref().unwrap_or("this checkout"),
+                        others.join(", ")
+                    ));
+                }
+                dirty
+            }
+            KeyCode::Enter | KeyCode::Char('l') => changes.or(pull),
             KeyCode::Char('b') => {
                 changes.or_else(|| self.notice_none("No branch here; p opens the pull request"))
             }
@@ -1465,6 +1487,10 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         // Dirty worktree: uncommitted first, b for the branch.
         assert_eq!(opened(press(&mut app, KeyCode::Enter)), "worktree:agent");
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Showing uncommitted changes in agent (b branch diff)")
+        );
         assert_eq!(opened(press(&mut app, KeyCode::Char('b'))), "branch:agent");
         assert_eq!(press(&mut app, KeyCode::Char('p')), []);
         assert_eq!(
@@ -1485,6 +1511,36 @@ mod tests {
         assert_eq!(opened(press(&mut app, KeyCode::Enter)), "branch:feat");
         assert_eq!(opened(press(&mut app, KeyCode::Char('p'))), "pr:7");
         assert_eq!(press(&mut app, KeyCode::Char('x')), []);
+        // Dirty with a pull request too: both named. Alone, no notice.
+        let feat = app
+            .branches
+            .list
+            .branches
+            .iter_mut()
+            .find(|b| b.name == "feat");
+        if let Some(b) = feat {
+            b.worktree = checkout("feat", false, true).worktree;
+        }
+        let at = |app: &App, key: &str| app.branches.rows().iter().position(|r| r.key() == key);
+        app.branches.pos.selected = at(&app, "b:feat").expect("feat");
+        assert_eq!(opened(press(&mut app, KeyCode::Enter)), "worktree:feat");
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Showing uncommitted changes in feat (b branch diff, p PR diff)")
+        );
+        if let Some(b) = app
+            .branches
+            .list
+            .branches
+            .iter_mut()
+            .find(|b| b.name == "feat")
+        {
+            b.changes = None;
+        }
+        app.branches.pulls.retain(|p| p.head != "feat");
+        app.branches.pos.selected = at(&app, "b:feat").expect("feat");
+        assert_eq!(opened(press(&mut app, KeyCode::Enter)), "worktree:feat");
+        assert_eq!(app.notice, None, "nothing else to open");
 
         app.branches.pulls.clear();
         app.branches.list.branches.clear();

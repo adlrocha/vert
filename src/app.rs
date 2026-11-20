@@ -27,7 +27,7 @@ pub use explain::{
     ExplainState, ExplainView, Item, Pane, Reload, Status, Stop, concern_at, items, row_pointer,
     stops, targets,
 };
-pub use fix::{ConcernFix, Concerns, Draft, Finished, FixState, Running, concern_key};
+pub use fix::{ConcernFix, Concerns, Draft, Finished, FixState, Origin, Running, concern_key};
 
 use crate::explain::Answer;
 use crate::git::RepoInfo;
@@ -1738,7 +1738,14 @@ impl App {
             Some(View::Explain(_)) if key.code == KeyCode::Char('f') => {
                 self.draft_fix_from_explain()
             }
-            Some(View::Detail(d)) => detail_key(d, key, max),
+            Some(View::Detail(d)) => {
+                let effects = detail_key(d, key, max);
+                let opens = |e: &Effect| matches!(e, Effect::OpenFile { .. } | Effect::Edit { .. });
+                match effects.iter().any(opens).then(|| d.entry.clone()) {
+                    Some(entry) => self.open_from_checkout(&entry, effects),
+                    None => effects,
+                }
+            }
             Some(View::File(f)) => file_key(f, key),
             Some(View::Explain(_)) => self.on_explain_key(key),
             Some(View::Answer(_)) => self.on_answer_key(key),
