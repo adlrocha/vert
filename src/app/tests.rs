@@ -107,6 +107,14 @@ fn opens_on_the_branches_tab() {
 }
 
 #[test]
+fn a_watcher_that_fails_to_start_says_why() {
+    let (mut app, _) = App::new(info(), 1, 1000, 0, false);
+    assert_eq!(app.watch, WatchStatus::Live);
+    assert_eq!(app.update(Msg::WatchFailed("inotify limit".to_owned())), []);
+    assert_eq!(app.watch, WatchStatus::Failed("inotify limit".to_owned()));
+}
+
+#[test]
 fn update_check_runs_once_at_start_when_enabled() {
     let (_, effects) = on_feed(App::new(info(), 1, 1000, 0, false));
     assert!(!effects.contains(&Effect::CheckUpdate), "off");

@@ -92,21 +92,27 @@ fn run() -> Result<()> {
     });
     let fixer = config.fixer(std::env::var_os("PATH").as_deref());
     app.set_fixer(&fixer);
-    let _watch = if config.no_watch {
+    if config.no_watch {
         app.watch = WatchStatus::Disabled;
-        None
     } else {
-        let tx = tx.clone();
-        match watch::start(&layout, config.debounce(), move |changes| {
-            let _ = tx.send(Msg::Changed(changes));
-        }) {
-            Ok(w) => Some(w),
-            Err(e) => {
-                app.watch = WatchStatus::Failed(e.to_string());
-                None
-            }
-        }
-    };
+        // Watching a large tree takes a moment: start it off the main
+        // thread so the first frame doesn't wait for it.
+        let (changed, started) = (tx.clone(), tx.clone());
+        watch::spawn(
+            layout,
+            config.debounce(),
+            move |changes| {
+                let _ = changed.send(Msg::Changed(changes));
+            },
+            move |result| {
+                let _ = started.send(match result {
+                    // Anything that changed before watching began was missed.
+                    Ok(()) => Msg::Changed([watch::Change::Refs, watch::Change::Workdir].into()),
+                    Err(e) => Msg::WatchFailed(e.to_string()),
+                });
+            },
+        );
+    }
 
     let mut rt = Runtime {
         jobs: jobs::Context {
