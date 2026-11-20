@@ -155,6 +155,12 @@ impl Context {
     fn dir<'a>(&'a self, root: Option<&'a Path>) -> &'a Path {
         root.unwrap_or(&self.workdir)
     }
+
+    /// Reads `path` in `root` for the file viewer, or says why it can't be
+    /// shown.
+    fn read_file(&self, root: Option<&Path>, path: &str) -> Result<String, String> {
+        editor::read_text(&self.dir(root).join(path), self.max_file_bytes)
+    }
 }
 
 /// Formats an error with its chain of causes.
@@ -186,6 +192,28 @@ pub fn begin(effect: &Effect, ctx: &Context) {
     if let Effect::SearchText { generation, .. } = effect {
         ctx.search_generation.store(*generation, Ordering::Release);
     }
+}
+
+/// Lists the repository's worktrees and branches.
+fn load_branches(ctx: &Context) -> Result<git::branches::Branches, String> {
+    let mut cache = ctx
+        .branch_cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    git::open(&ctx.workdir)
+        .and_then(|repo| {
+            git::branches::load(
+                &repo,
+                git::branches::Options {
+                    base: ctx.base.as_deref(),
+                    limit: ctx.branch_limit,
+                    labeler: &ctx.labeler,
+                    now: age::now(),
+                },
+                &mut cache,
+            )
+        })
+        .map_err(|e| describe(&e))
 }
 
 /// Loads the diff of `entry`, keeping what the request asked for with it.
@@ -276,28 +304,7 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
             file,
         } => diff_message(entry, refresh, file, ctx),
         Effect::ReloadDiff { reload, entry } => reload_message(reload, entry, ctx),
-        Effect::LoadBranches => {
-            let mut cache = ctx
-                .branch_cache
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            Msg::Branches(
-                open()
-                    .and_then(|repo| {
-                        git::branches::load(
-                            &repo,
-                            git::branches::Options {
-                                base: ctx.base.as_deref(),
-                                limit: ctx.branch_limit,
-                                labeler: &ctx.labeler,
-                                now: age::now(),
-                            },
-                            &mut cache,
-                        )
-                    })
-                    .map_err(|e| describe(&e)),
-            )
-        }
+        Effect::LoadBranches => Msg::Branches(load_branches(ctx)),
         Effect::LoadOverlaps(list) => Msg::Overlaps(find_overlaps(&list, ctx)),
         Effect::LoadPulls => Msg::Pulls(open_pulls(ctx)),
         Effect::Explain {
@@ -323,17 +330,18 @@ pub fn run(effect: Effect, ctx: &Context) -> Option<Msg> {
             line,
             marks,
             root,
-        } => {
-            let content =
-                editor::read_text(&ctx.dir(root.as_deref()).join(&path), ctx.max_file_bytes);
-            Msg::File {
-                path,
-                content,
-                line,
-                marks,
-                root,
-            }
-        }
+        } => Msg::File {
+            content: ctx.read_file(root.as_deref(), &path),
+            path,
+            line,
+            marks,
+            root,
+        },
+        Effect::ReloadFile { path, root } => Msg::FileReloaded {
+            content: ctx.read_file(root.as_deref(), &path),
+            path,
+            root,
+        },
     })
 }
 
@@ -754,6 +762,28 @@ mod tests {
             panic!("file")
         };
         assert!(content.expect("text").contains("todo"));
+    }
+
+    #[test]
+    fn reloads_open_files() {
+        let t = repo();
+        let Some(Msg::FileReloaded {
+            path,
+            root: None,
+            content,
+        }) = run(
+            Effect::ReloadFile {
+                path: "src/main.rs".to_owned(),
+                root: None,
+            },
+            &ctx(&t),
+        )
+        else {
+            panic!("file")
+        };
+        assert_eq!(path, "src/main.rs");
+        assert!(content.expect("text").contains("todo"));
+        assert!(is_background(&Effect::ReloadFile { path, root: None }));
     }
 
     #[test]

@@ -51,12 +51,15 @@ impl RowFilter {
         }
     }
 
+    /// The filter `f` moves to. Open pull requests come first: finding
+    /// what waits for a review or a merge is the most common reason to
+    /// filter.
     const fn next(self) -> Self {
         match self {
-            Self::All => Self::Worktrees,
-            Self::Worktrees => Self::Branches,
-            Self::Branches => Self::Pulls,
-            Self::Pulls => Self::All,
+            Self::All => Self::Pulls,
+            Self::Pulls => Self::Branches,
+            Self::Branches => Self::Worktrees,
+            Self::Worktrees => Self::All,
         }
     }
 
@@ -549,6 +552,7 @@ impl App {
                 self.branches.error = None;
                 self.branches.reselect(selected.as_deref());
                 effects.extend(self.refresh_open_detail());
+                effects.extend(self.reload_files(true));
                 if stale {
                     effects.extend(self.request_overlaps());
                 }
@@ -1008,7 +1012,7 @@ mod tests {
     /// `x.rs`, and overlaps it on `a.rs` and with `c` on `y.rs`.
     fn colliding_app() -> App {
         let mut app = app(false);
-        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Char('1'));
         app.update(Msg::Branches(Ok(Branches {
             base: None,
             branches: vec![
@@ -1069,7 +1073,7 @@ mod tests {
     #[test]
     fn c_says_so_when_a_row_collides_with_nothing() {
         let mut app = app(false);
-        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Char('1'));
         app.update(Msg::Branches(Ok(list_of(&["a"]))));
         press(&mut app, KeyCode::Char('c'));
         assert_eq!(app.branches.collisions, None);
@@ -1317,7 +1321,7 @@ mod tests {
     fn loaded() -> App {
         let mut app = app(true);
         assert_eq!(
-            press(&mut app, KeyCode::Char('4')),
+            press(&mut app, KeyCode::Char('1')),
             [Effect::LoadBranches, Effect::LoadPulls]
         );
         app.update(Msg::Branches(Ok(Branches {
@@ -1422,9 +1426,9 @@ mod tests {
         assert_eq!(
             seen,
             [
-                ("worktrees", 2),
-                ("branches", 4),
                 ("pull requests", 3),
+                ("branches", 4),
+                ("worktrees", 2),
                 ("all", 6)
             ]
         );
@@ -1682,7 +1686,7 @@ mod tests {
             [Effect::LoadBranches, Effect::LoadPulls]
         );
 
-        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('2'));
         app.update(Msg::Branches(Ok(Branches::default())));
         app.update(Msg::Pulls(Ok(("o/r".to_owned(), Vec::new()))));
         assert!(app.update(Msg::Tick(5_000)).is_empty(), "other tab");
@@ -1692,7 +1696,7 @@ mod tests {
     fn without_network_pull_requests_are_never_requested() {
         let mut app = app(false);
         assert_eq!(app.branches.pull_status, PullStatus::Off);
-        assert_eq!(press(&mut app, KeyCode::Char('4')), [Effect::LoadBranches]);
+        assert_eq!(press(&mut app, KeyCode::Char('1')), [Effect::LoadBranches]);
         app.update(Msg::Branches(Ok(Branches::default())));
         let effects = press(&mut app, KeyCode::Char('r'));
         assert!(effects.contains(&Effect::LoadBranches));
@@ -1709,7 +1713,7 @@ mod tests {
             0,
             false,
         );
-        assert_eq!(press(&mut bare, KeyCode::Char('4')), [Effect::LoadBranches]);
+        assert_eq!(press(&mut bare, KeyCode::Char('1')), [Effect::LoadBranches]);
         bare.update(Msg::Branches(Ok(Branches::default())));
         assert_eq!(bare.update(Msg::Tick(1_000_000)), []);
     }
@@ -1770,6 +1774,39 @@ mod tests {
         app.update(Msg::Branches(Ok(Branches::default())));
         let effects = press(&mut app, KeyCode::Char('r'));
         assert!(effects.contains(&Effect::LoadBranches) && effects.contains(&Effect::LoadPulls));
+    }
+
+    #[test]
+    fn a_file_open_in_a_linked_worktree_reloads_with_the_list() {
+        let mut app = loaded();
+        press(&mut app, KeyCode::Char('j'));
+        let Some(Effect::LoadDiff { entry, .. }) = press(&mut app, KeyCode::Enter).pop() else {
+            panic!("diff")
+        };
+        app.update(Msg::File {
+            path: "a.rs".to_owned(),
+            content: Ok(String::new()),
+            line: 1,
+            marks: std::collections::BTreeSet::new(),
+            root: entry.root.clone(),
+        });
+        // The watcher can't see linked worktrees, nor their files.
+        let changed = app.update(Msg::Changed([crate::watch::Change::Workdir].into()));
+        assert!(
+            !changed
+                .iter()
+                .any(|e| matches!(e, Effect::ReloadFile { .. })),
+            "{changed:?}"
+        );
+        let reload = app.update(Msg::Branches(Ok(Branches {
+            base: None,
+            branches: vec![checkout("agent", false, true)],
+        })));
+        let file = Effect::ReloadFile {
+            path: "a.rs".to_owned(),
+            root: entry.root.clone(),
+        };
+        assert!(reload.contains(&file), "{reload:?}");
     }
 
     #[test]
@@ -1866,7 +1903,7 @@ mod tests {
             branches: vec![checkout("agent", false, true)],
         })));
         assert!(
-            matches!(reload.as_slice(), [Effect::LoadDiff { refresh: true, entry: e, .. }] if e.id == entry.id),
+            matches!(reload.first(), Some(Effect::LoadDiff { refresh: true, entry: e, .. }) if e.id == entry.id),
             "{reload:?}"
         );
         app.views.pop();
@@ -1877,7 +1914,7 @@ mod tests {
 
         // Diffs opened from other tabs don't poll branches.
         press(&mut app, KeyCode::Esc);
-        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('2'));
         app.update(Msg::File {
             path: "a.rs".to_owned(),
             content: Ok(String::new()),
@@ -2003,7 +2040,7 @@ mod tests {
     fn removal_app() -> App {
         let mut app = app(true);
         assert_eq!(
-            press(&mut app, KeyCode::Char('4')),
+            press(&mut app, KeyCode::Char('1')),
             [Effect::LoadBranches, Effect::LoadPulls]
         );
         let detached = Branch {
@@ -2238,7 +2275,7 @@ mod tests {
         assert_eq!(app.branches.name_filter, "");
         assert_eq!(keys(&app).len(), 6);
         // 3 still reaches the Search tab.
-        press(&mut app, KeyCode::Char('3'));
+        press(&mut app, KeyCode::Char('4'));
         assert_eq!(app.tab, Tab::Search);
     }
 
@@ -2264,7 +2301,10 @@ mod tests {
     #[test]
     fn kind_and_name_filters_intersect() {
         let mut app = loaded();
-        press(&mut app, KeyCode::Char('f'));
+        // Pull requests, branches, then worktrees.
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('f'));
+        }
         assert_eq!(keys(&app), ["b:main", "b:agent"]);
         press(&mut app, KeyCode::Char('/'));
         for c in "agent".chars() {
@@ -2322,7 +2362,7 @@ mod tests {
     #[test]
     fn the_filter_matches_worktree_directory_names() {
         let mut app = app(true);
-        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Char('1'));
         // The checkout's directory is named after the branch here.
         let mut b = checkout("feat", false, false);
         let mut wt = b.worktree.clone().expect("worktree");

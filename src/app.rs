@@ -11,7 +11,7 @@ mod explain;
 mod fix;
 
 use std::collections::{BTreeSet, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -51,19 +51,19 @@ pub const H_SCROLL_STEP: usize = 8;
 /// Top-level tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    /// Branches, worktrees and pull requests: the tab vert opens on.
+    Branches,
     /// Change feed.
     Feed,
     /// Hotspots.
     Hotspots,
     /// Search.
     Search,
-    /// Branches, worktrees and pull requests.
-    Branches,
 }
 
 impl Tab {
     /// All tabs in display order.
-    pub const ALL: [Self; 4] = [Self::Feed, Self::Hotspots, Self::Search, Self::Branches];
+    pub const ALL: [Self; 4] = [Self::Branches, Self::Feed, Self::Hotspots, Self::Search];
 
     /// Display name.
     #[must_use]
@@ -78,19 +78,19 @@ impl Tab {
 
     const fn next(self) -> Self {
         match self {
+            Self::Branches => Self::Feed,
             Self::Feed => Self::Hotspots,
             Self::Hotspots => Self::Search,
             Self::Search => Self::Branches,
-            Self::Branches => Self::Feed,
         }
     }
 
     const fn prev(self) -> Self {
         match self {
+            Self::Branches => Self::Search,
             Self::Feed => Self::Branches,
             Self::Hotspots => Self::Feed,
             Self::Search => Self::Hotspots,
-            Self::Branches => Self::Search,
         }
     }
 }
@@ -575,6 +575,23 @@ impl View {
             _ => None,
         }
     }
+
+    /// The file viewer, when this view is one.
+    #[must_use]
+    pub fn as_file(&self) -> Option<&FileView> {
+        match self {
+            Self::File(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// The file viewer, when this view is one, to change.
+    pub fn as_file_mut(&mut self) -> Option<&mut FileView> {
+        match self {
+            Self::File(f) => Some(f),
+            _ => None,
+        }
+    }
 }
 
 /// Inputs to [`App::update`].
@@ -637,6 +654,15 @@ pub enum Msg {
         marks: BTreeSet<u32>,
         /// Linked worktree the file was read from.
         root: Option<PathBuf>,
+    },
+    /// An open file, read again ([`Effect::ReloadFile`]).
+    FileReloaded {
+        /// Path relative to the repository.
+        path: String,
+        /// Linked worktree the file was read from.
+        root: Option<PathBuf>,
+        /// File text, or a notice explaining why it cannot be shown.
+        content: Result<String, String>,
     },
     /// Something to tell the user.
     Notice(String),
@@ -724,6 +750,13 @@ pub enum Effect {
         line: u32,
         /// Added lines to mark.
         marks: BTreeSet<u32>,
+        /// Linked worktree to read from, or `None` for vert's own.
+        root: Option<PathBuf>,
+    },
+    /// Read an open file again, after it changed on disk.
+    ReloadFile {
+        /// Repository-relative path.
+        path: String,
         /// Linked worktree to read from, or `None` for vert's own.
         root: Option<PathBuf>,
     },
@@ -841,8 +874,8 @@ impl App {
     ) -> (Self, Vec<Effect>) {
         let mut app = Self {
             repo,
-            tab: Tab::Feed,
-            previous_tab: Tab::Feed,
+            tab: Tab::Branches,
+            previous_tab: Tab::Branches,
             feed: FeedState::default(),
             hotspots: HotspotState {
                 window: Window::Week,
@@ -927,13 +960,7 @@ impl App {
             Msg::Commits(result) => self.on_commits(result),
             Msg::Worktree(result) => self.on_worktree(result),
             Msg::Changed(changes) => self.on_changed(&changes),
-            Msg::Files(files) => {
-                self.search.files_loading = false;
-                self.search.files_stale = false;
-                self.search.files = Some(files);
-                self.refresh_file_hits();
-                Vec::new()
-            }
+            Msg::Files(files) => self.on_files(files),
             Msg::Text { generation, result } => {
                 if generation == self.search.generation {
                     self.search.text_running = false;
@@ -983,6 +1010,14 @@ impl App {
                 self.open_file(path, content, line, marks, root);
                 Vec::new()
             }
+            Msg::FileReloaded {
+                path,
+                root,
+                content,
+            } => {
+                self.reload_file(&path, root.as_deref(), content);
+                Vec::new()
+            }
             Msg::Notice(text) => {
                 self.notice = Some(text);
                 Vec::new()
@@ -1008,6 +1043,14 @@ impl App {
                 effects
             }
         }
+    }
+
+    fn on_files(&mut self, files: Vec<String>) -> Vec<Effect> {
+        self.search.files_loading = false;
+        self.search.files_stale = false;
+        self.search.files = Some(files);
+        self.refresh_file_hits();
+        Vec::new()
     }
 
     fn on_commits(&mut self, result: Result<Vec<Entry>, String>) -> Vec<Effect> {
@@ -1082,6 +1125,9 @@ impl App {
         if self.branches.loaded {
             effects.extend(self.request_branches());
         }
+        // Linked worktrees are invisible to the watcher: their files reload
+        // with the branch list instead.
+        effects.extend(self.reload_files(false));
         if changes.contains(&Change::Workdir) && self.search.files.is_some() {
             self.search.files_stale = true;
             if self.tab == Tab::Search && self.search.mode == SearchMode::Files {
@@ -1191,6 +1237,69 @@ impl App {
             d.entry = entry;
             d.reveal();
         }
+        self.sync_marks();
+    }
+
+    /// Reads every open file again, once per path: those in linked
+    /// worktrees (`linked`), or those in vert's own checkout.
+    pub(super) fn reload_files(&self, linked: bool) -> Vec<Effect> {
+        let open: BTreeSet<(String, Option<PathBuf>)> = self
+            .views
+            .iter()
+            .filter_map(View::as_file)
+            .filter(|f| f.root.is_some() == linked)
+            .map(|f| (f.path.clone(), f.root.clone()))
+            .collect();
+        open.into_iter()
+            .map(|(path, root)| Effect::ReloadFile { path, root })
+            .collect()
+    }
+
+    /// Shows a file's new contents in every viewer open on it, keeping the
+    /// cursor and scroll where they were as far as the file still reaches.
+    /// A selection is dropped once the text changes, since its lines may
+    /// have moved.
+    fn reload_file(&mut self, path: &str, root: Option<&Path>, content: Result<String, String>) {
+        let read = FileContent::read(path, content, self.max_highlight);
+        for f in self.views.iter_mut().filter_map(View::as_file_mut) {
+            if f.path != path || f.root.as_deref() != root {
+                continue;
+            }
+            if f.text == read.text && f.notice == read.notice {
+                continue;
+            }
+            f.lines.clone_from(&read.lines);
+            f.text.clone_from(&read.text);
+            f.notice.clone_from(&read.notice);
+            f.language.clone_from(&read.language);
+            f.selection = None;
+            f.cursor = f.cursor.min(f.lines.len().saturating_sub(1));
+            f.scroll = f.scroll.min(max_scroll(f.lines.len(), f.height));
+        }
+        self.sync_marks();
+    }
+
+    /// Marks, in each file opened from a diff, the lines that diff adds now:
+    /// the diff may have been reloaded since the file was opened.
+    fn sync_marks(&mut self) {
+        for i in 0..self.views.len() {
+            let (below, above) = self.views.split_at_mut(i);
+            let Some(View::File(f)) = above.first_mut() else {
+                continue;
+            };
+            let Some(d) = below.iter().rev().find_map(View::as_detail) else {
+                continue;
+            };
+            if d.entry.root != f.root {
+                continue;
+            }
+            f.marks = d
+                .files
+                .iter()
+                .find(|file| file.stat.path == f.path)
+                .map(added_lines)
+                .unwrap_or_default();
+        }
     }
 
     fn open_file(
@@ -1201,17 +1310,12 @@ impl App {
         marks: BTreeSet<u32>,
         root: Option<PathBuf>,
     ) {
-        let h = Highlighter::global();
-        let (lines, text, notice, language) = match content {
-            Ok(content) => {
-                let raw: Vec<&str> = content.lines().collect();
-                let language = h.language(&path, raw.first().copied()).to_owned();
-                let lines = h.highlight(&path, &raw, self.max_highlight);
-                let text = raw.into_iter().map(str::to_owned).collect();
-                (lines, text, None, language)
-            }
-            Err(notice) => (Vec::new(), Vec::new(), Some(notice), String::new()),
-        };
+        let FileContent {
+            lines,
+            text,
+            notice,
+            language,
+        } = FileContent::read(&path, content, self.max_highlight);
         let target = line.max(1);
         let scroll = usize::try_from(target).unwrap_or(0).saturating_sub(4);
         // The cursor starts on the line the file was opened at.
@@ -1233,6 +1337,8 @@ impl App {
             notice,
             root,
         })));
+        // The diff below may have reloaded since the file was asked for.
+        self.sync_marks();
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -1290,11 +1396,11 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
             KeyCode::Char('?') => self.help = true,
-            KeyCode::Char('1') => self.tab = Tab::Feed,
-            KeyCode::Char('2') => self.tab = Tab::Hotspots,
+            KeyCode::Char('1') => return self.enter_branches(),
+            KeyCode::Char('2') => self.tab = Tab::Feed,
+            KeyCode::Char('3') => self.tab = Tab::Hotspots,
             KeyCode::Char('/') if self.tab == Tab::Branches => self.branches.filter_editing = true,
-            KeyCode::Char('3' | '/') => return self.enter_search(),
-            KeyCode::Char('4') => return self.enter_branches(),
+            KeyCode::Char('4' | '/') => return self.enter_search(),
             KeyCode::Tab => return self.switch_tab(self.tab.next()),
             KeyCode::BackTab => return self.switch_tab(self.tab.prev()),
             KeyCode::Char('r') => {
@@ -1314,6 +1420,13 @@ impl App {
             },
         }
         Vec::new()
+    }
+
+    /// Loads what the tab on screen needs: on start, the Branches tab's
+    /// lines of work, which [`App::new`] can't request before
+    /// [`App::set_refresh`] says whether pull requests are wanted.
+    pub fn open_tab(&mut self) -> Vec<Effect> {
+        self.switch_tab(self.tab)
     }
 
     fn switch_tab(&mut self, tab: Tab) -> Vec<Effect> {
@@ -1929,14 +2042,50 @@ fn open_from_detail(d: &DetailView) -> Option<(String, u32, BTreeSet<u32>)> {
     } else {
         file.first_changed_line()
     };
-    let marks = file
-        .hunks
+    Some((file.stat.path.clone(), line, added_lines(file)))
+}
+
+/// The lines (1-based, in the new file) that `file`'s diff adds.
+fn added_lines(file: &FileDiff) -> BTreeSet<u32> {
+    file.hunks
         .iter()
         .flat_map(|h| &h.lines)
         .filter(|l| l.kind == LineKind::Added)
         .filter_map(|l| l.new_no)
-        .collect();
-    Some((file.stat.path.clone(), line, marks))
+        .collect()
+}
+
+/// A file read for the viewer: highlighted for drawing, or a notice.
+struct FileContent {
+    lines: Vec<Vec<Fragment>>,
+    text: Vec<String>,
+    notice: Option<String>,
+    language: String,
+}
+
+impl FileContent {
+    /// Highlights `content`, the text of `path`, or keeps the notice that
+    /// says why it can't be shown.
+    fn read(path: &str, content: Result<String, String>, max_highlight: usize) -> Self {
+        match content {
+            Ok(content) => {
+                let h = Highlighter::global();
+                let raw: Vec<&str> = content.lines().collect();
+                Self {
+                    language: h.language(path, raw.first().copied()).to_owned(),
+                    lines: h.highlight(path, &raw, max_highlight),
+                    text: raw.into_iter().map(str::to_owned).collect(),
+                    notice: None,
+                }
+            }
+            Err(notice) => Self {
+                lines: Vec::new(),
+                text: Vec::new(),
+                notice: Some(notice),
+                language: String::new(),
+            },
+        }
+    }
 }
 
 fn file_key(f: &mut FileView, key: &KeyEvent) -> Vec<Effect> {

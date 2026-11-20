@@ -5,13 +5,13 @@ live, labelled feed of a git repository's changes, uncommitted work
 included. From the feed you can open syntax-highlighted diffs, search files
 and contents, and see where change is concentrating. The Branches tab lists
 every worktree, branch and open pull request, so you can follow agents that
-work in parallel. Press `x` on any diff and the coding agent you already use
+work in parallel. vert opens on the Branches tab. Press `x` on any diff and the coding agent you already use
 (Claude Code, Codex or pi) explains it: what it is for, what order to read it
 in, and what deserves a second look.
 
 ```
  ◆ vert │ nibble  ⎇ main                                              ✦ 2 new  ● live
-  1 Feed    2 Hotspots    3 Search    4 Branches
+  1 Branches    2 Feed    3 Hotspots    4 Search
 
 ╭ Changes 143 ─────────────────────────────────────────────────────────────────────────╮
 │▌   now  working  Uncommitted changes across 2 modules               +26  ■■■■■  1 file│
@@ -35,13 +35,15 @@ in, and what deserves a second look.
   case, regex with literal fallback, respects `.gitignore`).
 - **Hotspots:** files or modules ranked by how often they change over 24h, 7d,
   30d or all loaded history. `⏎` filters the feed to that file or module.
-- **Branches, worktrees and pull requests:** one row per line of work. A
+- **Branches, worktrees and pull requests:** the tab vert opens on, with one
+  row per line of work. A
   row shows the checkout it's in, uncommitted files (`●3`), commits ahead and
   behind the base branch, its size, and the matching open pull request with
   its CI checks (✓ passing, ✗ failing, ● running). Pull requests without a local branch get their own rows. `⏎` opens the most
   relevant diff: uncommitted work first, then the branch against the point
   where it left the base, then the pull request. `b` and `p` pick the branch
-  or pull request diff. `f` filters by kind, `/` narrows rows by name or pull request number, and
+  or pull request diff. `f` filters by kind, starting with open pull requests
+  to show what still waits for a review or a merge, `/` narrows rows by name or pull request number, and
   `d` removes a line of work — a linked worktree together with its branch —
   after a confirmation that warns about unmerged commits and open pull
   requests. vert never removes the checkout it runs in, the repository's
@@ -85,7 +87,9 @@ in, and what deserves a second look.
 - **File viewer:** shows the full file, with lines added by the change you came
   from marked in the gutter, and a cursor to select lines with `v` and ask
   (`a`) or fix (`f`) about them. `e` opens `$VISUAL`/`$EDITOR` at the
-  cursor's line (vim, nvim, helix, VS Code, Cursor, …).
+  cursor's line (vim, nvim, helix, VS Code, Cursor, …). The file reloads
+  when it changes on disk, by an agent, your editor or anything else, and
+  the marks follow the diff it was opened from.
 - **Inherits your terminal theme:** it only uses the 16 ANSI colours.
 
 ## Install
@@ -152,7 +156,7 @@ Press `?` inside vert for all keys. The essentials:
 | Fix, Ask  | type the feedback or question · `⏎` send · `esc` cancel · `ctrl-w`/`ctrl-u` delete |
 | Agent     | `←` `→` choose the agent · type the model · `⏎` use · `esc` cancel |
 | Search    | type to search · `tab` files/text · `ctrl-w`/`ctrl-u` delete · `ctrl-e` edit |
-| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds · `/` filter names or PR number · `c` collisions · `d` remove · `r` refresh |
+| Branches  | `⏎` open · `b` branch diff · `p` PR diff · `f` filter kinds (pull requests first) · `/` filter names or PR number · `c` collisions · `d` remove · `r` refresh |
 
 ### Pull requests
 

@@ -86,9 +86,10 @@ fn run() -> Result<()> {
     let explainer = config.explainer(std::env::var_os("PATH").as_deref());
     app.set_explainer(&explainer);
     app.set_agents(config.setting(), config.has_command());
-    if let Some(start) = start {
-        effects.extend(app.update(Msg::Start(start)));
-    }
+    effects.extend(match start {
+        Some(start) => app.update(Msg::Start(start)),
+        None => app.open_tab(),
+    });
     let fixer = config.fixer(std::env::var_os("PATH").as_deref());
     app.set_fixer(&fixer);
     let _watch = if config.no_watch {

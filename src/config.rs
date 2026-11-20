@@ -20,7 +20,7 @@ use crate::labels::{LabelError, Labeler};
     reason = "each bool is an independent on/off command-line flag, not a state machine"
 )]
 pub struct Config {
-    /// Open straight on one line of work instead of the feed.
+    /// Open straight on one line of work's diff, over the Branches tab.
     #[command(subcommand)]
     pub open: Option<Open>,
 

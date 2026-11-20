@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(a.agents.picker.as_ref().map(|p| p.selected), Some(0));
         press(&mut a, KeyCode::Esc);
         // In the search box, M is a letter of the query.
-        press(&mut a, KeyCode::Char('3'));
+        press(&mut a, KeyCode::Char('4'));
         press(&mut a, KeyCode::Char('M'));
         assert_eq!(a.agents.picker, None);
         assert_eq!(a.search.query, "M");
