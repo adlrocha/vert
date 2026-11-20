@@ -607,6 +607,8 @@ pub enum Msg {
     Worktree(Result<Option<Entry>, String>),
     /// The repository changed on disk.
     Changed(BTreeSet<Change>),
+    /// The file watcher couldn't start.
+    WatchFailed(String),
     /// Branches and worktrees loaded.
     Branches(Result<Branches, String>),
     /// Collisions between lines of work were found.
@@ -960,6 +962,10 @@ impl App {
             Msg::Commits(result) => self.on_commits(result),
             Msg::Worktree(result) => self.on_worktree(result),
             Msg::Changed(changes) => self.on_changed(&changes),
+            Msg::WatchFailed(e) => {
+                self.watch = WatchStatus::Failed(e);
+                Vec::new()
+            }
             Msg::Files(files) => self.on_files(files),
             Msg::Text { generation, result } => {
                 if generation == self.search.generation {

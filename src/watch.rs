@@ -114,6 +114,32 @@ pub fn start(
     Ok(Watch { _watcher: watcher })
 }
 
+/// Starts watching `layout` on a background thread, so a large tree doesn't
+/// hold up the first frame, and keeps watching until vert exits.
+/// `on_started` hears whether the watcher came up; `on_change` then works as
+/// in [`start`].
+///
+/// Changes made before the watcher is up go unseen, so callers reload once
+/// `on_started` reports success.
+pub fn spawn(
+    layout: Layout,
+    debounce: Duration,
+    on_change: impl Fn(BTreeSet<Change>) + Send + 'static,
+    on_started: impl FnOnce(Result<(), notify::Error>) + Send + 'static,
+) {
+    thread::spawn(move || match start(&layout, debounce, on_change) {
+        Ok(watch) => {
+            on_started(Ok(()));
+            // The watcher stops when dropped: keep it for vert's lifetime.
+            let _watch = watch;
+            loop {
+                thread::park();
+            }
+        }
+        Err(e) => on_started(Err(e)),
+    });
+}
+
 fn debounce_loop(
     layout: &Layout,
     rx: &Receiver<Vec<PathBuf>>,
@@ -261,5 +287,49 @@ mod tests {
             rx.recv_timeout(Duration::from_millis(500)).is_err(),
             "ignored path"
         );
+    }
+
+    #[test]
+    fn spawned_watchers_report_starting_and_keep_watching() {
+        let t = crate::git::testutil::TestRepo::new();
+        t.write("a.txt", "a\n");
+        t.commit("init");
+        let workdir = t.path().canonicalize().expect("canon");
+        let repo = git2::Repository::open(&workdir).expect("open");
+        let layout = Layout::of(&repo).expect("layout");
+        let (tx, rx) = mpsc::channel();
+        let (started_tx, started) = mpsc::channel();
+        spawn(
+            layout.clone(),
+            Duration::from_millis(50),
+            move |c| {
+                let _ = tx.send(c);
+            },
+            move |r| {
+                let _ = started_tx.send(r.is_ok());
+            },
+        );
+        assert_eq!(started.recv_timeout(Duration::from_secs(5)), Ok(true));
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::write(workdir.join("a.txt"), "b\n").expect("write");
+        let saw_workdir = std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(5)).ok())
+            .take(10)
+            .any(|c| c.contains(&Change::Workdir));
+        assert!(saw_workdir, "still watching after spawn returned");
+
+        // A watcher that can't start says why.
+        let (failed_tx, failed) = mpsc::channel();
+        spawn(
+            Layout {
+                workdir: workdir.join("gone"),
+                ..layout
+            },
+            Duration::from_millis(50),
+            |_| {},
+            move |r| {
+                let _ = failed_tx.send(r.is_err());
+            },
+        );
+        assert_eq!(failed.recv_timeout(Duration::from_secs(5)), Ok(true));
     }
 }
