@@ -698,7 +698,7 @@ mod render_tests {
     use ratatui::backend::TestBackend;
 
     use super::draw;
-    use crate::app::{App, Msg, WatchStatus};
+    use crate::app::{App, Msg, Tab, WatchStatus};
     use crate::git::RepoInfo;
     use crate::git::testutil::TestRepo;
     use crate::labels::Labeler;
@@ -750,6 +750,7 @@ mod render_tests {
             3_000,
             false,
         );
+        app.tab = Tab::Feed;
         app.update(Msg::Commits(
             git::feed::load_commits(&t.repo, 10, &labeler).map_err(|e| e.to_string()),
         ));
@@ -788,14 +789,15 @@ mod render_tests {
             0,
             false,
         );
+        app.tab = Tab::Feed;
         assert!(screen(&mut app, 100, 20).contains("Reading history"));
         assert!(screen(&mut app, 100, 20).contains("syncing"));
         app.update(Msg::Commits(Ok(Vec::new())));
         app.update(Msg::Worktree(Ok(None)));
         assert!(screen(&mut app, 160, 20).contains("Nothing here yet"));
-        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Char('3'));
         assert!(screen(&mut app, 100, 20).contains("No activity"));
-        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('2'));
         app.update(Msg::Commits(Err("disk on fire".to_owned())));
         assert!(screen(&mut app, 100, 20).contains("disk on fire"));
         app.watch = WatchStatus::Disabled;
@@ -837,7 +839,7 @@ mod render_tests {
     #[test]
     fn filtered_feed_and_new_markers_render() {
         let (_t, mut app) = real_app();
-        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Char('3'));
         press(&mut app, KeyCode::Char('w'));
         press(&mut app, KeyCode::Char('w'));
         press(&mut app, KeyCode::Char('w'));
@@ -859,7 +861,7 @@ mod render_tests {
     #[test]
     fn hotspots_render() {
         let (_t, mut app) = real_app();
-        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Char('3'));
         press(&mut app, KeyCode::Char('w'));
         press(&mut app, KeyCode::Char('w'));
         press(&mut app, KeyCode::Char('w'));
@@ -1214,6 +1216,7 @@ mod render_tests {
             0,
             false,
         );
+        app.tab = Tab::Feed;
         app.update(Msg::Commits(Ok(vec![
             mk("aaaaaaa", Size::Xl, true, false),
             mk("bbbbbbb", Size::Medium, false, true),
@@ -1938,7 +1941,7 @@ mod render_tests {
             branches: Some(5),
             pulls: Some(60),
         });
-        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Char('1'));
         assert!(screen(&mut app, 120, 20).contains("Scanning branches"));
         assert!(screen(&mut app, 120, 20).contains("PRs loading"));
         app.update(Msg::Branches(Ok(Branches {
@@ -2164,11 +2167,14 @@ mod render_tests {
         app.branches.pull_status = PullStatus::Off;
         assert!(screen(&mut app, 160, 20).contains("PRs off"));
 
+        // Pull requests come first; with none listed, the hint says how out.
+        press(&mut app, KeyCode::Char('f'));
+        let s = screen(&mut app, 160, 20);
+        assert!(s.contains("· pull requests"), "{s}");
+        assert!(s.contains("f changes the filter"), "{s}");
+        press(&mut app, KeyCode::Char('f'));
         press(&mut app, KeyCode::Char('f'));
         assert!(screen(&mut app, 160, 20).contains("· worktrees"));
-        press(&mut app, KeyCode::Char('f'));
-        press(&mut app, KeyCode::Char('f'));
-        assert!(screen(&mut app, 160, 20).contains("f changes the filter"));
         press(&mut app, KeyCode::Char('f'));
 
         app.update(Msg::Branches(Err("no repo".to_owned())));

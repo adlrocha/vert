@@ -89,15 +89,32 @@ fn info() -> RepoInfo {
     }
 }
 
+/// A new app moved to the Feed tab, where most of these tests start.
+fn on_feed((mut app, effects): (App, Vec<Effect>)) -> (App, Vec<Effect>) {
+    app.tab = Tab::Feed;
+    app.previous_tab = Tab::Feed;
+    (app, effects)
+}
+
+#[test]
+fn opens_on_the_branches_tab() {
+    let (mut app, effects) = App::new(info(), 1, 1000, 0, false);
+    assert_eq!(app.tab, Tab::Branches);
+    assert_eq!(effects, [Effect::LoadCommits, Effect::LoadWorktree]);
+    assert_eq!(app.open_tab(), [Effect::LoadBranches]);
+    app.tab = Tab::Feed;
+    assert_eq!(app.open_tab(), [], "the feed is already loading");
+}
+
 #[test]
 fn update_check_runs_once_at_start_when_enabled() {
-    let (_, effects) = App::new(info(), 1, 1000, 0, false);
+    let (_, effects) = on_feed(App::new(info(), 1, 1000, 0, false));
     assert!(!effects.contains(&Effect::CheckUpdate), "off");
     // Built without git there is nothing to compare, so vert never asks.
     if crate::BUILD_SHA.is_none() {
         return;
     }
-    let (mut app, effects) = App::new(info(), 1, 1000, 0, true);
+    let (mut app, effects) = on_feed(App::new(info(), 1, 1000, 0, true));
     assert!(effects.contains(&Effect::CheckUpdate));
     assert_eq!(app.update, None);
     app.update(Msg::Update(UpdateStatus::Available));
@@ -108,7 +125,7 @@ fn update_check_runs_once_at_start_when_enabled() {
 
 /// An app with three commits loaded and no working-tree changes.
 fn loaded() -> App {
-    let (mut app, effects) = App::new(info(), 1, 1000, 10_000, false);
+    let (mut app, effects) = on_feed(App::new(info(), 1, 1000, 10_000, false));
     assert_eq!(effects, [Effect::LoadCommits, Effect::LoadWorktree]);
     app.update(Msg::Commits(Ok(vec![
         entry("c3", 9_000, &["src/a.rs", "docs/x.md"]),
@@ -152,7 +169,7 @@ fn new_commits_are_fresh_until_opened() {
 
 #[test]
 fn loads_coalesce_while_in_flight() {
-    let (mut app, _) = App::new(info(), 1, 1000, 0, false);
+    let (mut app, _) = on_feed(App::new(info(), 1, 1000, 0, false));
     let workdir = BTreeSet::from([Change::Workdir]);
     assert!(
         app.update(Msg::Changed(workdir.clone())).is_empty(),
@@ -181,7 +198,7 @@ fn loads_coalesce_while_in_flight() {
 
 #[test]
 fn load_errors_are_shown() {
-    let (mut app, _) = App::new(info(), 1, 1000, 0, false);
+    let (mut app, _) = on_feed(App::new(info(), 1, 1000, 0, false));
     app.update(Msg::Commits(Err("boom".to_owned())));
     assert_eq!(app.feed.error.as_deref(), Some("boom"));
     app.update(Msg::Worktree(Err("bad".to_owned())));
@@ -306,7 +323,7 @@ fn list_pos_keeps_selection_visible() {
 #[test]
 fn tabs_help_and_quit() {
     let mut app = loaded();
-    app.update(ch('2'));
+    app.update(ch('3'));
     assert_eq!(app.tab, Tab::Hotspots);
     app.update(key(KeyCode::Tab));
     assert_eq!(app.tab, Tab::Search);
@@ -318,12 +335,12 @@ fn tabs_help_and_quit() {
     assert_eq!(app.tab, Tab::Branches);
     app.update(key(KeyCode::Tab));
     assert_eq!(app.tab, Tab::Feed);
-    app.update(ch('4'));
+    app.update(ch('1'));
     assert_eq!(app.tab, Tab::Branches);
     app.update(key(KeyCode::BackTab));
     assert_eq!(app.tab, Tab::Search);
     app.update(key(KeyCode::Esc));
-    app.update(ch('1'));
+    app.update(ch('2'));
     app.update(ch('?'));
     assert!(app.help);
     assert!(app.update(ch('q')).is_empty(), "any key closes help");
@@ -337,13 +354,13 @@ fn tabs_help_and_quit() {
     );
     assert_eq!(app.update(Msg::Key(release)), []);
     let tab_names: Vec<_> = Tab::ALL.iter().map(|t| t.title()).collect();
-    assert_eq!(tab_names, ["Feed", "Hotspots", "Search", "Branches"]);
+    assert_eq!(tab_names, ["Branches", "Feed", "Hotspots", "Search"]);
 }
 
 #[test]
 fn hotspots_filter_feed_and_open_files() {
     let mut app = loaded();
-    app.update(ch('2'));
+    app.update(ch('3'));
     app.update(ch('w'));
     assert_eq!(app.hotspots.window, Window::Month);
     app.update(ch('w'));
@@ -372,7 +389,7 @@ fn hotspots_filter_feed_and_open_files() {
     app.update(key(KeyCode::Esc));
     assert_eq!(app.feed.visible(1).len(), 3);
 
-    app.update(ch('2'));
+    app.update(ch('3'));
     app.update(ch('m'));
     assert_eq!(app.hotspots.grouping, Grouping::Modules);
     assert_eq!(app.hotspots.spots[0].key, "src");
@@ -888,7 +905,7 @@ fn tab_cycle_and_ctrl_navigation() {
     app.update(key(KeyCode::Tab));
     assert_eq!(app.tab, Tab::Search);
     app.update(key(KeyCode::Esc));
-    app.update(ch('3'));
+    app.update(ch('4'));
     app.update(key(KeyCode::BackTab));
     assert_eq!(
         app.tab,
@@ -896,30 +913,30 @@ fn tab_cycle_and_ctrl_navigation() {
         "BackTab toggles search mode inside search"
     );
     app.update(key(KeyCode::Esc));
-    app.update(ch('1'));
+    app.update(ch('2'));
     app.update(ctrl('n'));
     assert_eq!(app.feed.pos.selected, 1);
     app.update(ctrl('k'));
     assert_eq!(app.feed.pos.selected, 0);
     assert!(app.update(ch('z')).is_empty(), "unbound keys are ignored");
-    app.update(ch('2'));
-    assert_eq!(app.update(ch('z')), []);
     app.update(ch('3'));
+    assert_eq!(app.update(ch('z')), []);
+    app.update(ch('4'));
     assert_eq!(app.update(ctrl('x')), []);
 }
 
 #[test]
 fn empty_lists_ignore_actions() {
-    let (mut app, _) = App::new(info(), 1, 1000, 0, false);
+    let (mut app, _) = on_feed(App::new(info(), 1, 1000, 0, false));
     app.update(Msg::Commits(Ok(Vec::new())));
     app.update(Msg::Worktree(Ok(None)));
     assert_eq!(app.update(key(KeyCode::Enter)), []);
     app.update(ch('n'));
-    app.update(ch('2'));
+    app.update(ch('3'));
     assert_eq!(app.update(key(KeyCode::Enter)), []);
     assert_eq!(app.update(ch('o')), []);
     assert_eq!(app.update(ch('e')), []);
-    app.update(ch('3'));
+    app.update(ch('4'));
     app.update(Msg::Files(Vec::new()));
     assert_eq!(app.update(key(KeyCode::Enter)), []);
     assert_eq!(app.update(ctrl('e')), []);
@@ -984,8 +1001,8 @@ fn file_view_ignores_unbound_keys() {
 
 #[test]
 fn deleting_a_word_after_a_wide_space_keeps_the_text_whole() {
-    let (mut app, _) = App::new(info(), 1, 100, 1_000, false);
-    app.update(ch('3'));
+    let (mut app, _) = on_feed(App::new(info(), 1, 100, 1_000, false));
+    app.update(ch('4'));
     for c in "a\u{a0}b".chars() {
         app.update(ch(c));
     }
@@ -998,4 +1015,187 @@ fn deleting_a_word_after_a_wide_space_keeps_the_text_whole() {
     }
     app.update(ctrl('w'));
     assert_eq!(app.search.query, "src/", "a slash ends a word too");
+}
+
+/// `n` numbered lines, `line 1` to `line n`.
+fn numbered(n: usize) -> String {
+    (1..=n).fold(String::new(), |mut acc, i| {
+        use std::fmt::Write;
+        let _ = writeln!(acc, "line {i}");
+        acc
+    })
+}
+
+/// The file viewer on top.
+fn file_view(app: &App) -> &FileView {
+    app.views
+        .last()
+        .and_then(View::as_file)
+        .unwrap_or_else(|| panic!("not in file view"))
+}
+
+#[test]
+fn an_open_file_reloads_when_it_changes_on_disk() {
+    let mut app = loaded();
+    assert_eq!(
+        app.update(Msg::Changed(BTreeSet::from([Change::Workdir])))
+            .iter()
+            .filter(|e| matches!(e, Effect::ReloadFile { .. }))
+            .count(),
+        0,
+        "nothing open, nothing to read"
+    );
+    app.update(Msg::File {
+        path: "src/a.rs".to_owned(),
+        content: Ok(numbered(50)),
+        line: 40,
+        marks: BTreeSet::new(),
+        root: None,
+    });
+    if let Some(View::File(f)) = app.views.last_mut() {
+        f.height = 10;
+    }
+    app.update(ch('v'));
+    assert!(file_view(&app).selection.is_some());
+
+    let effects = app.update(Msg::Changed(BTreeSet::from([Change::Workdir])));
+    let reload = Effect::ReloadFile {
+        path: "src/a.rs".to_owned(),
+        root: None,
+    };
+    assert!(effects.contains(&reload), "{effects:?}");
+
+    // The same text changes nothing, not even the selection.
+    app.update(Msg::FileReloaded {
+        path: "src/a.rs".to_owned(),
+        root: None,
+        content: Ok(numbered(50)),
+    });
+    assert!(file_view(&app).selection.is_some());
+
+    // Other files, and the same path in another checkout, are left alone.
+    for (path, root) in [("src/b.rs", None), ("src/a.rs", Some(PathBuf::from("/wt")))] {
+        app.update(Msg::FileReloaded {
+            path: path.to_owned(),
+            root,
+            content: Ok(numbered(3)),
+        });
+        assert_eq!(file_view(&app).text.len(), 50);
+    }
+
+    // New text: shown, the cursor and scroll kept as far as the file
+    // reaches, the selection dropped.
+    let (cursor, scroll) = (file_view(&app).cursor, file_view(&app).scroll);
+    app.update(Msg::FileReloaded {
+        path: "src/a.rs".to_owned(),
+        root: None,
+        content: Ok(numbered(60)),
+    });
+    let f = file_view(&app);
+    assert_eq!((f.text.len(), f.lines.len()), (60, 60));
+    assert_eq!((f.cursor, f.scroll), (cursor, scroll));
+    assert!(f.selection.is_none());
+
+    app.update(Msg::FileReloaded {
+        path: "src/a.rs".to_owned(),
+        root: None,
+        content: Ok(numbered(5)),
+    });
+    let f = file_view(&app);
+    assert_eq!((f.cursor, f.scroll), (4, 0), "clamped to the shorter file");
+
+    // A file that can no longer be read says why.
+    app.update(Msg::FileReloaded {
+        path: "src/a.rs".to_owned(),
+        root: None,
+        content: Err("gone".to_owned()),
+    });
+    let f = file_view(&app);
+    assert_eq!(f.notice.as_deref(), Some("gone"));
+    assert!(f.lines.is_empty() && f.text.is_empty());
+    assert_eq!((f.cursor, f.scroll), (0, 0));
+}
+
+#[test]
+fn a_file_opened_from_a_diff_marks_what_the_diff_adds_now() {
+    let mut app = loaded();
+    let wt = entry(crate::git::feed::WORKTREE_ID, 9_999, &["src/a.rs"]);
+    app.update(Msg::Worktree(Ok(Some(wt.clone()))));
+    app.update(Msg::Diff {
+        entry: Box::new(wt.clone()),
+        result: Ok(vec![file_diff("src/a.rs")]),
+        refresh: false,
+        file: None,
+    });
+    let open = app.update(key(KeyCode::Enter));
+    let [
+        Effect::OpenFile {
+            path, marks, root, ..
+        },
+    ] = &open[..]
+    else {
+        panic!("{open:?}")
+    };
+    assert_eq!(*marks, BTreeSet::from([2, 20]));
+    app.update(Msg::File {
+        path: path.clone(),
+        content: Ok(numbered(30)),
+        line: 2,
+        marks: marks.clone(),
+        root: root.clone(),
+    });
+
+    // The diff reloads under the file: its marks follow.
+    let mut grown = file_diff("src/a.rs");
+    grown.hunks[1].lines[0].new_no = Some(25);
+    app.update(Msg::Diff {
+        entry: Box::new(wt.clone()),
+        result: Ok(vec![grown]),
+        refresh: true,
+        file: None,
+    });
+    assert_eq!(file_view(&app).marks, BTreeSet::from([2, 25]));
+
+    // Once the diff no longer has the file, nothing is marked.
+    app.update(Msg::Diff {
+        entry: Box::new(wt),
+        result: Ok(vec![file_diff("src/other.rs")]),
+        refresh: true,
+        file: None,
+    });
+    assert!(file_view(&app).marks.is_empty());
+}
+
+#[test]
+fn a_file_not_opened_from_a_diff_keeps_its_marks() {
+    let mut app = loaded();
+    app.update(Msg::File {
+        path: "src/a.rs".to_owned(),
+        content: Ok(numbered(5)),
+        line: 1,
+        marks: BTreeSet::from([3]),
+        root: None,
+    });
+    app.update(Msg::FileReloaded {
+        path: "src/a.rs".to_owned(),
+        root: None,
+        content: Ok(numbered(6)),
+    });
+    assert_eq!(file_view(&app).marks, BTreeSet::from([3]));
+
+    // Nor one read from another checkout than the diff below it.
+    open_detail(&mut app);
+    app.update(Msg::File {
+        path: "src/a.rs".to_owned(),
+        content: Ok(numbered(5)),
+        line: 1,
+        marks: BTreeSet::from([4]),
+        root: Some(PathBuf::from("/wt")),
+    });
+    app.update(Msg::FileReloaded {
+        path: "src/a.rs".to_owned(),
+        root: Some(PathBuf::from("/wt")),
+        content: Ok(numbered(6)),
+    });
+    assert_eq!(file_view(&app).marks, BTreeSet::from([4]));
 }
