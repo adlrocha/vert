@@ -197,12 +197,19 @@ impl App {
     #[must_use]
     pub fn origin(&self, entry: &Entry) -> Option<Origin> {
         let branch = match entry.target {
+            // The rows match a pull request to its branch, never a fork's:
+            // the same match `locate` finds its checkout by. One without a
+            // local branch is named by its head, unless it is a fork's.
             Target::PullRequest(number) => self
                 .branches
-                .pulls
-                .iter()
-                .find(|p| p.number == number)
-                .map(|p| p.head.clone()),
+                .all_rows()
+                .into_iter()
+                .find(|r| r.pull.is_some_and(|p| p.number == number))
+                .and_then(|r| {
+                    r.branch
+                        .map(|b| b.name.clone())
+                        .or_else(|| r.pull.filter(|p| !p.fork).map(|p| p.head.clone()))
+                }),
             _ => Some(entry.branch()?.to_owned()),
         };
         Some(Origin {

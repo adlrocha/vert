@@ -512,6 +512,63 @@ fn a_line_of_work_opens_and_edits_its_files_in_its_checkout() {
 }
 
 #[test]
+fn a_fork_s_pull_request_is_never_its_namesake_branch() {
+    use crate::app::Checkout;
+    let mut app = blank_app();
+    with_lines_of_work(&mut app);
+    let mut fork = pull(12, "agent");
+    fork.fork = true;
+    app.update(Msg::Pulls(Ok((
+        "o/r".to_owned(),
+        vec![pull(7, "agent"), fork.clone()],
+    ))));
+    let origin = app.origin(&crate::app::pull_entry(&fork)).expect("#12");
+    assert_eq!(
+        origin.branch, None,
+        "agent is a local branch, not the fork's"
+    );
+    assert!(matches!(origin.checkout, Checkout::Missing(_)));
+    assert_eq!(
+        origin.fallback("#12").as_deref(),
+        Some("#12 isn't checked out, so this is the file in this checkout")
+    );
+    // A pull request without a local branch is named by its head.
+    let mut remote = pull(13, "remote-only");
+    app.update(Msg::Pulls(Ok(("o/r".to_owned(), vec![remote.clone()]))));
+    let origin = app.origin(&crate::app::pull_entry(&remote)).expect("#13");
+    assert_eq!(origin.branch.as_deref(), Some("remote-only"));
+    remote.fork = true;
+    app.update(Msg::Pulls(Ok(("o/r".to_owned(), vec![remote.clone()]))));
+    assert_eq!(
+        app.origin(&crate::app::pull_entry(&remote))
+            .expect("#13")
+            .branch,
+        None
+    );
+}
+
+#[test]
+fn a_branch_whose_worktree_went_opens_from_vert_s_checkout() {
+    let mut entry = range("agent");
+    entry.root = Some(PathBuf::from("/wt/agent-dir"));
+    let mut app = showing(entry);
+    with_lines_of_work(&mut app);
+    // The worktree is removed: the branch is no longer checked out.
+    app.update(Msg::Branches(Ok(Branches {
+        base: Some("main".to_owned()),
+        branches: vec![branch("agent", None)],
+    })));
+    match press(&mut app, KeyCode::Char('e')).as_slice() {
+        [Effect::Edit { root, .. }] => assert_eq!(root, &None),
+        other => panic!("expected an edit, got {other:?}"),
+    }
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("agent isn't checked out, so this is the file in this checkout")
+    );
+}
+
+#[test]
 fn a_file_opened_from_a_worktree_follows_its_diff() {
     let pr7 = crate::app::pull_entry(&pull(7, "agent"));
     let mut app = showing(pr7.clone());

@@ -441,19 +441,14 @@ pub struct DetailView {
 }
 
 impl DetailView {
-    /// The checkout its files open from (`o`, `e`): its branch's, when
-    /// that is checked out, else the change's own.
+    /// The checkout its files open from (`o`, `e`): for a branch or pull
+    /// request, its origin's (vert's own when it isn't checked out), else
+    /// the change's own.
     #[must_use]
     pub fn files_root(&self) -> Option<PathBuf> {
-        match &self.origin {
-            Some(
-                o @ Origin {
-                    checkout: Checkout::At(..),
-                    ..
-                },
-            ) => o.root(),
-            _ => self.entry.root.clone(),
-        }
+        self.origin
+            .as_ref()
+            .map_or_else(|| self.entry.root.clone(), Origin::root)
     }
 
     /// Indices of the files the filter shows, in order: every file when it
