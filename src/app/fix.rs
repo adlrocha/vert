@@ -218,6 +218,21 @@ impl App {
         })
     }
 
+    /// `entry` rooted where an agent reads its files: the checkout of its
+    /// branch or pull request when it has one, vert's own when it hasn't,
+    /// and its own root for anything else. Agents that explain or answer
+    /// only read, so a line of work that isn't checked out is read from
+    /// vert's checkout, with its diff in the prompt.
+    #[must_use]
+    pub fn rooted(&self, entry: &Entry) -> Entry {
+        Entry {
+            root: self
+                .origin(entry)
+                .map_or_else(|| entry.root.clone(), |o| o.root()),
+            ..entry.clone()
+        }
+    }
+
     /// Sets the agent fixes come from, or why there is none.
     pub fn set_fixer(&mut self, fixer: &Result<Fixer, String>) {
         self.fix.agent = Some(fixer.as_ref().map(Fixer::label).map_err(Clone::clone));

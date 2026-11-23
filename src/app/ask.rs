@@ -298,7 +298,7 @@ impl App {
         );
         let effect = Effect::Ask(Box::new(Ask {
             key,
-            entry: entry.clone(),
+            entry: self.rooted(&entry),
             files: files.clone(),
             explanation,
             earlier,
