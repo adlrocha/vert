@@ -461,7 +461,7 @@ impl App {
         if self.explain.asking.insert(key) {
             vec![Effect::Explain {
                 key,
-                entry: Box::new(entry.clone()),
+                entry: Box::new(self.rooted(entry)),
                 files: files.to_vec(),
                 fresh,
             }]
@@ -822,7 +822,7 @@ impl App {
             return Vec::new();
         };
         let question = question.to_owned();
-        let effect = Effect::Ask(Box::new(Ask {
+        let mut ask = Ask {
             key: v.key,
             entry: v.entry.clone(),
             files: v.files.clone(),
@@ -830,10 +830,11 @@ impl App {
             earlier: explanation.questions.clone(),
             about: None,
             question: question.clone(),
-        }));
+        };
         v.question = None;
         self.explain.questioning.insert(v.key, now);
-        vec![effect]
+        ask.entry = self.rooted(&ask.entry);
+        vec![Effect::Ask(Box::new(ask))]
     }
 
     /// The agent answered a question about the diff `key`: the answer joins

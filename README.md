@@ -251,7 +251,9 @@ nothing. In the diagram, `+` marks what the change added, `~` what it changed
 and `−` what it removed. `↺` points back to a box already drawn.
 
 **How the agent is run.** The agent runs in the checkout the change belongs
-to, with the prompt on standard input: the change's message and its diff,
+to: for a branch or pull request, the worktree its branch is checked out in,
+so the code it opens is the branch's; one that isn't checked out is read from
+vert's own checkout. The prompt goes on standard input: the change's message and its diff,
 with every hunk numbered. Claude Code, Codex and pi get read-only tools, so
 they can open the surrounding code but can't change it. No session is saved.
 These are the full commands:

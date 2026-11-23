@@ -1249,3 +1249,85 @@ fn the_file_viewer_opened_from_a_diff_fixes_its_lines_or_the_file() {
         "the file's hunks"
     );
 }
+
+#[test]
+fn explanations_and_questions_run_where_a_line_of_work_is_checked_out() {
+    // Where the agent explaining `x`, or answering a question from the
+    // diff (`a`) or the explanation (`a`), runs for each change.
+    let mut gone = range("agent");
+    gone.root = Some(PathBuf::from("/wt/removed"));
+    let mut elsewhere = commit();
+    elsewhere.root = Some(PathBuf::from("/wt/other"));
+    let cases = [
+        (
+            crate::app::pull_entry(&pull(7, "agent")),
+            Some("/wt/agent-dir"),
+        ),
+        (range("agent"), Some("/wt/agent-dir")),
+        (range("here"), None),
+        (crate::app::pull_entry(&pull(8, "loose")), None),
+        (Entry::blank(Target::PullRequest(99)), None),
+        (commit(), None),
+        (elsewhere, Some("/wt/other")),
+    ];
+    for (entry, expected) in cases {
+        let id = entry.id.clone();
+        let expected = expected.map(PathBuf::from);
+        let mut app = showing(entry);
+        with_lines_of_work(&mut app);
+        app.set_explainer(&Ok(crate::app::pi_for_tests()));
+
+        // A question from the diff.
+        press(&mut app, KeyCode::Char('a'));
+        typed(&mut app, "why?");
+        let (key, asked) = match press(&mut app, KeyCode::Enter).as_slice() {
+            [Effect::Ask(asked)] => (asked.key, asked.entry.root.clone()),
+            other => panic!("{id}: expected a question, got {other:?}"),
+        };
+        assert_eq!(asked, expected, "{id}: asked from the diff");
+        app.update(Msg::Answered {
+            key,
+            result: Err("no".to_owned()),
+        });
+        press(&mut app, KeyCode::Esc);
+
+        // The explanation, then a question about it.
+        let (key, explained) = match press(&mut app, KeyCode::Char('x')).as_slice() {
+            [Effect::Explain { key, entry, .. }] => (*key, entry.root.clone()),
+            other => panic!("{id}: expected an explanation, got {other:?}"),
+        };
+        assert_eq!(explained, expected, "{id}: explained");
+        let Some(View::Detail(d)) = app.views.iter().find(|v| matches!(v, View::Detail(_))) else {
+            panic!("{id}: the diff");
+        };
+        let files = d.files.clone();
+        app.update(Msg::Explained {
+            key,
+            result: Ok(crate::explain::Answer {
+                explanation: Explanation::validate(r#"{"intent": "x"}"#, &files).expect("valid"),
+                cached: false,
+                agent: None,
+            }),
+        });
+        press(&mut app, KeyCode::Char('a'));
+        typed(&mut app, "how?");
+        let followed = match press(&mut app, KeyCode::Enter).as_slice() {
+            [Effect::Ask(asked)] => asked.entry.root.clone(),
+            other => panic!("{id}: expected a follow-up, got {other:?}"),
+        };
+        assert_eq!(followed, expected, "{id}: asked about the explanation");
+    }
+
+    // A branch whose worktree went is read from vert's checkout.
+    let mut app = showing(gone);
+    with_lines_of_work(&mut app);
+    app.update(Msg::Branches(Ok(Branches {
+        base: Some("main".to_owned()),
+        branches: vec![branch("agent", None)],
+    })));
+    app.set_explainer(&Ok(crate::app::pi_for_tests()));
+    match press(&mut app, KeyCode::Char('x')).as_slice() {
+        [Effect::Explain { entry, .. }] => assert_eq!(entry.root, None),
+        other => panic!("expected an explanation, got {other:?}"),
+    }
+}
