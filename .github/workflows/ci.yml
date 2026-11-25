@@ -16,10 +16,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Pinned, so a new lint on the runner image can't fail unrelated changes. Bump deliberately.
+      RUST_VERSION: "1.99.1"
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_VERSION"
 
       - name: Format
         run: cargo fmt --check
