@@ -1,17 +1,11 @@
 # Read by nibble-review from the default branch, and by `nibble land` and `nibble sdlc`.
+# `nibble sdlc runbook` explains every setting. `mode = "off"` stops land here.
 [land]
-# "off", "shadow" (decide and report) or "enforce" (also merge what needs no one)
-mode = "shadow"
-# How much merges without a person: "side-project", "standard" or "critical"
-profile = "standard"
-# Checks that must pass. Nothing merges unattended until at least one is named.
-required_checks = []
-# true when main deploys to dev and a release deploys to production
-main_is_staging = false
-# Optional:
-# authors = ["you"]             # whose PRs may merge unattended; empty means any human
-# always_human = ["src/auth"]   # extra paths that always need a person
-# max_lines = 400               # a hard size limit
-#
-# [land.ask_when]               # situations the judge must send to a person
-# newsletter = "Changes who gets an email, or when"
+mode = "enforce"
+profile = "side-project"
+authors = ["adlrocha"]
+required_checks = ["test", "review"]
+always_human = ["install.sh", "src/explain/agent.rs", "src/explain/cache.rs", "src/git/commit.rs"]
+
+[land.ask_when]
+authority = "It widens what a coding agent may read, edit, or run, or what vert commits"
