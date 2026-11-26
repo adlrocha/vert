@@ -16,6 +16,7 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+  statuses: write
 
 jobs:
   review:
@@ -36,6 +37,7 @@ jobs:
       cancel-in-progress: true
     steps:
       # v1.2.0 — full SHA so a moved tag can never change what runs with the write token and model key. Bump deliberately.
-      - uses: adlrocha/nibble-review@ae7bc82986303cf0514856093e65ae4c005070ba
+      - uses: adlrocha/nibble-review@aa81f1ac033ebc5f86ed6114be7225bd2f78debe # v1.3.0
         with:
+          land: "true"
           api-key: ${{ secrets.OPENCODE_API_KEY }}
