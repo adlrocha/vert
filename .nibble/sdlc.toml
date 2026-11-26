@@ -5,7 +5,7 @@ mode = "enforce"
 profile = "side-project"
 authors = ["adlrocha"]
 required_checks = ["test", "review"]
-always_human = ["install.sh", "src/explain/agent.rs", "src/explain/cache.rs", "src/git/commit.rs"]
+always_human = [".nibble/risk.md", "install.sh", "src/explain/agent.rs", "src/explain/cache.rs", "src/git/commit.rs"]
 
 [land.ask_when]
 authority = "It widens what a coding agent may read, edit, or run, or what vert commits"
