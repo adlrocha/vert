@@ -40,6 +40,4 @@ jobs:
 
       # They clone this checkout by branch name, and CI checks out a bare commit.
       - name: Installer tests
-        run: |
-          git switch --quiet --force-create ci-head
-          tests/install_test.sh
+        run: tests/install_test.sh
