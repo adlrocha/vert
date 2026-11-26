@@ -63,7 +63,9 @@ cmp -s "$VERT_BIN_DIR/vert" "$ROOT/target/release/vert" || { echo "FAIL not repl
 # Managed checkout: clone from a local copy of this repository, then update it.
 REMOTE="$WORK/remote"
 git clone --quiet --bare "$ROOT" "$REMOTE"
-branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+# Publish the commit under test as its own branch, so a detached checkout (as in CI) works too.
+branch="install-test"
+git -C "$ROOT" push --quiet --force "$REMOTE" "HEAD:refs/heads/$branch"
 export VERT_REPO_URL="file://$REMOTE" VERT_REF="$branch"
 rm -f "$VERT_BIN_DIR/vert"
 check "clone install" "Cloning" "${install[@]}"

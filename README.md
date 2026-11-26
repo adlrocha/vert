@@ -509,9 +509,9 @@ checkout whose agent is idle.
 ## Development
 
 ```sh
-cargo test                                   # unit, render and doc tests
+cargo test --locked                          # unit, render and doc tests
 tests/install_test.sh                        # installer end-to-end tests
-cargo clippy --all-targets -- -D warnings    # pedantic lints, zero warnings
+cargo clippy --locked --all-targets -- -D warnings  # pedantic lints, zero warnings
 cargo fmt
 cargo llvm-cov --summary-only                # coverage
 ```

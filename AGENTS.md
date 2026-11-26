@@ -29,7 +29,7 @@ vert is a terminal UI that shows a live, labelled feed of a git repository's cha
 
 ## Verification
 
-Done means `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt` are clean. Installer changes also run `tests/install_test.sh`; use `cargo llvm-cov --summary-only` when coverage matters. Run the narrowest meaningful check while iterating, the full set before yielding.
+Done means `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo fmt` are clean. Installer changes also run `tests/install_test.sh`; use `cargo llvm-cov --summary-only` when coverage matters. Run the narrowest meaningful check while iterating, the full set before yielding.
 
 ## Commits and PRs
 
